@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "renderdoc-mcp"
+version = "0.1.0"
+description = "MCP server exposing RenderDoc replay introspection over HTTP /mcp"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "mcp>=1.10.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "typing-extensions>=4.8.0",
+    "starlette>=0.37.0",
+]
+
+[project.scripts]
+renderdoc-mcp = "renderdoc_mcp.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["renderdoc_mcp*"]

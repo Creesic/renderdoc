@@ -107,6 +107,12 @@ win32 {
 	QMAKE_CXXFLAGS_WARN_ON -= -w34100 
 	DEFINES += RENDERDOC_PLATFORM_WIN32
 
+	# After link: embed MCP (standalone CPython + renderdoc-mcp wheels) beside qrenderdoc.exe
+	rd_mcp_ps1=$$_PRO_FILE_PWD_/../util/bundle_renderdoc_mcp.ps1
+	rd_mcp_repo=$$_PRO_FILE_PWD_/..
+	rd_mcp_plat=x64
+	!contains(QMAKE_TARGET.arch, x86_64): rd_mcp_plat=Win32
+	QMAKE_POST_LINK += $$escape_expand(\\n\\tpowershell.exe -NoProfile -ExecutionPolicy Bypass -File $$shell_path($$rd_mcp_ps1) -RepoRoot $$shell_path($$rd_mcp_repo) -RuntimeDir $$shell_path($$DESTDIR) -VSPlatform $$rd_mcp_plat)
 } else {
 	isEmpty(CMAKE_DIR) {
 		error("When run from outside CMake, please set the Build Environment Variable CMAKE_DIR to point to your CMake build root. In Qt Creator add CMAKE_DIR=/path/to/renderdoc/build under 'Additional arguments' in the qmake Build Step. If running qmake directly, add CMAKE_DIR=/path/to/renderdoc/build/ to the command line.")
@@ -181,6 +187,7 @@ SOURCES += Code/qrenderdoc.cpp \
     Code/Interface/Analytics.cpp \
     Code/Interface/ShaderProcessingTool.cpp \
     Code/Interface/PersistantConfig.cpp \
+    Code/Interface/MCPServerManager.cpp \
     Code/Interface/RemoteHost.cpp \
     Styles/StyleData.cpp \
     Styles/RDStyle/RDStyle.cpp \
@@ -269,6 +276,7 @@ HEADERS += Code/CaptureContext.h \
     Code/Interface/QRDInterface.h \
     Code/Interface/Analytics.h \
     Code/Interface/PersistantConfig.h \
+    Code/Interface/MCPServerManager.h \
     Code/Interface/Extensions.h \
     Code/Interface/RemoteHost.h \
     Styles/StyleData.h \

@@ -1,0 +1,15 @@
+## Learned User Preferences
+
+- Wants RenderDoc MCP to be practical for non-experts: turn it on from the app without manual Python setup or terminal/curl workflows for normal use; expects enabling MCP to keep the HTTP server on the configured Settings port without extra manual connectivity steps.
+- Likes Ghidra-style controls for optional servers: an enable toggle, editable port, and a clear running or error state in the UI.
+- When wiring external editors (e.g. OpenCode), prefers local MCP via stdin/stdout (`--transport stdio`) over remote Streamable HTTP when the UI stalls on loading or enforces short timeouts.
+
+## Learned Workspace Facts
+
+- This checkout extends RenderDoc with an MCP server: the UI spawns a Python subprocess (`python -m renderdoc_mcp`) with `PYTHONPATH` pointing at directories next to the executable (`pymodules`, `mcp`, `mcp_site`); list `mcp` before `mcp_site` so imports resolve to the shipped package.
+- The Settings line that shows `http://127.0.0.1:<port>/mcp` is derived from the configured port; it is not a live health check. Streamable HTTP expects MCP `Accept` headers (including `application/json` and `text/event-stream`); naive `curl` often gets HTTP 406 while the listener is still up.
+- Windows MSBuild builds may set `PlatformToolset` (e.g. v145) when the solution defaults do not match the installed MSVC toolset; the bundled MCP Python artifacts are driven by `util/renderdoc_mcp_bundle.json` and `util/bundle_renderdoc_mcp.ps1` / `bundle_renderdoc_mcp.py`.
+- On Windows Development layouts, `_ctypes.pyd` may sit beside `qrenderdoc.exe`; if the bundled Python subprocess uses that folder as its working directory, the loader can prefer the wrong native extension versus `python\\DLLs`. Using working directory under `python/` when launching bundled `python.exe` avoids that clash.
+- Python SWIG `ResourceId` has no portable public ctor from raw integers across builds; this tree adds `ResourceId.FromUInt64` in `qrenderdoc/Code/pyrenderdoc/cosmetics.i`, and `renderdoc_mcp` rebuilds IDs from `ResourceId::…` / numeric strings via that path—rebuild pymodules after SWIG binding changes.
+- Replay Python bindings vary by build: driver name for a capture comes from the capture file (`DriverName` on the opened `ICaptureFile`), not `ReplayController.GetDriverName`; `SetFrameEvent` is void (do not treat `None` as failure); `GetBufferData` may be 2- or 3-argument; `PipeState.GetShaderEntryPoint` may return a plain string; pixel-history `ModificationValue` exposes RGBA in `.col` (not `.color`).
+- First successful MCP startup runs replay initialization in the server lifespan; remote MCP clients with very short default timeouts may appear stuck—raise the client timeout or use stdio transport instead of remote HTTP.

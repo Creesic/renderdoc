@@ -1,0 +1,32 @@
+{
+  "_comment": "Pinned python-build-standalone (astral-sh) payloads; update sha256 via published .sha256 sidecars when bumping artifacts.",
+  "release_tag": "20241206",
+  "python_version_major_minor": "3.12",
+  "base_url_template": "https://github.com/astral-sh/python-build-standalone/releases/download/{release_tag}",
+  "triplets": {
+    "windows_amd64": {
+      "artifact": "cpython-3.12.8+20241206-x86_64-pc-windows-msvc-install_only.tar.gz",
+      "sha256": "767b4be3ddf6b99e5ade519789c1615c191d8cf99d5aff4685cc18b48931f1e6"
+    },
+    "windows_x86": {
+      "artifact": "cpython-3.12.8+20241206-i686-pc-windows-msvc-install_only.tar.gz",
+      "sha256": "779ec88695201871ea503e9c3c257e1aac69f250e1780dccdca1378aa9027b91"
+    },
+    "linux_amd64": {
+      "artifact": "cpython-3.12.8+20241206-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "b9d6ee5ddac1198e72d53112698773fc8bb597de095592eb849ca794306699ba"
+    },
+    "linux_aarch64": {
+      "artifact": "cpython-3.12.8+20241206-aarch64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "ce674b55442b732973afb2932c281bb1ded4ad7e22bcf9b07071165770758c7e"
+    },
+    "macos_amd64": {
+      "artifact": "cpython-3.12.8+20241206-x86_64-apple-darwin-install_only.tar.gz",
+      "sha256": "3ba35c706577d755e8e52a4c161a042464577c0e695e2a605362fa469e26de10"
+    },
+    "macos_arm64": {
+      "artifact": "cpython-3.12.8+20241206-aarch64-apple-darwin-install_only.tar.gz",
+      "sha256": "e3c4aa607717b23903ca2650d5c3ee24f89b97543e2db2b0f463bddc7a9e92f3"
+    }
+  }
+}

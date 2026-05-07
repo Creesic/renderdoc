@@ -48,3 +48,6 @@ qrenderdoc/3rdparty/pyside
 .DS_Store
 plugins-*/
 __pycache__
+.renderdoc_mcp_cache/
+renderdoc-mcp/build/
+renderdoc-mcp/renderdoc_mcp.egg-info/

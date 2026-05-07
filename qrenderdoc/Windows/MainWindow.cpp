@@ -23,6 +23,8 @@
  ******************************************************************************/
 
 #include "MainWindow.h"
+#include <QApplication>
+#include <QCoreApplication>
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -109,7 +111,8 @@ void MainWindow::MakeNetworkRequest(QUrl url, std::function<void(QByteArray)> su
   emit networkRequestGet(url);
 }
 
-MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::MainWindow), m_Ctx(ctx)
+MainWindow::MainWindow(ICaptureContext &ctx)
+    : QMainWindow(NULL), ui(new Ui::MainWindow), m_Ctx(ctx), m_MCPServer(ctx, nullptr)
 {
   ui->setupUi(this);
 
@@ -216,6 +219,10 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
   statusProgress->setMinimumSize(QSize(200, 0));
   statusProgress->setMinimum(0);
   statusProgress->setMaximum(1000);
+
+  mcpStatusLabel = new QLabel(this);
+  mcpStatusLabel->setText(QString());
+  ui->statusBar->addPermanentWidget(mcpStatusLabel);
 
   statusIcon->setText(QString());
   statusIcon->setPixmap(QPixmap());
@@ -554,10 +561,21 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
   ui->extension_dummy_Help->setVisible(false);
 
   RegisterShortcut("ALT+R", this, [this](QWidget *) { contextChooser->click(); });
+
+  QObject::connect(&m_MCPServer, &MCPServerManager::stateChanged, this,
+                   &MainWindow::updateMCPStatusIndicator);
+  if(QApplication *qa = qApp)
+    QObject::connect(qa, &QCoreApplication::aboutToQuit, this,
+                     [this]() { m_MCPServer.stop(); });
+
+  m_MCPServer.applyConfig();
+  updateMCPStatusIndicator();
 }
 
 MainWindow::~MainWindow()
 {
+  m_MCPServer.stop();
+
   // close the network manager thread
   m_NetManagerThread->thread()->quit();
   m_NetManagerThread->deleteLater();
@@ -2915,7 +2933,20 @@ void MainWindow::on_action_Manage_Remote_Servers_triggered()
 void MainWindow::on_action_Settings_triggered()
 {
   SettingsDialog about(m_Ctx, this);
+  QObject::connect(&about, &SettingsDialog::mcpserverSettingsChanged, this, [this]() {
+    m_MCPServer.applyConfig();
+    updateMCPStatusIndicator();
+  });
   RDDialog::show(&about);
+}
+
+void MainWindow::updateMCPStatusIndicator()
+{
+  if(!mcpStatusLabel)
+    return;
+
+  mcpStatusLabel->setText(tr("MCP: %1").arg(m_MCPServer.statusSummary()));
+  mcpStatusLabel->setToolTip(m_MCPServer.statusToolTip());
 }
 
 void MainWindow::on_action_View_Documentation_triggered()

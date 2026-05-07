@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Generated Files">
@@ -447,6 +447,9 @@
     <ClCompile Include="$(IntDir)generated\moc_LiveCapture.cpp">
       <Filter>Generated Files</Filter>
     </ClCompile>
+    <ClCompile Include="$(IntDir)generated\moc_MCPServerManager.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
     <ClCompile Include="$(IntDir)generated\moc_MainWindow.cpp">
       <Filter>Generated Files</Filter>
     </ClCompile>
@@ -587,6 +590,9 @@
     </ClCompile>
     <ClCompile Include="$(IntDir)generated\moc_PythonContext.cpp">
       <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Code\Interface\MCPServerManager.cpp">
+      <Filter>Code\Interface</Filter>
     </ClCompile>
     <ClCompile Include="Code\Interface\PersistantConfig.cpp">
       <Filter>Code\Interface</Filter>
@@ -1079,6 +1085,9 @@
     <ClInclude Include="$(IntDir)generated\ui_FindReplace.h">
       <Filter>Generated Files</Filter>
     </ClInclude>
+    <ClInclude Include="Code\Interface\MCPServerManager.h">
+      <Filter>Code\Interface</Filter>
+    </ClInclude>
     <ClInclude Include="Code\Interface\PersistantConfig.h">
       <Filter>Code\Interface</Filter>
     </ClInclude>
@@ -1411,6 +1420,9 @@
     </CustomBuild>
     <CustomBuild Include="Code\QRDUtils.h">
       <Filter>Code</Filter>
+    </CustomBuild>
+    <CustomBuild Include="Code\Interface\MCPServerManager.h">
+      <Filter>Code\Interface</Filter>
     </CustomBuild>
     <CustomBuild Include="Widgets\ThumbnailStrip.h">
       <Filter>Widgets</Filter>

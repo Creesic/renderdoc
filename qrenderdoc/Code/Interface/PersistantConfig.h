@@ -612,6 +612,31 @@ DECLARE_REFLECTION_STRUCT(BugReport);
   CONFIG_SETTING_VAL(public, bool, bool, Tips_HasSeenFirst, false)                                 \
                                                                                                    \
   DOCUMENT(                                                                                        \
+      "``True`` if the MCP replay introspection HTTP server should be launched for AI tooling.\n"  \
+      "\n"                                                                                         \
+      "Defaults to ``False``."                                                                     \
+      ""                                                                                           \
+      ":type: bool");                                                                              \
+  CONFIG_SETTING_VAL(public, bool, bool, AI_MCP_Enabled, false)                                   \
+                                                                                                   \
+  DOCUMENT(                                                                                        \
+      "TCP port for the MCP HTTP endpoint ``http://127.0.0.1:<port>/mcp``.\n"                      \
+      "\n"                                                                                         \
+      "Defaults to ``8765``."                                                                      \
+      ""                                                                                           \
+      ":type: int");                                                                               \
+  CONFIG_SETTING_VAL(public, int, int, AI_MCP_Port, 8765)                                          \
+                                                                                                   \
+  DOCUMENT(                                                                                        \
+      "Optional path to a Python interpreter executable. When empty, RenderDoc searches ``PATH`` "    \
+      "for ``python3``, ``python``, or on Windows the ``py`` launcher.\n"                           \
+      "\n"                                                                                         \
+      "Defaults to empty."                                                                          \
+      ""                                                                                           \
+      ":type: str");                                                                               \
+  CONFIG_SETTING_VAL(public, QString, rdcstr, AI_MCP_PythonPath, "")                               \
+                                                                                                   \
+  DOCUMENT(                                                                                        \
       "``True`` if global hooking is enabled. Since it has potentially problematic side-effects "  \
       "and is dangerous, it requires explicit opt-in.\n"                                           \
       "\n"                                                                                         \

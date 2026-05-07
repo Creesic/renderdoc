@@ -25,12 +25,14 @@
 #pragma once
 
 #include <stdint.h>
+#include <QLabel>
 #include <QMainWindow>
 #include <QMutex>
 #include <QSemaphore>
 #include <QThread>
 #include <QTimer>
 #include <QUrl>
+#include "Code/Interface/MCPServerManager.h"
 #include "Code/Interface/QRDInterface.h"
 #include "toolwindowmanager/ToolWindowManager.h"
 
@@ -200,6 +202,8 @@ private slots:
   void contextChooser_menuShowing();
   void updateToolsMenuOptions();
 
+  void updateMCPStatusIndicator();
+
   void ClearRecentCaptureFiles();
   void ClearRecentCaptureSettings();
 
@@ -239,6 +243,7 @@ private:
 
   Ui::MainWindow *ui;
   ICaptureContext &m_Ctx;
+  MCPServerManager m_MCPServer;
 
   QList<LiveCapture *> m_LiveCaptures;
 
@@ -249,6 +254,7 @@ private:
   RDLabel *statusIcon;
   RDLabel *statusText;
   QProgressBar *statusProgress;
+  QLabel *mcpStatusLabel = nullptr;
   RDMenu *contextChooserMenu;
   QToolButton *contextChooser;
 

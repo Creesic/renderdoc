@@ -1,0 +1,143 @@
+# RenderDoc MCP (replay-backed)
+
+Expose RenderDoc **replay introspection** to MCP clients over **Streamable HTTP** at `http://<host>:<port>/mcp` — structured JSON tools for pipeline state, resources, textures, buffers, pixel history, mesh previews, shaders, and good-vs-bad capture diffs.
+
+This package does **not** automate the RenderDoc GUI; it wraps the same **`renderdoc` Python module** shipped as **`pymodules`** next to a RenderDoc build.
+
+## Using qrenderdoc (recommended)
+
+1. Build or install RenderDoc so **`qrenderdoc`** sits next **`pymodules/`** (same layout as always).
+2. Open **Settings → MCP**, enable **Enable MCP server**, pick a **Port** (default `8765`), and optionally set **Python executable** if `python3` / `python` / `py` is not on `PATH`.
+3. Confirm status on the **main window status bar** (`MCP: Running`, etc.). The endpoint is shown in Settings as `http://127.0.0.1:<port>/mcp`.
+4. Point your MCP client at that URL (e.g. Cursor). The GUI launches `python -m renderdoc_mcp` with `PYTHONPATH` including `pymodules`, **`mcp/`** (this package), and optional **`mcp_site/`** when shipped.
+
+**CMake packagers:** `install()` copies `renderdoc_mcp` under `prefix/bin/mcp/`. Enable **`RENDERDOC_BUNDLE_MCP_PYTHON_SITE`** to run `pip install --target` during the build and install vendored wheels under **`prefix/bin/mcp_site/`** for fewer host Python dependencies.
+
+## Prerequisites
+
+1. A RenderDoc build with **`pymodules`** (e.g. `…/bin/x64/Development/pymodules` on Windows).
+2. GPU/driver capable of replaying your captures locally.
+3. **Python 3.10+** on `PATH` (or explicit path in Settings) with MCP dependencies installed, **unless** your distribution shipped **`mcp_site/`** via the CMake bundle option above.
+
+## Install
+
+From this directory:
+
+```bash
+pip install -e .
+```
+
+## Run
+
+**Windows (PowerShell):**
+
+```powershell
+$env:PYTHONPATH="C:\path\to\RenderDoc\x64\Development\pymodules"
+python -m renderdoc_mcp --host 127.0.0.1 --port 8765
+```
+
+**Linux:**
+
+```bash
+PYTHONPATH=/path/to/renderdoc/bin/Linux/Debug/pymodules python3 -m renderdoc_mcp --host 127.0.0.1 --port 8765
+```
+
+### StdIO (recommended for editors that spawn MCP locally)
+
+Agents like **OpenCode** often use MCP over process **stdin/stdout** when configured as `"type": "local"`. Prefer this over TCP — it avoids Streamable HTTP / SSE negotiation quirks and flaky remote timeouts.
+
+Use the same `PYTHONPATH` as above (ensure **`mcp`** appears **before** **`mcp_site`** so imports resolve to the shipped package beside the build):
+
+```powershell
+cd C:\path\to\RenderDoc\x64\Development
+$env:PYTHONPATH="pymodules;mcp;mcp_site"
+$env:RENDERDOC_MCP_APPDIR=(Get-Location).Path
+.\python\python.exe -m renderdoc_mcp --transport stdio
+```
+
+OpenCode `config.json` example (adjust paths):
+
+```jsonc
+"mcp": {
+  "renderdoc": {
+    "type": "local",
+    "command": [
+      "C:\\path\\to\\RenderDoc\\x64\\Development\\python\\python.exe",
+      "-m",
+      "renderdoc_mcp",
+      "--transport",
+      "stdio"
+    ],
+    "environment": {
+      "PYTHONPATH": "pymodules;mcp;mcp_site",
+      "PYTHONUTF8": "1",
+      "RENDERDOC_MCP_APPDIR": "C:\\path\\to\\RenderDoc\\x64\\Development"
+    },
+    "enabled": true,
+    "timeout": 120000
+  }
+}
+```
+
+If OpenCode supports a **`cwd`** for the child process, set it to **`…\\Development\\python`** on Windows when using bundled `python.exe` so a stray **`_ctypes.pyd`** next to **`qrenderdoc.exe`** does not shadow the interpreter’s **`DLLs`**.
+
+### Remote URL (Streamable HTTP)
+
+Editors with **`type: "remote"`** must speak MCP **Streamable HTTP** (correct `Accept` headers, session IDs). A plain **`curl`** to **`GET /mcp`** may return **406** — wrong headers, not necessarily a dead listener.
+
+The server finishes **`initialize` / `tools/list` immediately**: **`InitialiseReplay`** runs on the **first replay tool call**, not during HTTP startup (Tracy-style — listen first, heavy work later). That avoids remote clients timing out while the UI still shows “loading…”.
+
+**OpenCode tips:** use **`"oauth": false`** for trivial localhost servers, **`"timeout": 120000`** if the editor defaults are short, and **`opencode mcp debug …`** when diagnosing transport issues. Prefer **local + stdio** if your editor supports it.
+
+Then configure your MCP client (e.g. Cursor) with URL:
+
+```text
+http://127.0.0.1:8765/mcp
+```
+
+## Tools
+
+| Tool | Purpose |
+|------|---------|
+| `open_capture` | Load `.rdc`, returns `capture_id` |
+| `close_capture` | Release replay resources |
+| `list_events` | Filter/search frame actions + marker stacks |
+| `set_event` | Replay to `event_id` |
+| `get_pipeline_state` | Normalized RTs/depth, viewport/scissor, raster/blend/depth, shaders/bindings |
+| `get_bound_resources` | Descriptor/bind summaries merged across stages |
+| `list_resources` | Resources optionally filtered by `resource_type` |
+| `get_resource_usages` | Per-resource usage timeline (`event_id`, usage enum) |
+| `analyze_texture` | mip/slice stats: min/max/mean channels, black ratio, NaN count |
+| `save_texture` | Export PNG/JPEG/HDR/DDS/BMP via `TextureSave` |
+| `read_buffer` | `GetBufferData` as hex preview + base64 (size capped) |
+| `pixel_history` | Structured pixel modifications (+ optional `event_id`) |
+| `diff_pipeline_state` | Deep diff of normalized pipeline snapshots |
+| `diff_texture_stats` | Compare `analyze_texture`-style stats good vs bad |
+| `decode_mesh_inputs` | Vertex layout + indexbuffer summary + vertex previews |
+| `get_shader` | Shader IDs + optional disassembly/reflection |
+| `get_shader_reflection` | Constant buffers / binding names summary |
+| `analyze_draw_visibility` | `SamplesPassed` counter when available + viewport/scissor heuristics |
+
+## Smoke check
+
+With `PYTHONPATH` set so `import renderdoc` succeeds:
+
+```bash
+python -c "from renderdoc_mcp.server import build_mcp; build_mcp(); print('ok')"
+```
+
+Or:
+
+```bash
+python scripts/smoke_import.py
+```
+
+## Limitations
+
+- **`SamplesPassed`** and **pixel history** may be unavailable or slow depending on API/GPU.
+- **`decode_mesh_inputs`** rejects instanced draws (same as upstream decode_mesh sample).
+- Replay APIs must run serialized; the server uses a lock around all tools.
+
+## License
+
+MIT (consistent with RenderDoc).

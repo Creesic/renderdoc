@@ -140,6 +140,10 @@
       <PreprocessorDefinitions>_WINDOWS;UNICODE;WIN32;RENDERDOC_PLATFORM_WIN32;QT_WIDGETS_LIB;QT_GUI_LIB;QT_CORE_LIB;QT_SVG_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(SolutionDir)\renderdoc\api\replay</AdditionalIncludeDirectories>
     </ResourceCompile>
+    <PostBuildEvent>
+      <Message>Bundling embedded Python + MCP (first build downloads ~40MiB toolchain archive once).</Message>
+      <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$([System.String]::Copy('$(SolutionDir)').TrimEnd('\'))\util\bundle_renderdoc_mcp.ps1" -RepoRoot "$([System.String]::Copy('$(SolutionDir)').TrimEnd('\'))" -RuntimeDir "$([System.String]::Copy('$(OutDir)').TrimEnd('\'))" -VSPlatform "$(Platform)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='QTDebug'">
     <ClCompile>
@@ -594,6 +598,7 @@
     </ClCompile>
     <ClCompile Include="Code\BufferFormatter.cpp" />
     <ClCompile Include="Code\Interface\Analytics.cpp" />
+    <ClCompile Include="Code\Interface\MCPServerManager.cpp" />
     <ClCompile Include="Code\Interface\PersistantConfig.cpp" />
     <ClCompile Include="Code\Interface\QRDInterface.cpp" />
     <ClCompile Include="Code\Interface\RemoteHost.cpp" />
@@ -638,6 +643,7 @@
     <ClCompile Include="$(IntDir)generated\moc_EnvironmentEditor.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_OrderedListEditor.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_MarkerBreadcrumbs.cpp" />
+    <ClCompile Include="$(IntDir)generated\moc_MCPServerManager.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_RemoteManager.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_ExtensionManager.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_PerformanceCounterSelection.cpp" />
@@ -948,6 +954,7 @@
     </CustomBuild>
     <ClInclude Include="3rdparty\flowlayout\FlowLayout.h" />
     <ClInclude Include="Code\Interface\Analytics.h" />
+    <ClInclude Include="Code\Interface\MCPServerManager.h" />
     <ClInclude Include="Code\Interface\PersistantConfig.h" />
     <ClInclude Include="Code\Interface\QRDInterface.h" />
     <ClInclude Include="Code\Interface\RemoteHost.h" />
@@ -1314,6 +1321,12 @@
       <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
     </CustomBuild>
     <CustomBuild Include="Windows\Dialogs\RemoteManager.h">
+      <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
+      <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>
+      <Message>MOC %(Filename).h</Message>
+      <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
+    </CustomBuild>
+    <CustomBuild Include="Code\Interface\MCPServerManager.h">
       <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
       <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>
       <Message>MOC %(Filename).h</Message>

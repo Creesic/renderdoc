@@ -48,6 +48,9 @@ public:
 
   void focusItem(QString item);
 
+signals:
+  void mcpserverSettingsChanged();
+
 private slots:
   // automatic slots
 
@@ -115,6 +118,10 @@ private slots:
   void on_Android_SDKPath_textEdited(const QString &sdk);
   void on_Android_JDKPath_textEdited(const QString &jdk);
 
+  void on_AI_MCP_Enabled_toggled(bool checked);
+  void on_AI_MCP_Port_valueChanged(int value);
+  void on_AI_MCP_PythonPath_textEdited(const QString &text);
+
   // manual slots
   void formatter_valueChanged(int value);
   void on_Formatter_OffsetSizeDisplayMode_currentIndexChanged(int index);
@@ -123,6 +130,8 @@ private slots:
 
 private:
   Ui::SettingsDialog *ui;
+
+  void refreshMCPUrlLabel();
 
   void addProcessor(const ShaderProcessingTool &disasm);
   bool editTool(int existing, ShaderProcessingTool &disasm);

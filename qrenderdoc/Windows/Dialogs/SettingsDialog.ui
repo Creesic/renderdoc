@@ -1242,6 +1242,121 @@ Only happens if the capture is not in the recent files list.</string>
        </item>
       </layout>
      </widget>
+     <widget class="QWidget" name="mcpTab">
+      <attribute name="title">
+       <string>MCP</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="mcpVBox">
+       <property name="leftMargin">
+        <number>0</number>
+       </property>
+       <property name="topMargin">
+        <number>0</number>
+       </property>
+       <property name="rightMargin">
+        <number>0</number>
+       </property>
+       <property name="bottomMargin">
+        <number>0</number>
+       </property>
+       <item>
+        <widget class="QGroupBox" name="groupBox_MCP">
+         <property name="title">
+          <string>Model Context Protocol server</string>
+         </property>
+         <layout class="QGridLayout" name="gridLayout_MCP">
+          <item row="0" column="0">
+           <widget class="QLabel" name="label_AI_MCP_desc">
+            <property name="text">
+             <string>Expose RenderDoc replay introspection over HTTP for AI tools (local-only).</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0" colspan="2">
+           <widget class="QLabel" name="label_AI_MCP_bundled">
+            <property name="text">
+             <string>This build includes Python next to qrenderdoc for MCP. Leave Python executable empty to use it automatically.</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QCheckBox" name="AI_MCP_Enabled">
+            <property name="text">
+             <string>Enable MCP server</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="label_AI_MCP_Port">
+            <property name="text">
+             <string>Port</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <widget class="QSpinBox" name="AI_MCP_Port">
+            <property name="minimum">
+             <number>1024</number>
+            </property>
+            <property name="maximum">
+             <number>65535</number>
+            </property>
+            <property name="value">
+             <number>8765</number>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="0" colspan="2">
+           <widget class="QLabel" name="AI_MCP_URL">
+            <property name="text">
+             <string>http://127.0.0.1:8765/mcp</string>
+            </property>
+            <property name="textInteractionFlags">
+             <set>Qt::TextSelectableByMouse</set>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="0">
+           <widget class="QLabel" name="label_AI_MCP_PythonPath">
+            <property name="toolTip">
+             <string>Optional. Overrides the bundled interpreter. When empty and no bundle is present, RenderDoc searches PATH for python3, python, or (Windows) py.</string>
+            </property>
+            <property name="text">
+             <string>Python executable (optional)</string>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="1">
+           <widget class="QLineEdit" name="AI_MCP_PythonPath">
+            <property name="toolTip">
+             <string>Leave empty to use the interpreter shipped with this RenderDoc build, or system Python on PATH if no bundle exists.</string>
+            </property>
+           </widget>
+          </item>
+          <item row="6" column="0" colspan="2">
+           <spacer name="verticalSpacer_MCP">
+            <property name="orientation">
+             <enum>Qt::Vertical</enum>
+            </property>
+            <property name="sizeHint" stdset="0">
+             <size>
+              <width>20</width>
+              <height>200</height>
+             </size>
+            </property>
+           </spacer>
+          </item>
+         </layout>
+        </widget>
+       </item>
+      </layout>
+     </widget>
      <widget class="QWidget" name="androidTab">
       <attribute name="title">
        <string>Android</string>

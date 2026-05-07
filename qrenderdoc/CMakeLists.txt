@@ -431,6 +431,60 @@ if(APPLE AND CMAKE_GENERATOR STREQUAL "Xcode")
     source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${THIRDPARTY_FILES})
 endif()
 
+option(RENDERDOC_EMBED_MCP_PYTHON "Embed standalone CPython + MCP deps next to qrenderdoc (HTTPS at build-time)" ON)
+
+# Obsolete: prefer RENDERDOC_EMBED_MCP_PYTHON. Kept so old cache entries do not error.
+option(RENDERDOC_BUNDLE_MCP_PYTHON_SITE "Legacy no-op; MCP embedding is handled by RENDERDOC_EMBED_MCP_PYTHON" OFF)
+if(RENDERDOC_BUNDLE_MCP_PYTHON_SITE)
+    message(WARNING "RENDERDOC_BUNDLE_MCP_PYTHON_SITE is obsolete (ignored). Use RENDERDOC_EMBED_MCP_PYTHON instead.")
+endif()
+
+set(RENDERDOC_MCP_SRC "${CMAKE_SOURCE_DIR}/renderdoc-mcp")
+
+if(APPLE AND ENABLE_QRENDERDOC)
+    set(RENDERDOC_MCP_RUNTIME_DIR "${CMAKE_BINARY_DIR}/bin/qrenderdoc.app/Contents/MacOS")
+else()
+    set(RENDERDOC_MCP_RUNTIME_DIR "${CMAKE_BINARY_DIR}/bin")
+endif()
+
+if(EXISTS "${RENDERDOC_MCP_SRC}/renderdoc_mcp/__init__.py")
+    if(NOT RENDERDOC_EMBED_MCP_PYTHON)
+        message(WARNING
+            "RENDERDOC_EMBED_MCP_PYTHON=OFF: the UI can still enable MCP, but you must supply Python on PATH "
+            "or run util/bundle_renderdoc_mcp.py (or util/bundle_renderdoc_mcp.ps1 on Windows MSVC) yourself. "
+            "Air-gapped: place the matching .tar.gz under RENDERDOC_MCP_CACHE or pass --offline-archive, "
+            "and set RENDERDOC_MCP_SKIP_HASH=1 if you cannot verify SHA256.")
+        install(DIRECTORY "${RENDERDOC_MCP_SRC}/renderdoc_mcp" DESTINATION bin/mcp)
+    else()
+        set(RENDERDOC_MCP_EMBED_STAMP "${CMAKE_BINARY_DIR}/renderdoc_mcp_embed.stamp")
+        add_custom_command(
+            OUTPUT "${RENDERDOC_MCP_EMBED_STAMP}"
+            COMMAND ${CMAKE_COMMAND} -E env PYTHONUNBUFFERED=1
+                    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/util/bundle_renderdoc_mcp.py"
+                    --repo-root "${CMAKE_SOURCE_DIR}" --runtime-dir "${RENDERDOC_MCP_RUNTIME_DIR}" --quiet
+            COMMAND ${CMAKE_COMMAND} -E touch "${RENDERDOC_MCP_EMBED_STAMP}"
+            DEPENDS "${CMAKE_SOURCE_DIR}/util/bundle_renderdoc_mcp.py"
+                    "${CMAKE_SOURCE_DIR}/util/renderdoc_mcp_bundle.json"
+                    "${RENDERDOC_MCP_SRC}/pyproject.toml"
+            COMMENT "Embedding standalone CPython + MCP under ${RENDERDOC_MCP_RUNTIME_DIR}"
+            VERBATIM)
+        add_custom_target(embed-renderdoc-mcp DEPENDS "${RENDERDOC_MCP_EMBED_STAMP}")
+        add_dependencies(build-qrenderdoc embed-renderdoc-mcp)
+
+        if(APPLE AND ENABLE_QRENDERDOC)
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/python/" DESTINATION bin/qrenderdoc.app/Contents/MacOS/python/)
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/mcp/" DESTINATION bin/qrenderdoc.app/Contents/MacOS/mcp/)
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/mcp_site/" DESTINATION bin/qrenderdoc.app/Contents/MacOS/mcp_site/)
+        else()
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/python/" DESTINATION bin/python/)
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/mcp/" DESTINATION bin/mcp/)
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/mcp_site/" DESTINATION bin/mcp_site/)
+        endif()
+    endif()
+else()
+    message(WARNING "renderdoc-mcp sources not found under ${RENDERDOC_MCP_SRC}; MCP package will not be installed next to qrenderdoc.")
+endif()
+
 install (PROGRAMS ${CMAKE_BINARY_DIR}/bin/qrenderdoc DESTINATION bin)
 
 # Install supporting files for file associations etc

@@ -252,6 +252,8 @@ void PersistantConfig::applyValues(const QVariantMap &values)
   // 25% - 400%
   Font_GlobalScale = qBound(0.25f, Font_GlobalScale, 4.0f);
 
+  AI_MCP_Port = qBound(1024, AI_MCP_Port, 65535);
+
   // port old values that were saved here but are now saved in core.
   // We only want to do this once, but we want to leave these values in the config to allow for
   // people running old versions after running a new version - we don't want to remove all of their

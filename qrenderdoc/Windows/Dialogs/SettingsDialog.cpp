@@ -25,6 +25,7 @@
 #include "SettingsDialog.h"
 #include <float.h>
 #include <math.h>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QKeyEvent>
 #include <QTextEdit>
@@ -35,6 +36,7 @@
 #include "Widgets/OrderedListEditor.h"
 #include "Widgets/ReplayOptionsSelector.h"
 #include "CaptureDialog.h"
+#include "Code/Interface/MCPServerManager.h"
 #include "ConfigEditor.h"
 #include "ui_SettingsDialog.h"
 
@@ -314,6 +316,12 @@ SettingsDialog::SettingsDialog(ICaptureContext &ctx, QWidget *parent)
   ui->Formatter_PosExp->setValue(m_Ctx.Config().Formatter_PosExp);
   ui->Formatter_OffsetSizeDisplayMode->setCurrentIndex(
       (int)m_Ctx.Config().Formatter_OffsetSizeDisplayMode);
+
+  ui->AI_MCP_Enabled->setChecked(m_Ctx.Config().AI_MCP_Enabled);
+  ui->AI_MCP_Port->setValue(m_Ctx.Config().AI_MCP_Port);
+  ui->AI_MCP_PythonPath->setText(m_Ctx.Config().AI_MCP_PythonPath);
+  refreshMCPUrlLabel();
+  ui->label_AI_MCP_bundled->setVisible(!MCPServerManager::bundledPythonExecutablePath().isEmpty());
 
   if(!RENDERDOC_CanGlobalHook())
   {
@@ -1354,6 +1362,48 @@ void SettingsDialog::on_Android_JDKPath_textEdited(const QString &jdk)
     RENDERDOC_SetConfigSetting("Android.JDKDirPath")->data.str = jdk;
 
     RENDERDOC_SaveConfigSettings();
+  }
+}
+
+void SettingsDialog::refreshMCPUrlLabel()
+{
+  const int port = ui->AI_MCP_Port->value();
+  ui->AI_MCP_URL->setText(lit("http://127.0.0.1:%1/mcp").arg(port));
+}
+
+void SettingsDialog::on_AI_MCP_Enabled_toggled(bool checked)
+{
+  Q_UNUSED(checked);
+  if(m_Init)
+    return;
+
+  m_Ctx.Config().AI_MCP_Enabled = ui->AI_MCP_Enabled->isChecked();
+  m_Ctx.Config().Save();
+  emit mcpserverSettingsChanged();
+}
+
+void SettingsDialog::on_AI_MCP_Port_valueChanged(int value)
+{
+  Q_UNUSED(value);
+  if(m_Init)
+    return;
+
+  m_Ctx.Config().AI_MCP_Port = ui->AI_MCP_Port->value();
+  m_Ctx.Config().Save();
+  refreshMCPUrlLabel();
+  emit mcpserverSettingsChanged();
+}
+
+void SettingsDialog::on_AI_MCP_PythonPath_textEdited(const QString &text)
+{
+  if(m_Init)
+    return;
+
+  if(QFileInfo::exists(text) || text.trimmed().isEmpty())
+  {
+    m_Ctx.Config().AI_MCP_PythonPath = text;
+    m_Ctx.Config().Save();
+    emit mcpserverSettingsChanged();
   }
 }
 

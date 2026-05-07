@@ -11,6 +11,15 @@
 
 %extend ResourceId {
 
+// Python/agents need to rebuild IDs from ResourceId::%llu strings or bare integers; there is no
+// public C++ ctor from uint64_t, but ResourceId is standard-layout identical to unsigned long long.
+static ResourceId FromUInt64(unsigned long long raw)
+{
+  ResourceId ret;
+  memcpy(&ret, &raw, sizeof(ResourceId));
+  return ret;
+}
+
 PyObject *__lt__(PyObject *other)
 {
   bool result = false;
@@ -37,6 +46,8 @@ fail:
 } // %extend ResourceId
 
 %wrapper %{
+#include <cstring>
+
 static PyObject *result_str(PyObject *resid)
 {
   void *resptr = NULL;
