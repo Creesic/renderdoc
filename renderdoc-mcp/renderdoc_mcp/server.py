@@ -293,7 +293,15 @@ def build_mcp() -> FastMCP:
                     return R.err("bad_resource_id", str(ex))
                 usages = sess.controller.GetUsage(rid)
                 rows = [{"event_id": int(u.eventId), "usage": rdutil.enum_name(u.usage)} for u in usages]
-                return R.ok({"resource_id": resource_id, "usages": rows[:5000], "truncated": len(rows) > 5000})
+                payload: dict[str, Any] = {
+                    "resource_id": resource_id,
+                    "usages": rows[:5000],
+                    "truncated": len(rows) > 5000,
+                }
+                rn = rdutil.resource_name_for(sess.controller, rid)
+                if rn:
+                    payload["resource_name"] = rn
+                return R.ok(payload)
 
             return await asyncio.to_thread(_go)
 
@@ -326,6 +334,9 @@ def build_mcp() -> FastMCP:
                     raw = sess.controller.GetTextureData(rid, sub)
                     stats = analyze_texture_bytes(tex, raw)
                     stats["resource_id"] = resource_id
+                    rname = rdutil.resource_name_for(sess.controller, rid)
+                    if rname:
+                        stats["resource_name"] = rname
                     stats["capture_id"] = capture_id
                     stats["event_id"] = int(event_id)
                 except Exception as ex:
@@ -379,7 +390,11 @@ def build_mcp() -> FastMCP:
                     ok_res = res.code == rd.ResultCode.Succeeded
                 if not ok_res:
                     return R.err("save_texture_failed", str(res))
-                return R.ok({"path": path, "resource_id": resource_id, "event_id": int(event_id)})
+                saved: dict[str, Any] = {"path": path, "resource_id": resource_id, "event_id": int(event_id)}
+                svname = rdutil.resource_name_for(sess.controller, rid)
+                if svname:
+                    saved["resource_name"] = svname
+                return R.ok(saved)
 
             return await asyncio.to_thread(_go)
 
@@ -406,16 +421,18 @@ def build_mcp() -> FastMCP:
                 ln = min(int(length), int(max_bytes), 4 * 1024 * 1024)
                 data = rdutil.controller_get_buffer_data(sess.controller, rid, int(offset), ln)
                 preview = data[:512]
-                return R.ok(
-                    {
-                        "resource_id": resource_id,
-                        "offset": int(offset),
-                        "requested_length": ln,
-                        "byte_length": len(data),
-                        "hex_preview": preview.hex(),
-                        "base64": base64.b64encode(data).decode("ascii"),
-                    }
-                )
+                buf_out: dict[str, Any] = {
+                    "resource_id": resource_id,
+                    "offset": int(offset),
+                    "requested_length": ln,
+                    "byte_length": len(data),
+                    "hex_preview": preview.hex(),
+                    "base64": base64.b64encode(data).decode("ascii"),
+                }
+                bfname = rdutil.resource_name_for(sess.controller, rid)
+                if bfname:
+                    buf_out["resource_name"] = bfname
+                return R.ok(buf_out)
 
             return await asyncio.to_thread(_go)
 
@@ -453,6 +470,9 @@ def build_mcp() -> FastMCP:
                 norm = normalize_pixel_history(hist)
                 norm["capture_id"] = capture_id
                 norm["resource_id"] = resource_id
+                pxname = rdutil.resource_name_for(sess.controller, rid)
+                if pxname:
+                    norm["resource_name"] = pxname
                 norm["coordinates"] = {"x": int(x), "y": int(y)}
                 return R.ok(norm)
 
@@ -576,10 +596,10 @@ def build_mcp() -> FastMCP:
                 out: dict[str, Any] = {
                     "bound": True,
                     "stage": stage,
-                    "resource_id": rdutil.rid_str(refl.resourceId),
                 }
+                rdutil.enrich_resource_dict(sess.controller, out, refl.resourceId)
                 if include_reflection:
-                    out["reflection"] = serialize_shader_reflection_summary(refl)
+                    out["reflection"] = serialize_shader_reflection_summary(refl, sess.controller)
                 if include_disassembly:
                     pipe_obj = pipe.GetGraphicsPipelineObject()
                     if pipe_obj == rd.ResourceId.Null():
@@ -613,14 +633,10 @@ def build_mcp() -> FastMCP:
                 refl = pipe.GetShaderReflection(st)
                 if refl is None:
                     return R.ok({"bound": False, "stage": stage})
-                return R.ok(
-                    {
-                        "bound": True,
-                        "stage": stage,
-                        "resource_id": rdutil.rid_str(refl.resourceId),
-                        "reflection": serialize_shader_reflection_summary(refl),
-                    }
-                )
+                sref: dict[str, Any] = {"bound": True, "stage": stage}
+                rdutil.enrich_resource_dict(sess.controller, sref, refl.resourceId)
+                sref["reflection"] = serialize_shader_reflection_summary(refl, sess.controller)
+                return R.ok(sref)
 
             return await asyncio.to_thread(_go)
 

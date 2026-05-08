@@ -112,6 +112,56 @@ def rid_str(rid: Any) -> str:
     return str(rid)
 
 
+def resource_name_map(controller: Any) -> dict[str, str]:
+    """Map ``rid_str`` -> capture resource name (from ``GetResources``), cached on ``controller``."""
+    cached = getattr(controller, "_mcp_resource_name_by_rid_str", None)
+    if isinstance(cached, dict):
+        return cached
+    m: dict[str, str] = {}
+    try:
+        for res in controller.GetResources():
+            key = rid_str(getattr(res, "resourceId", None))
+            if key in ("", "Null"):
+                continue
+            raw = getattr(res, "name", None)
+            m[key] = str(raw) if raw is not None else ""
+    except Exception:
+        m = {}
+    setattr(controller, "_mcp_resource_name_by_rid_str", m)
+    return m
+
+
+def resource_name_for(controller: Any, rid: Any) -> str:
+    """Human-readable resource name from capture metadata; empty string if unknown or null."""
+    rd = get_renderdoc()
+    if rid is None or rid == rd.ResourceId.Null():
+        return ""
+    key = rid_str(rid)
+    if key in ("", "Null"):
+        return ""
+    return resource_name_map(controller).get(key, "")
+
+
+def enrich_resource_dict(controller: Any, d: dict[str, Any], rid: Any) -> None:
+    """Set ``resource_id`` and optional ``resource_name`` on dict ``d`` from ``rid``."""
+    rs = rid_str(rid)
+    d["resource_id"] = rs
+    if rs and rs != "Null":
+        name = resource_name_for(controller, rid)
+        if name:
+            d["resource_name"] = name
+
+
+def enrich_resource_id_field(controller: Any, d: dict[str, Any]) -> None:
+    """If ``d`` has ``resource_id`` string, add ``resource_name`` when known."""
+    rid_s = d.get("resource_id")
+    if not rid_s or rid_s == "Null":
+        return
+    name = resource_name_map(controller).get(str(rid_s), "")
+    if name:
+        d["resource_name"] = name
+
+
 def _looks_like_swig_resource_id(obj: Any) -> bool:
     return getattr(obj.__class__, "__name__", "") == "ResourceId"
 

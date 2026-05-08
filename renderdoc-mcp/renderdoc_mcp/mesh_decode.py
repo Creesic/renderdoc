@@ -5,7 +5,13 @@ from __future__ import annotations
 import struct
 from typing import Any
 
-from renderdoc_mcp.rdutil import controller_get_buffer_data, enum_name, get_renderdoc, rid_str
+from renderdoc_mcp.rdutil import (
+    controller_get_buffer_data,
+    enum_name,
+    get_renderdoc,
+    resource_name_for,
+    rid_str,
+)
 from renderdoc_mcp.session import expand_action_flags, find_action
 
 
@@ -166,19 +172,21 @@ def decode_mesh_inputs(controller: Any, structured_file: Any, event_id: int, pre
 
     layouts = []
     for m in meshes:
-        layouts.append(
-            {
-                "name": m.name,
-                "vertex_buffer": rid_str(m.vertexResourceId),
-                "vertex_stride": int(m.vertexByteStride),
-                "vertex_byte_offset": int(m.vertexByteOffset),
-                "format": {
-                    "comp_type": enum_name(m.format.compType),
-                    "comp_count": int(m.format.compCount),
-                    "comp_byte_width": int(m.format.compByteWidth),
-                },
-            }
-        )
+        row = {
+            "name": m.name,
+            "vertex_buffer": rid_str(m.vertexResourceId),
+            "vertex_stride": int(m.vertexByteStride),
+            "vertex_byte_offset": int(m.vertexByteOffset),
+            "format": {
+                "comp_type": enum_name(m.format.compType),
+                "comp_count": int(m.format.compCount),
+                "comp_byte_width": int(m.format.compByteWidth),
+            },
+        }
+        vbn = resource_name_for(controller, m.vertexResourceId)
+        if vbn:
+            row["vertex_buffer_name"] = vbn
+        layouts.append(row)
 
     index_summary = {
         "indexed": bool(draw.flags & rd.ActionFlags.Indexed),
@@ -186,6 +194,10 @@ def decode_mesh_inputs(controller: Any, structured_file: Any, event_id: int, pre
         "index_stride": int(meshes[0].indexByteStride) if meshes else 0,
         "num_indices": int(draw.numIndices),
     }
+    if meshes:
+        ibn = resource_name_for(controller, meshes[0].indexResourceId)
+        if ibn:
+            index_summary["index_buffer_name"] = ibn
 
     previews = []
     if meshes:

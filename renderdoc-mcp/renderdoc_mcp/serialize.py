@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from renderdoc_mcp.rdutil import enum_name, get_renderdoc, rid_str
+from renderdoc_mcp.rdutil import (
+    enrich_resource_dict,
+    enum_name,
+    get_renderdoc,
+    resource_name_for,
+    resource_name_map,
+    rid_str,
+)
 from renderdoc_mcp.session import expand_action_flags, find_action
 
 
@@ -36,14 +43,14 @@ def serialize_scissor(sc: Any) -> dict[str, Any]:
     }
 
 
-def serialize_used_descriptor(d: Any) -> dict[str, Any]:
+def serialize_used_descriptor(d: Any, controller: Any) -> dict[str, Any]:
     out: dict[str, Any] = {
         "bind_type": enum_name(getattr(d, "bindType", None)),
         "direct_access": bool(getattr(d, "directAccess", False)),
     }
     desc = getattr(d, "descriptor", None)
     if desc is not None:
-        out["resource_id"] = rid_str(getattr(desc, "resource", None))
+        enrich_resource_dict(controller, out, getattr(desc, "resource", None))
         out["byte_offset"] = int(getattr(desc, "byteOffset", 0))
         out["byte_size"] = int(getattr(desc, "byteSize", 0))
         out["format"] = enum_name(getattr(desc, "format", None))
@@ -53,14 +60,14 @@ def serialize_used_descriptor(d: Any) -> dict[str, Any]:
     return out
 
 
-def serialize_shader_stage_summary(rd: Any, pipe: Any, stage: Any) -> dict[str, Any]:
+def serialize_shader_stage_summary(rd: Any, pipe: Any, stage: Any, controller: Any) -> dict[str, Any]:
     info: dict[str, Any] = {"stage": enum_name(stage)}
     refl = _try(lambda: pipe.GetShaderReflection(stage))
     if refl is None:
         info["bound"] = False
         return info
     info["bound"] = True
-    info["resource_id"] = rid_str(getattr(refl, "resourceId", rd.ResourceId.Null()))
+    enrich_resource_dict(controller, info, getattr(refl, "resourceId", rd.ResourceId.Null()))
     ep = _try(lambda: pipe.GetShaderEntryPoint(stage))
     if ep is not None and ep != "":
         # PipeState returns rdcstr (Python str); older bindings may return ShaderEntryPoint with .name.
@@ -107,32 +114,30 @@ def collect_shader_stages(rd: Any) -> list[Any]:
     return uniq
 
 
-def serialize_graphics_targets(pipe: Any) -> dict[str, Any]:
+def serialize_graphics_targets(pipe: Any, controller: Any) -> dict[str, Any]:
     rd = get_renderdoc()
     data: dict[str, Any] = {}
     outs = _try(lambda: pipe.GetOutputTargets(), [])
     data["color_targets"] = []
     for i, o in enumerate(outs):
-        data["color_targets"].append(
-            {
-                "slot": i,
-                "resource_id": rid_str(getattr(o, "resource", None)),
-                "slice": int(getattr(o, "slice", 0)),
-                "mipslice": int(getattr(o, "mipslice", 0)),
-            }
-        )
+        ct: dict[str, Any] = {"slot": i, "slice": int(getattr(o, "slice", 0)), "mipslice": int(getattr(o, "mipslice", 0))}
+        enrich_resource_dict(controller, ct, getattr(o, "resource", None))
+        data["color_targets"].append(ct)
     dt = _try(lambda: pipe.GetDepthTarget())
     if dt is not None:
-        data["depth_target"] = {
-            "resource_id": rid_str(getattr(dt, "resource", None)),
+        dd: dict[str, Any] = {
             "slice": int(getattr(dt, "slice", 0)),
             "mipslice": int(getattr(dt, "mipslice", 0)),
         }
+        enrich_resource_dict(controller, dd, getattr(dt, "resource", None))
+        data["depth_target"] = dd
     else:
         data["depth_target"] = None
     ss = _try(lambda: pipe.GetStencilTarget())
     if ss is not None:
-        data["stencil_target"] = {"resource_id": rid_str(getattr(ss, "resource", None))}
+        st: dict[str, Any] = {}
+        enrich_resource_dict(controller, st, getattr(ss, "resource", None))
+        data["stencil_target"] = st
     else:
         data["stencil_target"] = None
 
@@ -200,29 +205,29 @@ def serialize_stencil_state(pipe: Any) -> dict[str, Any]:
     }
 
 
-def serialize_vertex_inputs(pipe: Any) -> dict[str, Any]:
+def serialize_vertex_inputs(pipe: Any, controller: Any) -> dict[str, Any]:
     ib = _try(lambda: pipe.GetIBuffer())
     vbs = _try(lambda: pipe.GetVBuffers(), [])
     attrs = _try(lambda: pipe.GetVertexInputs(), [])
     data: dict[str, Any] = {}
     if ib is not None:
-        data["index_buffer"] = {
-            "resource_id": rid_str(ib.resourceId),
+        ibd: dict[str, Any] = {
             "byte_offset": int(ib.byteOffset),
             "byte_stride": int(ib.byteStride),
             "byte_size": int(ib.byteSize),
         }
+        enrich_resource_dict(controller, ibd, ib.resourceId)
+        data["index_buffer"] = ibd
     data["vertex_buffers"] = []
     for i, vb in enumerate(vbs):
-        data["vertex_buffers"].append(
-            {
-                "slot": i,
-                "resource_id": rid_str(vb.resourceId),
-                "byte_offset": int(vb.byteOffset),
-                "byte_stride": int(vb.byteStride),
-                "byte_size": int(vb.byteSize),
-            }
-        )
+        vbd: dict[str, Any] = {
+            "slot": i,
+            "byte_offset": int(vb.byteOffset),
+            "byte_stride": int(vb.byteStride),
+            "byte_size": int(vb.byteSize),
+        }
+        enrich_resource_dict(controller, vbd, vb.resourceId)
+        data["vertex_buffers"].append(vbd)
     data["attributes"] = []
     for a in attrs:
         data["attributes"].append(
@@ -239,7 +244,7 @@ def serialize_vertex_inputs(pipe: Any) -> dict[str, Any]:
     return data
 
 
-def bindings_for_stage(pipe: Any, stage: Any) -> dict[str, Any]:
+def bindings_for_stage(pipe: Any, stage: Any, controller: Any) -> dict[str, Any]:
     ro = _try(lambda: pipe.GetReadOnlyResources(stage), [])
     rw = _try(lambda: pipe.GetReadWriteResources(stage), [])
     samp = _try(lambda: pipe.GetSamplers(stage), [])
@@ -248,14 +253,21 @@ def bindings_for_stage(pipe: Any, stage: Any) -> dict[str, Any]:
         cb = _try(lambda i=idx: pipe.GetConstantBlock(stage, i, 0))
         if cb is None:
             break
-        rid = rid_str(cb.descriptor.resource) if getattr(cb, "descriptor", None) else ""
+        if not getattr(cb, "descriptor", None):
+            continue
+        res = cb.descriptor.resource
+        rid = rid_str(res)
         if rid in ("", "Null"):
             continue
-        cblocks.append({"slot": idx, "resource_id": rid})
+        row: dict[str, Any] = {"slot": idx, "resource_id": rid}
+        name = resource_name_for(controller, res)
+        if name:
+            row["resource_name"] = name
+        cblocks.append(row)
     return {
-        "readonly": [serialize_used_descriptor(x) for x in ro],
-        "readwrite": [serialize_used_descriptor(x) for x in rw],
-        "samplers": [serialize_used_descriptor(x) for x in samp],
+        "readonly": [serialize_used_descriptor(x, controller) for x in ro],
+        "readwrite": [serialize_used_descriptor(x, controller) for x in rw],
+        "samplers": [serialize_used_descriptor(x, controller) for x in samp],
         "constant_blocks": cblocks,
     }
 
@@ -264,7 +276,11 @@ def summarize_action(rd: Any, controller: Any, structured_file: Any, event_id: i
     act = find_action(controller, event_id)
     if act is None:
         return None
-    outs = [rid_str(o) for o in getattr(act, "outputs", [])]
+    outs: list[dict[str, Any]] = []
+    for o in getattr(act, "outputs", []):
+        one: dict[str, Any] = {}
+        enrich_resource_dict(controller, one, o)
+        outs.append(one)
     return {
         "event_id": event_id,
         "name": act.GetName(structured_file),
@@ -287,8 +303,16 @@ def normalize_pipeline_state(controller: Any, structured_file: Any, event_id: in
     data: dict[str, Any] = {"event_id": event_id}
     data["action"] = summarize_action(rd, controller, structured_file, event_id)
 
-    data["graphics_pipeline"] = rid_str(_try(lambda: pipe.GetGraphicsPipelineObject()))
-    data["compute_pipeline"] = rid_str(_try(lambda: pipe.GetComputePipelineObject()))
+    gp_rid = _try(lambda: pipe.GetGraphicsPipelineObject())
+    cp_rid = _try(lambda: pipe.GetComputePipelineObject())
+    data["graphics_pipeline"] = rid_str(gp_rid)
+    gn = resource_name_for(controller, gp_rid)
+    if gn:
+        data["graphics_pipeline_name"] = gn
+    data["compute_pipeline"] = rid_str(cp_rid)
+    cn = resource_name_for(controller, cp_rid)
+    if cn:
+        data["compute_pipeline_name"] = cn
 
     vps = []
     for i in range(16):
@@ -306,15 +330,15 @@ def normalize_pipeline_state(controller: Any, structured_file: Any, event_id: in
         scissors.append(serialize_scissor(sc))
     data["scissors"] = scissors
 
-    data["targets"] = serialize_graphics_targets(pipe)
+    data["targets"] = serialize_graphics_targets(pipe, controller)
     data["rasterizer"] = serialize_rasterizer(pipe)
     data["depth"] = serialize_depth_state(pipe)
     data["stencil"] = serialize_stencil_state(pipe)
     data["blend"] = serialize_blend_state(pipe)
-    data["vertex_inputs"] = serialize_vertex_inputs(pipe)
+    data["vertex_inputs"] = serialize_vertex_inputs(pipe, controller)
 
     stages = collect_shader_stages(rd)
-    data["shaders"] = [serialize_shader_stage_summary(rd, pipe, st) for st in stages]
+    data["shaders"] = [serialize_shader_stage_summary(rd, pipe, st, controller) for st in stages]
 
     data["bindings_by_stage"] = {}
     for st in stages:
@@ -324,7 +348,7 @@ def normalize_pipeline_state(controller: Any, structured_file: Any, event_id: in
         except Exception:
             continue
         key = enum_name(st).lower()
-        data["bindings_by_stage"][key] = bindings_for_stage(pipe, st)
+        data["bindings_by_stage"][key] = bindings_for_stage(pipe, st, controller)
 
     data["probable_causes"] = heuristic_pipeline_issues(data)
     return data
@@ -369,7 +393,7 @@ def normalize_bound_resources(controller: Any, structured_file: Any, event_id: i
         except Exception:
             continue
         key = enum_name(st).lower()
-        bd = bindings_for_stage(pipe, st)
+        bd = bindings_for_stage(pipe, st, controller)
         out["by_stage"][key] = bd
         for bucket in ("readonly", "readwrite", "constant_blocks"):
             if bucket == "constant_blocks":
@@ -383,7 +407,7 @@ def normalize_bound_resources(controller: Any, structured_file: Any, event_id: i
                     if rid and rid != "Null":
                         merged.add(rid)
 
-    tg = serialize_graphics_targets(pipe)
+    tg = serialize_graphics_targets(pipe, controller)
     for c in tg.get("color_targets") or []:
         if c["resource_id"] not in ("Null", ""):
             merged.add(c["resource_id"])
@@ -391,7 +415,7 @@ def normalize_bound_resources(controller: Any, structured_file: Any, event_id: i
     if dt and dt.get("resource_id") not in ("Null", "", None):
         merged.add(dt["resource_id"])
 
-    vi = serialize_vertex_inputs(pipe)
+    vi = serialize_vertex_inputs(pipe, controller)
     if vi.get("index_buffer"):
         ib = vi["index_buffer"]["resource_id"]
         if ib not in ("Null", ""):
@@ -400,19 +424,30 @@ def normalize_bound_resources(controller: Any, structured_file: Any, event_id: i
         if vb["resource_id"] not in ("Null", ""):
             merged.add(vb["resource_id"])
 
-    out["merged_resources"] = sorted(merged)
+    merged_rows: list[dict[str, str]] = []
+    for rid_s in sorted(merged):
+        rowm: dict[str, str] = {"resource_id": rid_s}
+        name = resource_name_map(controller).get(rid_s, "")
+        if name:
+            rowm["resource_name"] = name
+        merged_rows.append(rowm)
+    out["merged_resources"] = merged_rows
     out["targets"] = tg
     out["vertex_inputs"] = vi
     return out
 
 
-def serialize_shader_reflection_summary(refl: Any, *, max_resources: int = 64) -> dict[str, Any]:
+def serialize_shader_reflection_summary(
+    refl: Any, controller: Any | None = None, *, max_resources: int = 64
+) -> dict[str, Any]:
     if refl is None:
         return {}
     rd = get_renderdoc()
-    out: dict[str, Any] = {
-        "resource_id": rid_str(getattr(refl, "resourceId", rd.ResourceId.Null())),
-    }
+    out: dict[str, Any] = {}
+    rid = getattr(refl, "resourceId", rd.ResourceId.Null())
+    enrich_resource_dict(controller, out, rid) if controller is not None else out.update(
+        {"resource_id": rid_str(rid)}
+    )
     cb = getattr(refl, "constantBlocks", None) or []
     out["constant_blocks"] = []
     for i, block in enumerate(cb[:max_resources]):
