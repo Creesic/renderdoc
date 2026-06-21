@@ -36,12 +36,33 @@ def _pixel_stride(fmt: Any) -> int | None:
         return None
 
 
+def _as_floats_r10g10b10a2(px: bytes, normalize: bool) -> tuple[float, float, float, float]:
+    """Unpack a 4-byte R10G10B10A2 pixel into (R, G, B, A) floats."""
+    v = struct.unpack_from("<I", px, 0)[0]
+    r = (v >> 0) & 0x3FF
+    g = (v >> 10) & 0x3FF
+    b = (v >> 20) & 0x3FF
+    a = (v >> 30) & 0x003
+    if normalize:
+        return r / 1023.0, g / 1023.0, b / 1023.0, a / 3.0
+    return float(r), float(g), float(b), float(a)
+
+
 def analyze_texture_bytes(tex: Any, raw: bytes, *, max_pixels: int = 4_194_304) -> dict[str, Any]:
     rd = get_renderdoc()
     fmt = tex.format
     w = max(1, int(tex.width))
     h = max(1, int(tex.height))
     stride = _pixel_stride(fmt)
+
+    # R10G10B10A2: 4-byte packed format, 10+10+10+2 bits
+    packed_r10g10b10a2 = False
+    if stride is None:
+        fmt_type_name = enum_name(fmt.type) if fmt else ""
+        if "R10G10B10A2" in fmt_type_name:
+            stride = 4
+            packed_r10g10b10a2 = True
+
     if stride is None or len(raw) < stride:
         return {
             "supported_stats": False,
@@ -51,6 +72,7 @@ def analyze_texture_bytes(tex: Any, raw: bytes, *, max_pixels: int = 4_194_304) 
         }
 
     comp_type = fmt.compType
+    normalize_r10 = enum_name(comp_type) == "UNorm"
     bpp = stride
     row_pitch = w * bpp
     expected = row_pitch * h
@@ -69,6 +91,8 @@ def analyze_texture_bytes(tex: Any, raw: bytes, *, max_pixels: int = 4_194_304) 
     black_ct = 0
 
     def as_floats(px: bytes) -> tuple[float, float, float, float]:
+        if packed_r10g10b10a2:
+            return _as_floats_r10g10b10a2(px, normalize_r10)
         ct = comp_type
         bw = int(fmt.compByteWidth)
         cc = int(fmt.compCount)
@@ -154,8 +178,9 @@ def analyze_texture_bytes(tex: Any, raw: bytes, *, max_pixels: int = 4_194_304) 
         "format": {
             "type": enum_name(fmt.type),
             "comp_type": enum_name(fmt.compType),
-            "comp_count": int(fmt.compCount),
+            "comp_count": 4 if packed_r10g10b10a2 else int(fmt.compCount),
             "comp_byte_width": int(fmt.compByteWidth),
+            **({"packed": "R10G10B10A2"} if packed_r10g10b10a2 else {}),
         },
         "min_channels": [None if math.isinf(m) else m for m in mins],
         "max_channels": [None if math.isinf(-m) else m for m in maxs],
