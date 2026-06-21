@@ -374,6 +374,7 @@ def draw_visibility_analysis(
         "unsupported_reason": unsupported_reason,
         "hypotheses": hypotheses,
         "evidence": evidence,
+        "anomalies": detect_pipeline_anomalies(pipe_snapshot),
     }
 
 
@@ -382,6 +383,59 @@ def _try_list(fn: Any) -> Any | None:
         return fn()
     except Exception:
         return None
+
+
+def detect_pipeline_anomalies(snapshot: dict[str, Any]) -> list[str]:
+    """Return anomaly keys for suspicious pipeline state in a normalize_pipeline_state snapshot."""
+    anomalies: list[str] = []
+
+    # Viewport
+    vps = snapshot.get("viewports") or []
+    if vps:
+        vp = vps[0]
+        if float(vp.get("width", 1)) <= 0 or float(vp.get("height", 1)) <= 0:
+            anomalies.append("zero_viewport")
+
+    # Scissor
+    scissors = snapshot.get("scissors") or []
+    if scissors:
+        sc = scissors[0]
+        if sc.get("enabled") and (int(sc.get("width", 1)) == 0 or int(sc.get("height", 1)) == 0):
+            anomalies.append("scissor_clips_all")
+
+    # Depth
+    depth = snapshot.get("depth") or {}
+    depth_enable = bool(depth.get("depth_enable", False))
+    depth_writes = bool(depth.get("depth_writes", False))
+    action = snapshot.get("action") or {}
+    is_draw = (
+        int(action.get("num_vertices") or 0) > 0
+        or int(action.get("num_indices") or 0) > 0
+        or "Drawcall" in (action.get("flags") or [])
+    )
+    color_targets = (snapshot.get("targets") or {}).get("color_targets") or []
+    has_color_output = any(
+        c.get("resource_id") not in ("Null", "", None) for c in color_targets
+    )
+    if not depth_enable and is_draw and has_color_output:
+        anomalies.append("depth_test_disabled")
+    if depth_enable and not depth_writes:
+        anomalies.append("depth_write_disabled")
+
+    # Color outputs
+    if color_targets and all(
+        c.get("resource_id") in ("Null", "", None) for c in color_targets
+    ):
+        anomalies.append("no_color_outputs")
+
+    # Additive blend
+    blend = snapshot.get("blend") or {}
+    for t in blend.get("targets") or []:
+        if t.get("blend_enable") and t.get("dst_color") == "One":
+            anomalies.append("additive_blend")
+            break
+
+    return anomalies
 
 
 def diff_texture_analysis(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:

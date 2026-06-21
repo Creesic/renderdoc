@@ -13,6 +13,7 @@ from renderdoc_mcp.rdutil import (
     rid_str,
 )
 from renderdoc_mcp.session import expand_action_flags, find_action
+from renderdoc_mcp.analysis import detect_pipeline_anomalies
 
 
 def _try(fn: Any, default: Any = None) -> Any:
@@ -181,12 +182,16 @@ def serialize_blend_state(pipe: Any) -> dict[str, Any]:
     targets = []
     bl = getattr(b, "blends", None) or []
     for i, bt in enumerate(bl):
+        _cb_eq = getattr(bt, "colorBlend", None)
         targets.append(
             {
                 "slot": i,
                 "blend_enable": bool(getattr(bt, "blendEnable", False)),
                 "logic_operation": enum_name(getattr(bt, "logicOperation", None)),
                 "write_mask": int(getattr(bt, "writeMask", 0)),
+                "src_color": enum_name(getattr(_cb_eq, "source", None)) if _cb_eq is not None else "",
+                "dst_color": enum_name(getattr(_cb_eq, "destination", None)) if _cb_eq is not None else "",
+                "color_op": enum_name(getattr(_cb_eq, "operation", None)) if _cb_eq is not None else "",
             }
         )
     return {
@@ -351,6 +356,7 @@ def normalize_pipeline_state(controller: Any, structured_file: Any, event_id: in
         data["bindings_by_stage"][key] = bindings_for_stage(pipe, st, controller)
 
     data["probable_causes"] = heuristic_pipeline_issues(data)
+    data["anomalies"] = detect_pipeline_anomalies(data)
     return data
 
 
