@@ -6,7 +6,7 @@ import math
 import struct
 from typing import Any
 
-from renderdoc_mcp.rdutil import enum_name, get_renderdoc, parse_resource_id, rid_str
+from renderdoc_mcp.rdutil import enum_name, get_renderdoc, parse_resource_id, resource_name_for, rid_str
 
 
 def find_texture_description(controller: Any, tex_id: Any) -> Any | None:
@@ -453,4 +453,126 @@ def diff_texture_analysis(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any
                     out["deltas"][key] = float(b[key]) - float(a[key])
             except Exception:
                 continue
+    return out
+
+
+def _walk_count(action: Any, draw_flag: int, dispatch_flag: int) -> tuple[int, int, int]:
+    """Return (draws, dispatches, total_events) for an action subtree."""
+    flags = int(action.flags)
+    draws = 1 if (flags & draw_flag) else 0
+    dispatches = 1 if (flags & dispatch_flag) else 0
+    total = 1
+    for ch in action.children:
+        cd, cdi, ct = _walk_count(ch, draw_flag, dispatch_flag)
+        draws += cd
+        dispatches += cdi
+        total += ct
+    return draws, dispatches, total
+
+
+def _max_event_in_subtree(action: Any) -> int:
+    eid = int(action.eventId)
+    for ch in action.children:
+        eid = max(eid, _max_event_in_subtree(ch))
+    return eid
+
+
+def build_frame_overview(controller: Any, structured_file: Any) -> dict[str, Any]:
+    """Build a frame structure map without seeking to any event.
+
+    Uses only GetRootActions(), GetTextures(), and GetUsage() so it is fast
+    even on large captures. Returns render passes (named marker groups), render
+    targets (textures with ColourTarget/DepthStencilTarget usages), and counts.
+    """
+    rd = get_renderdoc()
+
+    draw_flag = int(getattr(rd.ActionFlags, "Drawcall", 0))
+    dispatch_flag = int(getattr(rd.ActionFlags, "Dispatch", 0))
+
+    total_draws = 0
+    total_dispatches = 0
+    total_events = 0
+    render_passes: list[dict] = []
+
+    for root in controller.GetRootActions():
+        cd, cdi, ct = _walk_count(root, draw_flag, dispatch_flag)
+        total_draws += cd
+        total_dispatches += cdi
+        total_events += ct
+
+        children = list(root.children)
+        if children:
+            name = root.GetName(structured_file)
+            render_passes.append({
+                "marker_name": name,
+                "start_event_id": int(root.eventId),
+                "end_event_id": _max_event_in_subtree(root),
+                "draw_count": cd,
+            })
+
+    # Find render targets via resource usages (no SetFrameEvent needed)
+    ColourTarget = getattr(rd.ResourceUsage, "ColourTarget", None)
+    DepthStencilTarget = getattr(rd.ResourceUsage, "DepthStencilTarget", None)
+    ClearUsage = getattr(rd.ResourceUsage, "Clear", None)
+
+    render_targets: list[dict] = []
+    warnings: list[str] = []
+
+    try:
+        textures = list(controller.GetTextures())[:2000]
+    except Exception as ex:
+        warnings.append("GetTextures failed: {}".format(ex))
+        textures = []
+
+    for tex in textures:
+        tid = tex.resourceId
+        try:
+            usages = list(controller.GetUsage(tid))
+        except Exception:
+            continue
+
+        rt_usages = [
+            u for u in usages
+            if (ColourTarget is not None and u.usage == ColourTarget)
+            or (DepthStencilTarget is not None and u.usage == DepthStencilTarget)
+        ]
+        if not rt_usages:
+            continue
+
+        write_eids = [int(u.eventId) for u in rt_usages]
+        clear_eids = [
+            int(u.eventId) for u in usages
+            if ClearUsage is not None and u.usage == ClearUsage
+        ]
+
+        entry: dict = {
+            "resource_id": rid_str(tid),
+            "format": enum_name(tex.format.type) if tex.format else "",
+            "width": int(tex.width),
+            "height": int(tex.height),
+            "first_write_event_id": min(write_eids) if write_eids else None,
+            "write_event_count": len(write_eids),
+            "clear_event_ids": clear_eids[:20],
+        }
+        rname = resource_name_for(controller, tid)
+        if rname:
+            entry["resource_name"] = rname
+        render_targets.append(entry)
+
+    debug_count = 0
+    try:
+        debug_count = len(list(controller.GetDebugMessages()))
+    except Exception:
+        pass
+
+    out: dict = {
+        "total_events": total_events,
+        "draw_count": total_draws,
+        "dispatch_count": total_dispatches,
+        "render_passes": render_passes[:100],
+        "render_targets": render_targets[:200],
+        "debug_message_count": debug_count,
+    }
+    if warnings:
+        out["warnings"] = warnings
     return out

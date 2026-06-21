@@ -14,6 +14,7 @@ from renderdoc_mcp import responses as R
 from renderdoc_mcp import rdutil
 from renderdoc_mcp.analysis import (
     analyze_texture_bytes,
+    build_frame_overview,
     diff_pipeline_snapshots,
     diff_texture_analysis,
     draw_visibility_analysis,
@@ -847,6 +848,31 @@ def build_mcp() -> FastMCP:
                     "info_count": counts.get("Info", 0),
                     "messages": rows,
                 })
+
+            return await asyncio.to_thread(_go)
+
+    @mcp.tool()
+    async def get_frame_overview(capture_id: str) -> dict[str, Any]:
+        """Frame structure map: render passes, render targets, draw counts.
+
+        Fast — uses no SetFrameEvent calls. Call this first on any capture to orient
+        the agent. A render target with write_event_count=0 after its clear_event_ids
+        is the primary signal for 'black screen' bugs.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                rd = rdutil.get_renderdoc()
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                try:
+                    overview = build_frame_overview(sess.controller, sess.structured_file)
+                except Exception as ex:
+                    return R.err("frame_overview_failed", str(ex))
+                overview["api"] = enum_api(rd, sess.controller)
+                overview["capture_id"] = capture_id
+                return R.ok(overview)
 
             return await asyncio.to_thread(_go)
 
