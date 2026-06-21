@@ -78,3 +78,15 @@ def test_additive_blend_not_flagged_when_disabled():
         }]
     })
     assert "additive_blend" not in detect_pipeline_anomalies(snap)
+
+
+def test_additive_blend_not_flagged_when_subtract_op():
+    from renderdoc_mcp.analysis import detect_pipeline_anomalies
+    # dst_color == "One" but color_op is "Subtract" — should NOT be flagged as additive_blend
+    snap = _snap(blend={
+        "targets": [{
+            "slot": 0, "blend_enable": True, "write_mask": 15,
+            "src_color": "SrcAlpha", "dst_color": "One", "color_op": "Subtract",
+        }]
+    })
+    assert "additive_blend" not in detect_pipeline_anomalies(snap)

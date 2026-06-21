@@ -6,6 +6,16 @@ import math
 import struct
 from typing import Any
 
+# Byte widths keyed by VarType enum member names from the real RenderDoc API.
+_VARTYPE_BYTES = {
+    "Float": 4, "Double": 8, "Half": 2,
+    "SInt": 4, "UInt": 4,
+    "SShort": 2, "UShort": 2,
+    "SLong": 8, "ULong": 8,
+    "SByte": 1, "UByte": 1,
+    "Bool": 4,
+}
+
 
 def _comp_type_name(comp_type: Any) -> str:
     if comp_type is None:
@@ -18,9 +28,11 @@ def _comp_type_name(comp_type: Any) -> str:
 
 def _type_str(rows: int, cols: int, base: str) -> str:
     short = {
-        "Float": "float", "Double": "double",
-        "UInt": "uint", "UNorm": "uint",
-        "SInt": "int", "SNorm": "int",
+        "Float": "float", "Double": "double", "Half": "half",
+        "UInt": "uint", "SInt": "int",
+        "SShort": "short", "UShort": "ushort",
+        "SLong": "long", "ULong": "ulong",
+        "SByte": "sbyte", "UByte": "ubyte",
         "Bool": "bool",
     }.get(base, base.lower())
     if rows == 1 and cols == 1:
@@ -35,15 +47,29 @@ def _unpack_scalar(raw: bytes, offset: int, base: str, bw: int) -> Any:
         return None
     chunk = raw[offset : offset + bw]
     try:
+        if base == "Half":
+            return float(struct.unpack_from("<e", chunk)[0])
         if base in ("Float", "Double"):
             fmt = "<f" if bw == 4 else "<d" if bw == 8 else None
             return float(struct.unpack_from(fmt, chunk)[0]) if fmt else None
-        if base in ("UInt", "UNorm"):
+        if base == "UInt":
             fmt = {1: "<B", 2: "<H", 4: "<I"}.get(bw)
             return struct.unpack_from(fmt, chunk)[0] if fmt else None
-        if base in ("SInt", "SNorm"):
+        if base == "SInt":
             fmt = {1: "<b", 2: "<h", 4: "<i"}.get(bw)
             return struct.unpack_from(fmt, chunk)[0] if fmt else None
+        if base == "UShort":
+            return struct.unpack_from("<H", chunk)[0]
+        if base == "SShort":
+            return struct.unpack_from("<h", chunk)[0]
+        if base == "ULong":
+            return struct.unpack_from("<Q", chunk)[0]
+        if base == "SLong":
+            return struct.unpack_from("<q", chunk)[0]
+        if base == "UByte":
+            return struct.unpack_from("<B", chunk)[0]
+        if base == "SByte":
+            return struct.unpack_from("<b", chunk)[0]
         if base == "Bool":
             fmt = {1: "<B", 2: "<H", 4: "<I"}.get(bw)
             return bool(struct.unpack_from(fmt, chunk)[0]) if fmt else None
@@ -74,8 +100,8 @@ def decode_cb_bytes(raw: bytes, constants: list, row_major: bool = True) -> list
 
         rows = int(getattr(ctype, "rows", 1) or 1)
         cols = int(getattr(ctype, "columns", 1) or 1)
-        bw = int(getattr(ctype, "baseByteWidth", 4) or 4)
         base = _comp_type_name(getattr(ctype, "baseType", None))
+        bw = _VARTYPE_BYTES.get(base, 4)
         type_name = _type_str(rows, cols, base)
 
         if rows == 1 and cols == 1:
@@ -83,12 +109,23 @@ def decode_cb_bytes(raw: bytes, constants: list, row_major: bool = True) -> list
         elif rows == 1:
             value = [_unpack_scalar(raw, base_offset + c * bw, base, bw) for c in range(cols)]
         else:
-            # HLSL cbuffer: each row aligned to 16 bytes
-            row_stride = 16
-            value = [
-                [_unpack_scalar(raw, base_offset + r * row_stride + c * bw, base, bw) for c in range(cols)]
-                for r in range(rows)
-            ]
+            # Determine layout for this specific type (with fallback to function param)
+            rm_method = getattr(ctype, "RowMajor", None)
+            type_row_major = rm_method() if callable(rm_method) else row_major
+
+            # matrixByteStride is the per-row byte stride; fall back to std140 default of 16
+            row_stride = int(getattr(ctype, "matrixByteStride", 0) or 0) or 16
+            if type_row_major:
+                value = [
+                    [_unpack_scalar(raw, base_offset + r * row_stride + c * bw, base, bw) for c in range(cols)]
+                    for r in range(rows)
+                ]
+            else:
+                # Column-major: column stride = row_stride, iterate columns then rows
+                value = [
+                    [_unpack_scalar(raw, base_offset + c * row_stride + r * bw, base, bw) for c in range(cols)]
+                    for r in range(rows)
+                ]
 
         results.append({"name": name, "type": type_name, "value": value})
 

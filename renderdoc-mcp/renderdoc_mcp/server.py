@@ -792,7 +792,7 @@ def build_mcp() -> FastMCP:
                     "raw_bytes_hex": raw_hex,
                 }
                 if not raw:
-                    out["reflection_unavailable"] = True
+                    out["buffer_unavailable"] = True
 
                 return R.ok(out)
 

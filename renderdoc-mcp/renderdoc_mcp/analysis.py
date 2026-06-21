@@ -431,7 +431,7 @@ def detect_pipeline_anomalies(snapshot: dict[str, Any]) -> list[str]:
     # Additive blend
     blend = snapshot.get("blend") or {}
     for t in blend.get("targets") or []:
-        if t.get("blend_enable") and t.get("dst_color") == "One":
+        if t.get("blend_enable") and t.get("dst_color") == "One" and t.get("color_op", "Add") == "Add":
             anomalies.append("additive_blend")
             break
 
