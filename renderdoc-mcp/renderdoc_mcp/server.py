@@ -20,6 +20,11 @@ from renderdoc_mcp.analysis import (
     find_texture_description,
     normalize_pixel_history,
 )
+from renderdoc_mcp.imaging import (
+    detect_texture_anomalies,
+    describe_texture,
+    save_texture_as_png_bytes,
+)
 from renderdoc_mcp.mesh_decode import decode_mesh_inputs as decode_mesh_inputs_core
 from renderdoc_mcp.serialize import (
     normalize_bound_resources,
@@ -395,6 +400,70 @@ def build_mcp() -> FastMCP:
                 if svname:
                     saved["resource_name"] = svname
                 return R.ok(saved)
+
+            return await asyncio.to_thread(_go)
+
+    @mcp.tool()
+    async def get_texture_image(
+        capture_id: str,
+        resource_id: str,
+        event_id: int,
+        mip: int = 0,
+        slice_index: int = 0,
+        include_image: bool = True,
+        max_dimension: int = 256,
+    ) -> dict[str, Any]:
+        """Inspect a texture or render target at an event: stats, anomaly description, optional inline PNG.
+
+        For text-only clients set include_image=False. The description field always summarises
+        what the texture looks like in plain English.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                rd = rdutil.get_renderdoc()
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                try:
+                    rid = rdutil.parse_resource_id(resource_id)
+                except ValueError as ex:
+                    return R.err("bad_resource_id", str(ex))
+                try:
+                    sessions.set_frame_event(sess, int(event_id), True)
+                    tex = find_texture_description(sess.controller, rid)
+                    if tex is None:
+                        return R.err("not_a_texture", resource_id)
+                    sub = rd.Subresource(int(mip), int(slice_index), 0)
+                    raw = sess.controller.GetTextureData(rid, sub)
+                    stats = analyze_texture_bytes(tex, raw)
+                    anomalies = detect_texture_anomalies(stats)
+                    description = describe_texture(stats, anomalies)
+                    out: dict[str, Any] = {
+                        "resource_id": resource_id,
+                        "width": int(tex.width),
+                        "height": int(tex.height),
+                        "format": rdutil.enum_name(tex.format.type) if tex.format else "",
+                        "event_id": int(event_id),
+                        "stats": stats,
+                        "anomalies": anomalies,
+                        "description": description,
+                    }
+                    rname = rdutil.resource_name_for(sess.controller, rid)
+                    if rname:
+                        out["resource_name"] = rname
+                    if include_image:
+                        png_bytes = save_texture_as_png_bytes(
+                            sess.controller, rd, rid, int(mip), int(slice_index), int(max_dimension)
+                        )
+                        if png_bytes:
+                            out["image_base64"] = base64.b64encode(png_bytes).decode("ascii")
+                            out["image_format"] = "png"
+                        else:
+                            out["image_unavailable"] = True
+                except Exception as ex:
+                    return R.err("get_texture_image_failed", str(ex))
+                return R.ok(out)
 
             return await asyncio.to_thread(_go)
 
