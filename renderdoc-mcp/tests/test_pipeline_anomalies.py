@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 
 def _snap(**overrides):
     """Build a minimal pipeline snapshot dict."""
