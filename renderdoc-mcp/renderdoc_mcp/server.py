@@ -798,6 +798,59 @@ def build_mcp() -> FastMCP:
             return await asyncio.to_thread(_go)
 
     @mcp.tool()
+    async def get_debug_messages(
+        capture_id: str,
+        severity_filter: str | None = None,
+    ) -> dict[str, Any]:
+        """Return GPU validation layer messages (errors, warnings) from the capture.
+
+        Pass severity_filter='Error' to see only errors. Emulators frequently trigger
+        validation messages that directly name the root cause of rendering bugs.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                try:
+                    msgs = list(sess.controller.GetDebugMessages())
+                except Exception as ex:
+                    return R.err("debug_messages_failed", str(ex))
+
+                counts: dict[str, int] = {}
+                rows: list[dict[str, Any]] = []
+
+                for m in msgs:
+                    sev_raw = str(getattr(m, "severity", "") or "")
+                    sev = sev_raw.split(".")[-1] if "." in sev_raw else sev_raw
+                    cat_raw = str(getattr(m, "category", "") or "")
+                    cat = cat_raw.split(".")[-1] if "." in cat_raw else cat_raw
+                    msg_str = str(getattr(m, "message", "") or "")
+                    eid = int(getattr(m, "eventId", 0) or 0)
+
+                    counts[sev] = counts.get(sev, 0) + 1
+
+                    if severity_filter and sev.lower() != severity_filter.lower():
+                        continue
+
+                    rows.append({
+                        "event_id": eid,
+                        "severity": sev,
+                        "category": cat,
+                        "message": msg_str,
+                    })
+
+                return R.ok({
+                    "error_count": counts.get("Error", 0),
+                    "warning_count": counts.get("Warning", 0),
+                    "info_count": counts.get("Info", 0),
+                    "messages": rows,
+                })
+
+            return await asyncio.to_thread(_go)
+
+    @mcp.tool()
     async def analyze_draw_visibility(capture_id: str, event_id: int) -> dict[str, Any]:
         async with replay_execution():
 
