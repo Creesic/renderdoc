@@ -9,7 +9,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+import logging
+
 from renderdoc_mcp import rdutil
+
+_log = logging.getLogger("renderdoc_mcp.session")
 
 
 def _walk_actions(action: Any, visitor: Callable[[Any], None]) -> None:
@@ -84,6 +88,7 @@ class CaptureSessionManager:
         return self._sessions.get(capture_id)
 
     def open_capture(self, path: str) -> CaptureSession:
+        _log.info("open_capture: OpenCaptureFile path=%s", path)
         rd = rdutil.get_renderdoc()
         cap = rd.OpenCaptureFile()
         result = cap.OpenFile(path, "", None)
@@ -92,6 +97,7 @@ class CaptureSessionManager:
             raise RuntimeError("OpenFile failed: {} ({})".format(path, result))
 
         driver_name = rdutil.capture_driver_name(cap)
+        _log.info("open_capture: driver=%s LocalReplaySupport=%s", driver_name, cap.LocalReplaySupport())
 
         if not cap.LocalReplaySupport():
             cap.Shutdown()
@@ -100,7 +106,9 @@ class CaptureSessionManager:
             )
 
         opts = rd.ReplayOptions()
+        _log.info("open_capture: calling OpenCapture")
         result, controller = cap.OpenCapture(opts, None)
+        _log.info("open_capture: OpenCapture returned result=%s", result)
         cap.Shutdown()
         if result != rd.ResultCode.Succeeded:
             try:

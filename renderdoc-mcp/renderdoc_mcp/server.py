@@ -35,6 +35,8 @@ from renderdoc_mcp.serialize import (
 from renderdoc_mcp.cbuffer import decode_cb_bytes, detect_variable_anomalies
 from renderdoc_mcp.session import CaptureSessionManager, filter_events
 
+import logging
+_log = logging.getLogger("renderdoc_mcp.server")
 
 replay_lock = asyncio.Lock()
 sessions = CaptureSessionManager()
@@ -53,8 +55,11 @@ async def ensure_replay_initialized() -> None:
             return
 
         def _init():
+            _log.info("InitialiseReplay: importing renderdoc module")
             rd = rdutil.get_renderdoc()
+            _log.info("InitialiseReplay: calling rd.InitialiseReplay")
             rd.InitialiseReplay(rd.GlobalEnvironment(), [])
+            _log.info("InitialiseReplay: done")
 
         await asyncio.to_thread(_init)
         _replay_initialized = True
@@ -145,10 +150,13 @@ def build_mcp() -> FastMCP:
         async with replay_execution():
 
             def _go() -> dict[str, Any]:
+                _log.info("open_capture: path=%s", path)
                 try:
                     sess = sessions.open_capture(path)
                 except Exception as ex:
+                    _log.exception("open_capture: sessions.open_capture raised")
                     return R.err("open_failed", str(ex))
+                _log.info("open_capture: success capture_id=%s driver=%s", sess.capture_id, sess.driver_name)
                 rd = rdutil.get_renderdoc()
                 return R.ok(
                     {

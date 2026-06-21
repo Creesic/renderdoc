@@ -3,10 +3,56 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
+import logging
+import os
 import sys
 
 
+def _setup_crash_logging() -> None:
+    """Write Python tracebacks and native crash info to a persistent log file.
+
+    MCPServerManager caps captured stdout/stderr at 220 chars, so normal
+    tracebacks are silently truncated. This bypasses that limit by writing
+    directly to a file.
+    """
+    app_dir = os.environ.get("RENDERDOC_MCP_APPDIR") or os.getcwd()
+    log_path = os.path.join(app_dir, "renderdoc_mcp_crash.log")
+
+    try:
+        log_fd = open(log_path, "a", buffering=1)  # line-buffered so partial writes survive crashes
+    except OSError:
+        return  # can't open log — silent fallback
+
+    # Native crash handler: writes a C-level traceback to the file even on
+    # segfaults and stack overflows that bypass Python's exception machinery.
+    faulthandler.enable(file=log_fd, all_threads=True)
+
+    # Python-level logging: captures structured log records from server.py.
+    logging.basicConfig(
+        stream=log_fd,
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+
+    # Unhandled Python exceptions: write full traceback before exit.
+    _orig_excepthook = sys.excepthook
+
+    def _excepthook(exc_type, exc_value, exc_tb):
+        import traceback
+        print("UNHANDLED EXCEPTION:", file=log_fd)
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=log_fd)
+        log_fd.flush()
+        _orig_excepthook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _excepthook
+
+    logging.getLogger("renderdoc_mcp").info("MCP server starting — log: %s", log_path)
+
+
 def main(argv: list[str] | None = None) -> None:
+    _setup_crash_logging()
     parser = argparse.ArgumentParser(description="RenderDoc MCP server (stdio or Streamable HTTP /mcp)")
     parser.add_argument(
         "--transport",
