@@ -31,6 +31,7 @@ from renderdoc_mcp.serialize import (
     normalize_pipeline_state,
     serialize_shader_reflection_summary,
 )
+from renderdoc_mcp.cbuffer import decode_cb_bytes, detect_variable_anomalies
 from renderdoc_mcp.session import CaptureSessionManager, filter_events
 
 
@@ -706,6 +707,93 @@ def build_mcp() -> FastMCP:
                 rdutil.enrich_resource_dict(sess.controller, sref, refl.resourceId)
                 sref["reflection"] = serialize_shader_reflection_summary(refl, sess.controller)
                 return R.ok(sref)
+
+            return await asyncio.to_thread(_go)
+
+    @mcp.tool()
+    async def read_constant_buffer(
+        capture_id: str,
+        event_id: int,
+        stage: str,
+        slot: int,
+    ) -> dict[str, Any]:
+        """Decode a constant buffer slot to typed named variables using shader reflection.
+
+        Returns variable names and values (floats, matrices, vectors). Useful for finding
+        wrong transform matrices or emulator data-upload bugs. Falls back to raw hex if
+        reflection is unavailable.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                rd = rdutil.get_renderdoc()
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                st = _stage_from_string(rd, stage)
+                if st is None:
+                    return R.err("bad_stage", stage)
+
+                sessions.set_frame_event(sess, int(event_id), True)
+                pipe = sess.controller.GetPipelineState()
+                refl = pipe.GetShaderReflection(st)
+                if refl is None:
+                    return R.ok({"bound": False, "stage": stage, "slot": int(slot)})
+
+                cb_blocks = list(getattr(refl, "constantBlocks", []) or [])
+
+                # Find by fixed bind number first, then fall back to index
+                cb_block = None
+                for block in cb_blocks:
+                    if int(getattr(block, "fixedBindNumber", -1)) == int(slot):
+                        cb_block = block
+                        break
+                if cb_block is None and int(slot) < len(cb_blocks):
+                    cb_block = cb_blocks[int(slot)]
+                if cb_block is None:
+                    return R.err("no_cb_at_slot", "No constant block at slot {}".format(slot))
+
+                # Read raw buffer bytes
+                raw = b""
+                raw_hex = ""
+                try:
+                    cb_desc = pipe.GetConstantBlock(st, int(slot), 0)
+                    desc = getattr(cb_desc, "descriptor", None)
+                    if desc is not None:
+                        buf_rid = getattr(desc, "resource", None)
+                        byte_offset = int(getattr(desc, "byteOffset", 0))
+                        byte_size = int(getattr(desc, "byteSize", 0)) or 65536
+                        raw = rdutil.controller_get_buffer_data(
+                            sess.controller, buf_rid, byte_offset, min(byte_size, 65536)
+                        )
+                        raw_hex = raw[:256].hex()
+                except Exception:
+                    pass
+
+                variables: list[dict] = []
+                anomaly_list: list[str] = []
+
+                if raw:
+                    constants = list(getattr(cb_block, "variables", []) or [])
+                    for var in decode_cb_bytes(raw, constants):
+                        anom = detect_variable_anomalies(var)
+                        if anom:
+                            var["anomaly"] = anom
+                            anomaly_list.append("{}:{}".format(anom, var["name"]))
+                        variables.append(var)
+
+                out: dict[str, Any] = {
+                    "stage": stage,
+                    "slot": int(slot),
+                    "name": str(getattr(cb_block, "name", "") or ""),
+                    "variables": variables,
+                    "anomalies": anomaly_list,
+                    "raw_bytes_hex": raw_hex,
+                }
+                if not raw:
+                    out["reflection_unavailable"] = True
+
+                return R.ok(out)
 
             return await asyncio.to_thread(_go)
 
