@@ -3,10 +3,14 @@
 - Wants RenderDoc MCP to be practical for non-experts: turn it on from the app without manual Python setup or terminal/curl workflows for normal use; expects enabling MCP to keep the HTTP server on the configured Settings port without extra manual connectivity steps.
 - Likes Ghidra-style controls for optional servers: an enable toggle, editable port, and a clear running or error state in the UI.
 - When wiring external editors (e.g. OpenCode), prefers local MCP via stdin/stdout (`--transport stdio`) over remote Streamable HTTP when the UI stalls on loading or enforces short timeouts.
+- Wants MCP tool responses to include human-readable capture resource names alongside ResourceId strings when the capture provides names, so explanations line up with the UI.
+- When committing in this tree, keeps `.cursor/` IDE state, ad-hoc debug logs, stray `.obj` files, and `renderdoc-mcp` build/packaging outputs (e.g. `build/`, `*.egg-info/`) out of version control unless deliberately added.
 
 ## Learned Workspace Facts
 
 - This checkout extends RenderDoc with an MCP server: the UI spawns a Python subprocess (`python -m renderdoc_mcp`) with `PYTHONPATH` pointing at directories next to the executable (`pymodules`, `mcp`, `mcp_site`); list `mcp` before `mcp_site` so imports resolve to the shipped package.
+- `renderdoc_mcp` adds optional `resource_name` fields from `GetResources()` (cached per replay controller); some aggregates such as `merged_resources` and draw `action.outputs` are lists of objects with `resource_id` plus optional `resource_name`, not bare ID strings alone.
+- Bundled MCP uses the CPython staged under `x64/<Configuration>/python/`; bundle scripts create `pythonMM.zip` and layout pieces MSBuild/`python.props` expect so `pyrenderdoc_module` can link `renderdoc.pyd` against the matching `pythonMM.dll`—after bumping the bundle Python or on a fresh tree, run the bundle step and rebuild pymodules when import or ABI errors appear.
 - The Settings line that shows `http://127.0.0.1:<port>/mcp` is derived from the configured port; it is not a live health check. Streamable HTTP expects MCP `Accept` headers (including `application/json` and `text/event-stream`); naive `curl` often gets HTTP 406 while the listener is still up.
 - Windows MSBuild builds may set `PlatformToolset` (e.g. v145) when the solution defaults do not match the installed MSVC toolset; the bundled MCP Python artifacts are driven by `util/renderdoc_mcp_bundle.json` and `util/bundle_renderdoc_mcp.ps1` / `bundle_renderdoc_mcp.py`.
 - On Windows Development layouts, `_ctypes.pyd` may sit beside `qrenderdoc.exe`; if the bundled Python subprocess uses that folder as its working directory, the loader can prefer the wrong native extension versus `python\\DLLs`. Using working directory under `python/` when launching bundled `python.exe` avoids that clash.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 from contextlib import asynccontextmanager
 from typing import Any, Literal, cast
 
@@ -44,6 +45,15 @@ sessions = CaptureSessionManager()
 _replay_init_lock = asyncio.Lock()
 _replay_initialized = False
 
+# Single-threaded executor: ReplayController captures m_ThreadID at construction and
+# CHECK_REPLAY_THREAD() enforces that every method (including Shutdown) runs on that
+# same thread.  Using max_workers=1 guarantees InitialiseReplay, all tool calls, and
+# ShutdownReplay all land on the same OS thread, avoiding access violations in D3D12
+# cleanup when the wrong thread releases GPU resources.
+_replay_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="renderdoc-replay"
+)
+
 
 async def ensure_replay_initialized() -> None:
     """Load pymodules and InitialiseReplay on first tool use — keeps MCP handshake instant."""
@@ -61,7 +71,7 @@ async def ensure_replay_initialized() -> None:
             rd.InitialiseReplay(rd.GlobalEnvironment(), [])
             _log.info("InitialiseReplay: done")
 
-        await asyncio.to_thread(_init)
+        await asyncio.get_running_loop().run_in_executor(_replay_executor, _init)
         _replay_initialized = True
 
 
@@ -121,11 +131,11 @@ async def _lifespan(_: FastMCP):
     try:
         yield
     finally:
-        sessions.close_all()
+        await asyncio.get_running_loop().run_in_executor(_replay_executor, sessions.close_all)
         async with _replay_init_lock:
             global _replay_initialized
             if _replay_initialized:
-                await asyncio.to_thread(_shutdown_replay_sync)
+                await asyncio.get_running_loop().run_in_executor(_replay_executor, _shutdown_replay_sync)
                 _replay_initialized = False
 
 
@@ -168,7 +178,7 @@ def build_mcp() -> FastMCP:
                     }
                 )
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def close_capture(capture_id: str) -> dict[str, Any]:
@@ -178,7 +188,7 @@ def build_mcp() -> FastMCP:
                 sessions.close_capture(capture_id)
                 return R.ok({"capture_id": capture_id, "closed": True})
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def list_events(
@@ -205,7 +215,7 @@ def build_mcp() -> FastMCP:
                 )
                 return R.ok({"events": rows, "next_cursor": next_cur})
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def set_event(capture_id: str, event_id: int, force_complete_replay: bool = True) -> dict[str, Any]:
@@ -230,7 +240,7 @@ def build_mcp() -> FastMCP:
                     }
                 return R.ok({"capture_id": capture_id, "event_id": int(event_id), "action": summary})
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def get_pipeline_state(capture_id: str, event_id: int) -> dict[str, Any]:
@@ -247,7 +257,7 @@ def build_mcp() -> FastMCP:
                     return R.err("pipeline_state_failed", str(ex))
                 return R.ok(snap)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def get_bound_resources(capture_id: str, event_id: int) -> dict[str, Any]:
@@ -264,7 +274,7 @@ def build_mcp() -> FastMCP:
                     return R.err("bound_resources_failed", str(ex))
                 return R.ok(data)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def list_resources(capture_id: str, resource_type: str | None = None, limit: int = 500) -> dict[str, Any]:
@@ -291,7 +301,7 @@ def build_mcp() -> FastMCP:
                         break
                 return R.ok({"resources": out, "truncated": len(out) >= min(limit, 5000)})
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def get_resource_usages(capture_id: str, resource_id: str) -> dict[str, Any]:
@@ -318,7 +328,7 @@ def build_mcp() -> FastMCP:
                     payload["resource_name"] = rn
                 return R.ok(payload)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def analyze_texture(
@@ -358,7 +368,7 @@ def build_mcp() -> FastMCP:
                     return R.err("analyze_texture_failed", str(ex))
                 return R.ok(stats)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def save_texture(
@@ -411,7 +421,7 @@ def build_mcp() -> FastMCP:
                     saved["resource_name"] = svname
                 return R.ok(saved)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def get_texture_image(
@@ -475,7 +485,7 @@ def build_mcp() -> FastMCP:
                     return R.err("get_texture_image_failed", str(ex))
                 return R.ok(out)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def read_buffer(
@@ -513,7 +523,7 @@ def build_mcp() -> FastMCP:
                     buf_out["resource_name"] = bfname
                 return R.ok(buf_out)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def pixel_history(
@@ -555,7 +565,7 @@ def build_mcp() -> FastMCP:
                 norm["coordinates"] = {"x": int(x), "y": int(y)}
                 return R.ok(norm)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def diff_pipeline_state(
@@ -583,7 +593,7 @@ def build_mcp() -> FastMCP:
                     return R.err("diff_failed", str(ex))
                 return R.ok(diff)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def diff_texture_stats(
@@ -624,7 +634,7 @@ def build_mcp() -> FastMCP:
                 ba = analyze(b, bad_event_id, br, bad_resource_id)
                 return R.ok(diff_texture_analysis(ga, ba))
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def decode_mesh_inputs(capture_id: str, event_id: int, preview_vertices: int = 8) -> dict[str, Any]:
@@ -646,7 +656,7 @@ def build_mcp() -> FastMCP:
                         return R.err("decode_mesh_failed", str(data.get("error", "")))
                 return R.ok(data)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def get_shader(
@@ -693,7 +703,7 @@ def build_mcp() -> FastMCP:
                         out["disassembly"] = text
                 return R.ok(out)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def get_shader_reflection(capture_id: str, event_id: int, stage: str) -> dict[str, Any]:
@@ -717,7 +727,7 @@ def build_mcp() -> FastMCP:
                 sref["reflection"] = serialize_shader_reflection_summary(refl, sess.controller)
                 return R.ok(sref)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def read_constant_buffer(
@@ -804,7 +814,7 @@ def build_mcp() -> FastMCP:
 
                 return R.ok(out)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def get_debug_messages(
@@ -857,7 +867,7 @@ def build_mcp() -> FastMCP:
                     "messages": rows,
                 })
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def get_frame_overview(capture_id: str) -> dict[str, Any]:
@@ -882,7 +892,7 @@ def build_mcp() -> FastMCP:
                 overview["capture_id"] = capture_id
                 return R.ok(overview)
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
     async def analyze_draw_visibility(capture_id: str, event_id: int) -> dict[str, Any]:
@@ -900,7 +910,7 @@ def build_mcp() -> FastMCP:
                     return R.err("visibility_failed", str(ex))
                 return R.ok(vis, evidence=vis.get("evidence"))
 
-            return await asyncio.to_thread(_go)
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     return mcp
 
