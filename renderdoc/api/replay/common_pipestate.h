@@ -270,6 +270,74 @@ struct ColorBlend
 
 DECLARE_REFLECTION_STRUCT(ColorBlend);
 
+DOCUMENT("Describes a common subset of rasterizing state.");
+struct RasterState
+{
+  DOCUMENT("");
+  RasterState() = default;
+  RasterState(const RasterState &) = default;
+  RasterState &operator=(const RasterState &) = default;
+
+  DOCUMENT(R"(``True`` if counter-clockwise polygons are front-facing.
+``False`` if clockwise polygons are front-facing.
+
+:type: bool
+)");
+  bool frontCCW = false;
+
+  DOCUMENT(R"(The polygon :class:`FillMode`.
+
+:type: FillMode
+)");
+  FillMode fillMode = FillMode::Solid;
+
+  DOCUMENT(R"(The polygon :class:`CullMode`.
+
+:type: CullMode
+)");
+  CullMode cullMode = CullMode::NoCull;
+};
+
+DOCUMENT("Describes a common subset of depth testing state.");
+struct DepthTestState
+{
+  DOCUMENT("");
+  DepthTestState() = default;
+  DepthTestState(const DepthTestState &) = default;
+  DepthTestState &operator=(const DepthTestState &) = default;
+
+  DOCUMENT(R"(``True`` if depth testing should be performed.
+
+:type: bool
+)");
+  bool depthEnable = false;
+  DOCUMENT(R"(The :class:`CompareFunction` to use for testing depth values.
+
+:type: CompareFunction
+)");
+  CompareFunction depthFunction = CompareFunction::AlwaysTrue;
+  DOCUMENT(R"(``True`` if depth values should be written to the depth target.
+
+:type: bool
+)");
+  bool depthWrites = false;
+  DOCUMENT(R"(``True`` if depth bounds tests should be applied.
+
+:type: bool
+)");
+  bool depthBounds = false;
+  DOCUMENT(R"(The near plane bounding value.
+
+:type: float
+)");
+  double minDepthBounds = 0.0;
+  DOCUMENT(R"(The far plane bounding value.
+
+:type: float
+)");
+  double maxDepthBounds = 0.0;
+};
+
 DOCUMENT("Describes the details of a stencil operation.");
 struct StencilFace
 {

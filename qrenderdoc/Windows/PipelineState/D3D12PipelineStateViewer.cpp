@@ -2137,18 +2137,26 @@ void D3D12PipelineStateViewer::setState()
   ui->blends->beginUpdate();
   ui->blends->clear();
   {
+    bool independent = state.outputMerger.blendState.independentBlend;
     int i = 0;
     for(const ColorBlend &blend : state.outputMerger.blendState.blends)
     {
-      bool filledSlot = (blend.enabled || targets[i]);
+      bool filledSlot = true;
       bool usedSlot = (targets[i]);
+
+      if(!independent)
+        usedSlot = i == 0;
 
       if(showNode(usedSlot, filledSlot))
       {
         RDTreeWidgetItem *node = NULL;
 
+        QString slotName = QString::number(i);
+        if(!independent)
+          slotName = i == 0 ? tr("All") : lit("-");
+
         node = new RDTreeWidgetItem(
-            {i, blend.enabled ? tr("True") : tr("False"),
+            {slotName, blend.enabled ? tr("True") : tr("False"),
 
              ToQStr(blend.colorBlend.source), ToQStr(blend.colorBlend.destination),
              ToQStr(blend.colorBlend.operation),
@@ -2163,9 +2171,6 @@ void D3D12PipelineStateViewer::setState()
                  .arg((blend.writeMask & 0x2) == 0 ? lit("_") : lit("G"))
                  .arg((blend.writeMask & 0x4) == 0 ? lit("_") : lit("B"))
                  .arg((blend.writeMask & 0x8) == 0 ? lit("_") : lit("A"))});
-
-        if(!filledSlot)
-          setEmptyRow(node);
 
         if(!usedSlot)
           setInactiveRow(node);
@@ -3400,6 +3405,7 @@ void D3D12PipelineStateViewer::exportHTML(QXmlStreamWriter &xml, const D3D12Pipe
 
     QList<QVariantList> rows;
 
+    bool independent = om.blendState.independentBlend;
     int i = 0;
     for(const ColorBlend &b : om.blendState.blends)
     {
@@ -3412,7 +3418,11 @@ void D3D12PipelineStateViewer::exportHTML(QXmlStreamWriter &xml, const D3D12Pipe
                          .arg((b.writeMask & 0x4) == 0 ? lit("_") : lit("B"))
                          .arg((b.writeMask & 0x8) == 0 ? lit("_") : lit("A"));
 
-      rows.push_back({i, b.enabled ? tr("Yes") : tr("No"),
+      QString slotName = QString::number(i);
+      if(!independent)
+        slotName = i == 0 ? tr("All") : lit("-");
+
+      rows.push_back({slotName, b.enabled ? tr("Yes") : tr("No"),
                       b.logicOperationEnabled ? tr("Yes") : tr("No"), ToQStr(b.colorBlend.source),
                       ToQStr(b.colorBlend.destination), ToQStr(b.colorBlend.operation),
                       ToQStr(b.alphaBlend.source), ToQStr(b.alphaBlend.destination),

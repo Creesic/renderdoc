@@ -4311,6 +4311,7 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
     if(IsActiveReplaying(m_State))
     {
       uint32_t actualCount = MaxCommandCount;
+      uint32_t countEventsReplayed = actualCount * comSig->sig.arguments.count();
 
       if(m_Cmd->InRerecordRange(m_Cmd->m_LastCmdListID))
       {
@@ -4332,6 +4333,7 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
         D3D12CommandData::ActionUse use(m_Cmd->m_CurChunkOffset, 0);
         auto it = std::lower_bound(m_Cmd->m_ActionUses.begin(), m_Cmd->m_ActionUses.end(), use);
 
+        // baseEventID is the EI action EID
         uint32_t baseEventID = it->eventId;
 
         {
@@ -4347,6 +4349,10 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
         uint32_t argumentsReplayed =
             RDCMIN(m_Cmd->m_LastEventID - baseEventID, actualCount * comSig->sig.arguments.count());
         uint32_t executesReplayed = argumentsReplayed / comSig->sig.arguments.count();
+
+        // executesReplayed is relative to baseEventID
+        // compute the number of events to skip relative to the curEID
+        countEventsReplayed = (baseEventID + argumentsReplayed) - curEID;
 
         BarrierSet barriers;
 
@@ -4370,12 +4376,7 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
         // when we have a callback, submit every action individually to the callback
         if(m_Cmd->m_ActionCallback)
         {
-          uint32_t countToReplay = actualCount;
-
-          if(m_Cmd->m_FirstEventID <= 1)
-            countToReplay = RDCMIN(countToReplay, executesReplayed);
-          else
-            countToReplay = 1;
+          uint32_t countToReplay = RDCMIN(actualCount, executesReplayed);
 
           D3D12MarkerRegion::Begin(
               list,
@@ -4418,15 +4419,21 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
 
           countToReplay = RDCMIN(countToReplay, maxCommands);
 
+          uint32_t firstDraw = 0;
           if(m_Cmd->m_FirstEventID > 1)
           {
             const uint32_t argidx = (curEID > baseEventID) ? (curEID - baseEventID - 1) : 0;
             const uint32_t execidx = argidx / comSig->sig.arguments.count();
+            firstDraw = execidx;
 
             argOffset += comSig->sig.ByteStride * execidx;
+
+            // Don't replay anything when selecting the pop marker
+            if(execidx == maxCommands)
+              countToReplay = 0;
           }
 
-          for(uint32_t i = 0; i < countToReplay; i++)
+          for(uint32_t i = firstDraw; i < countToReplay; i++)
           {
             ActionFlags drawType =
                 comSig->sig.graphics ? ActionFlags::Drawcall : ActionFlags::Dispatch;
@@ -4437,7 +4444,7 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
             // Allow the callback to recreate the command signature i.e. to match the root signature
             pCommandSignature = m_Cmd->m_IndirectData.commandSig;
 
-            // action up to and including i. The previous draws will be nop'd out
+            // single action starting at specific arg offset
             Unwrap(list)->ExecuteIndirect(Unwrap(pCommandSignature), 1, argBuffer, argOffset, NULL,
                                           0);
 
@@ -4445,6 +4452,9 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
             {
               if(eventId && m_Cmd->m_ActionCallback->PostDraw(eventId, list))
               {
+                // Allow the callback to recreate the command signature i.e. to match the root signature
+                pCommandSignature = m_Cmd->m_IndirectData.commandSig;
+
                 Unwrap(list)->ExecuteIndirect(Unwrap(pCommandSignature), 1, argBuffer, argOffset,
                                               NULL, 0);
                 m_Cmd->m_ActionCallback->PostRedraw(eventId, list);
@@ -4502,6 +4512,7 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
             m_Cmd->m_RayDispatches.push_back(patchedDispatch);
           }
 
+          const ActionDescription *action = m_pDevice->GetAction(curEID);
           uint32_t countToReplay = RDCMIN(actualCount, maxCommands);
 
           if(m_Cmd->m_FirstEventID <= 1)
@@ -4514,20 +4525,19 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
             // there's no need to replay anything more than the first execute.
             countToReplay = RDCMIN(countToReplay, executesReplayed);
           }
+          else if(action && action->flags & ActionFlags::PopMarker)
+          {
+            // don't do anything when selecting the final popmarker as well - everything will have
+            // been done in previous replays so this is a no-op.
+            countToReplay = 0;
+          }
           else
           {
             const uint32_t argidx = (curEID > baseEventID) ? (curEID - baseEventID - 1) : 0;
-            const uint32_t execidx = argidx / comSig->sig.arguments.count();
 
-            // don't do anything when selecting the final popmarker as well - everything will have
-            // been done in previous replays so this is a no-op.
-            if(argidx >= countToReplay * comSig->sig.arguments.count())
-            {
-              countToReplay = 0;
-            }
             // we also know that only the last argument actually does anything - previous are just
             // state setting. So if argIdx isn't the last one, we can skip this
-            else if((argidx + 1) % comSig->sig.arguments.count() != 0)
+            if((argidx + 1) % comSig->sig.arguments.count() != 0)
             {
               countToReplay = 0;
             }
@@ -4536,6 +4546,7 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
               // slightly more complex, we're replaying only one execute later on as a single draw
               // fortunately ExecuteIndirect has no 'draw' builtin, so we can just offset the
               // argument buffer and set count to 1
+              const uint32_t execidx = argidx / comSig->sig.arguments.count();
               countToReplay = 1;
               argOffset += comSig->sig.ByteStride * execidx;
             }
@@ -4548,11 +4559,11 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
       }
 
       // executes skip the event ID past the whole thing
-      uint32_t numEvents = actualCount * (uint32_t)comSig->sig.arguments.size() + 1;
+      ++countEventsReplayed;
       if(m_Cmd->m_FirstEventID > 1)
-        m_Cmd->m_RootEventID += numEvents;
+        m_Cmd->m_RootEventID += countEventsReplayed;
       else
-        m_Cmd->m_BakedCmdListInfo[m_Cmd->m_LastCmdListID].curEventID += numEvents;
+        cmdInfo.curEventID += countEventsReplayed;
     }
     else
     {

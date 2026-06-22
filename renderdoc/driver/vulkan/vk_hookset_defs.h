@@ -1050,7 +1050,7 @@
   HookInitExtension(EXT_mesh_shader, CmdDrawMeshTasksIndirectCountEXT);                              \
   HookInitExtension(KHR_calibrated_timestamps, GetCalibratedTimestampsKHR);                          \
   HookInitPromotedExtension(KHR_line_rasterization, CmdSetLineStipple, KHR);                         \
-  HookInitExtensionEXTtoKHR(CmdSetLineStipple);                                                      \
+  HookInitPromotedExtensionEXTtoKHR(CmdSetLineStipple);                                              \
   HookInitExtension(KHR_deferred_host_operations, CreateDeferredOperationKHR);                       \
   HookInitExtension(KHR_deferred_host_operations, DeferredOperationJoinKHR);                         \
   HookInitExtension(KHR_deferred_host_operations, DestroyDeferredOperationKHR);                      \

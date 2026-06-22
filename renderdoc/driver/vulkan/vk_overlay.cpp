@@ -3771,26 +3771,26 @@ ResourceId VulkanReplay::RenderOverlay(ResourceId texid, FloatVector clearCol, D
           lastView = 31 - Bits::CountLeadingZeroes(multiviewMask);
         }
 
-        for(uint32_t view = firstView; view <= lastView; view++)
-        {
-          Vec4f *ubo = (Vec4f *)m_Overlay.m_TriSizeUBO.Map(&viewOffset[view]);
-          if(!ubo)
-            return ResourceId();
-
-          if(viewportPerView)
-          {
-            *ubo = Vec4f(state.views[view].width, state.views[view].height, 0.0f, 0.0f);
-          }
-          else
-          {
-            *ubo = Vec4f(state.views[0].width, state.views[0].height, 0.0f, 0.0f);
-          }
-
-          m_Overlay.m_TriSizeUBO.Unmap();
-        }
-
         for(size_t i = 0; i < events.size(); i++)
         {
+          for(uint32_t view = firstView; view <= lastView; view++)
+          {
+            Vec4f *ubo = (Vec4f *)m_Overlay.m_TriSizeUBO.Map(&viewOffset[view]);
+            if(!ubo)
+              return ResourceId();
+
+            if(viewportPerView)
+            {
+              *ubo = Vec4f(state.views[view].width, state.views[view].height, 0.0f, 0.0f);
+            }
+            else
+            {
+              *ubo = Vec4f(state.views[0].width, state.views[0].height, 0.0f, 0.0f);
+            }
+
+            m_Overlay.m_TriSizeUBO.Unmap();
+          }
+
           cmd = m_pDriver->GetNextCmd();
 
           if(cmd == VK_NULL_HANDLE)

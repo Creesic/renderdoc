@@ -105,7 +105,7 @@
 #  endif
 #  define Q_DECL_EXPORT __declspec(dllexport)
 #  define Q_DECL_IMPORT __declspec(dllimport)
-#  if _MSC_VER >= 1800
+#  if _MSC_VER >= 1800 && _MSC_VER < 1940
 #    define QT_MAKE_UNCHECKED_ARRAY_ITERATOR(x) stdext::make_unchecked_array_iterator(x)
 #  endif
 #  if _MSC_VER >= 1500 && _MSC_VER < 1950

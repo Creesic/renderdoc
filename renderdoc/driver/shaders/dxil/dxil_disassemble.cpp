@@ -5894,7 +5894,13 @@ static void floatAppendToString(const Type *t, const ShaderValue &val, uint32_t 
 #endif
   }
 
-  double d = t->bitWidth == 64 ? val.f64v[i] : val.f32v[i];
+  double d;
+  if(t->bitWidth == 64)
+    d = val.f64v[i];
+  else if(t->bitWidth == 16)
+    d = (float)val.f16v[i];
+  else
+    d = val.f32v[i];
 
   // NaNs/infs are printed as hex to ensure we don't lose bits
   if(RDCISFINITE(d))
@@ -5923,6 +5929,8 @@ static void floatAppendToString(const Type *t, const ShaderValue &val, uint32_t 
     {
       if(t->bitWidth == 64)
         ret += StringFormat::Fmt("%#g", val.f64v[i]);
+      else if(t->bitWidth == 16)
+        ret += StringFormat::Fmt("%#g", (float)val.f16v[i]);
       else
         ret += StringFormat::Fmt("%#g", val.f32v[i]);
       return;

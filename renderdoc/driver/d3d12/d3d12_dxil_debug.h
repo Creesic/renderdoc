@@ -113,7 +113,7 @@ public:
     return m_WorkgroupProperties;
   }
   const rdcarray<ShaderVariable> &GetConstantBlocks() const override { return m_ConstantBlocks; }
-  const std::map<ConstantBlockReference, bytebuf> &GetConstantBlocksDatas() const override
+  const std::map<ConstantBlockReference, ConstantBlockData> &GetConstantBlocksDatas() const override
   {
     return m_ConstantBlocksDatas;
   }
@@ -160,7 +160,7 @@ private:
   rdcarray<rdcflatmap<ShaderBuiltin, ShaderVariable>> m_ThreadsBuiltins;
   rdcarray<SourceVariableMapping> m_SourceVars;
   rdcarray<ShaderVariable> m_ConstantBlocks;
-  std::map<ConstantBlockReference, bytebuf> m_ConstantBlocksDatas;
+  std::map<ConstantBlockReference, ConstantBlockData> m_ConstantBlocksDatas;
   ShaderVariable m_InputPlaceholder;
   uint32_t m_SubgroupSize = 1;
 

@@ -547,6 +547,9 @@ class TestCase:
         self.controller = analyse.open_capture(self.capture_filename, opts=self.get_replay_options())
         self.sdfile = self.controller.GetStructuredFile()
 
+        if not self.validate_eventids(self.controller):
+            raise TestFailureException("ERROR: capture doesn't have valid event IDs.")
+
         log.print("Checking capture")
 
         self.check_capture()

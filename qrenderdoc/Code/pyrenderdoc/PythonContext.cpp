@@ -1449,6 +1449,7 @@ extern "C" PyObject *GetCurrentGlobalHandle()
 
     Py_XDECREF(sys);
     Py_XDECREF(ret);
+    return ret;
   }
 
   return NULL;

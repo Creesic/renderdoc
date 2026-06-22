@@ -693,6 +693,7 @@ private:
 
   GPUBuffer m_IndirectBuffer;
   size_t m_IndirectBufferSize = 0;
+  GPUBuffer m_IndirectBufferCB;
   VkCommandBuffer m_IndirectCommandBuffer = VK_NULL_HANDLE;
   bool m_IndirectDraw = false;
 
@@ -1186,6 +1187,9 @@ private:
                                         VkDeviceSize counterOffset = 0);
   void ExecuteIndirectReadback(VkCommandBuffer commandBuffer,
                                const VkIndirectRecordData &indirectcopy);
+  void ReplayIndirectCB(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
+                        uint32_t countToReplay, uint32_t stride, uint32_t curEID,
+                        uint32_t baseEventID, VkIndirectPatchType type);
 
   WriteSerialiser &GetThreadSerialiser();
   template <typename SerialiserType>

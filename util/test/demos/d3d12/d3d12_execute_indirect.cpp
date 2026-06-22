@@ -252,6 +252,20 @@ void main(uint3 gid : SV_GroupID)
 
 )EOSHADER";
 
+  float sqSize;
+  Vec2f viewXY;
+
+  void NextTest()
+  {
+    viewXY.x += sqSize;
+
+    if(viewXY.x + sqSize >= (float)screenWidth)
+    {
+      viewXY.x = 0.0f;
+      viewXY.y += sqSize;
+    }
+  }
+
   int main()
   {
     // initialise, create window, create device, etc
@@ -274,16 +288,34 @@ void main(uint3 gid : SV_GroupID)
       Vec4f col;
     };
 
-    const A2V tri[9] = {
+    const A2V tri[3] = {
         {Vec4f(-0.5f, -0.5f, 0.0f), Vec4f(0.0f, 1.0f, 0.0f, 1.0f)},
         {Vec4f(0.0f, 0.5f, 0.0f), Vec4f(0.0f, 1.0f, 0.0f, 1.0f)},
         {Vec4f(0.5f, -0.5f, 0.0f), Vec4f(0.0f, 1.0f, 0.0f, 1.0f)},
     };
 
+    A2V tris[6 * 3];
+
+    for(int t = 0; t < 6; t++)
+    {
+      float r = 1.0f;
+      float x = (float(t) / 6.0f) * 350.0f;
+      float ang0 = x * (3.141592654f / 180.0f);
+      float ang1 = (x + 45.0f) * (3.141592654f / 180.0f);
+
+      tris[t * 3 + 0].pos = Vec4f(0.0f, 0.0f);
+      tris[t * 3 + 0].col = Vec4f(x / 300.0f, 1.0f, 0.0f, 1.0f);
+      tris[t * 3 + 1].pos = Vec4f(r * sinf(ang0), r * cosf(ang0));
+      tris[t * 3 + 1].col = Vec4f(x / 300.0f, 1.0f, 0.0f, 1.0f);
+      tris[t * 3 + 2].pos = Vec4f(r * sinf(ang1), r * cosf(ang1));
+      tris[t * 3 + 2].col = Vec4f(x / 300.0f, 1.0f, 0.0f, 1.0f);
+    }
+
     float checkdata[1024] = {};
     checkdata[64 + 7] = 1.234f;
 
-    ID3D12ResourcePtr vb = MakeBuffer().Data(tri);
+    ID3D12ResourcePtr vb = MakeBuffer().Data(tris);
+    ID3D12ResourcePtr trivb = MakeBuffer().Data(tri);
     ID3D12ResourcePtr cbv = MakeBuffer().Data(checkdata);
     ID3D12ResourcePtr srv = MakeBuffer().Data(checkdata);
     ID3D12ResourcePtr uav = MakeBuffer().UAV().Data(checkdata);
@@ -311,7 +343,7 @@ void main(uint3 gid : SV_GroupID)
       D3D12_DRAW_ARGUMENTS draw;
     } patchargs;
 
-    patchargs.vb.BufferLocation = vb->GetGPUVirtualAddress();
+    patchargs.vb.BufferLocation = trivb->GetGPUVirtualAddress();
     patchargs.vb.SizeInBytes = sizeof(tri);
     patchargs.vb.StrideInBytes = sizeof(A2V);
     patchargs.cbv = cbv->GetGPUVirtualAddress() + 256;
@@ -340,6 +372,7 @@ void main(uint3 gid : SV_GroupID)
     ptr += sizeof(float);
     memcpy(ptr, &patchargs.constData2, sizeof(float));
     ptr += sizeof(float);
+    size_t drawoffset = (size_t)ptr - (size_t)patchArgsData.data();
     memcpy(ptr, &patchargs.draw, sizeof(D3D12_DRAW_ARGUMENTS));
     ptr += sizeof(D3D12_DRAW_ARGUMENTS);
 
@@ -360,12 +393,12 @@ void main(uint3 gid : SV_GroupID)
     } patchargs2;
 
     patchargs2.vb.BufferLocation = vb->GetGPUVirtualAddress();
-    patchargs2.vb.SizeInBytes = sizeof(tri);
+    patchargs2.vb.SizeInBytes = sizeof(tris);
     patchargs2.vb.StrideInBytes = sizeof(A2V);
     patchargs2.draw.VertexCountPerInstance = 3;
     patchargs2.draw.InstanceCount = 1;
     patchargs2.draw.StartInstanceLocation = 0;
-    patchargs2.draw.StartVertexLocation = 0;
+    patchargs2.draw.StartVertexLocation = 3;
 
     std::vector<char> patchArgsData2;
     patchArgsData2.resize(sizeof(PatchArgs2));
@@ -390,7 +423,7 @@ void main(uint3 gid : SV_GroupID)
     patchargs3.draw.VertexCountPerInstance = 3;
     patchargs3.draw.InstanceCount = 1024;
     patchargs3.draw.StartInstanceLocation = 0;
-    patchargs3.draw.StartVertexLocation = 0;
+    patchargs3.draw.StartVertexLocation = 6;
 
     std::vector<char> patchArgsData3;
     patchArgsData3.resize(sizeof(PatchArgs3));
@@ -446,6 +479,17 @@ void main(uint3 gid : SV_GroupID)
     for(uint32_t i = 0; i < countDrawsInFullBuffer; ++i)
     {
       memcpy(fullargsPtr, patchArgsData.data(), patchArgsDataSize);
+      D3D12_VERTEX_BUFFER_VIEW view;
+      view.BufferLocation = vb->GetGPUVirtualAddress();
+      view.SizeInBytes = sizeof(tris);
+      view.StrideInBytes = sizeof(A2V);
+      memcpy(fullargsPtr, &view, sizeof(D3D12_VERTEX_BUFFER_VIEW));
+      D3D12_DRAW_ARGUMENTS draw;
+      draw.VertexCountPerInstance = 3;
+      draw.InstanceCount = 1;
+      draw.StartInstanceLocation = 0;
+      draw.StartVertexLocation = (9 + i * 3) % 18;
+      memcpy(fullargsPtr + drawoffset, &draw, sizeof(D3D12_DRAW_ARGUMENTS));
       fullargsPtr += patchArgsDataSize;
     }
 
@@ -469,8 +513,13 @@ void main(uint3 gid : SV_GroupID)
 
     float baseConstData[4] = {10.0f, 9.0f, 8.0f, 7.0f};
 
+    sqSize = float(screenHeight) / 4.0f;
+
     while(Running())
     {
+      viewXY.x = 0.0f;
+      viewXY.y = 0.0f;
+
       std::vector<ID3D12GraphicsCommandListPtr> cmds;
 
       ID3D12GraphicsCommandListPtr cmd = GetCommandBuffer();
@@ -490,11 +539,10 @@ void main(uint3 gid : SV_GroupID)
       D3D12_CPU_DESCRIPTOR_HANDLE rtv =
           MakeRTV(bb).Format(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB).CreateCPU(0);
 
+      ClearRenderTargetView(cmd, rtv, {0.0f, 0.0f, 0.0f, 1.0f});
       pushMarker(cmd, "Multiple draws");
       for(int i = 0; i < 8; i++)
       {
-        ClearRenderTargetView(cmd, rtv, {0.0f, 0.0f, 0.0f, 1.0f});
-
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         cmd->SetPipelineState(patchpso);
@@ -502,7 +550,7 @@ void main(uint3 gid : SV_GroupID)
         cmd->SetDescriptorHeaps(1, &m_CBVUAVSRV.GetInterfacePtr());
         cmd->SetGraphicsRootDescriptorTable(5, m_CBVUAVSRV->GetGPUDescriptorHandleForHeapStart());
 
-        RSSetViewport(cmd, {0.0f, 0.0f, (float)screenWidth, (float)screenHeight, 0.0f, 1.0f});
+        RSSetViewport(cmd, {viewXY.x, viewXY.y, sqSize, sqSize, 0.0f, 1.0f});
         RSSetScissorRect(cmd, {0, 0, screenWidth, screenHeight});
 
         OMSetRenderTargets(cmd, {rtv}, {});
@@ -510,6 +558,7 @@ void main(uint3 gid : SV_GroupID)
         cmd->SetGraphicsRoot32BitConstants(3, 4, baseConstData, 0);
 
         cmd->ExecuteIndirect(patchArgSig, 1, patchArgBuf, 0, NULL, 0);
+        NextTest();
       }
       popMarker(cmd);
 
@@ -532,7 +581,7 @@ void main(uint3 gid : SV_GroupID)
         cmd->SetGraphicsRootShaderResourceView(1, srv->GetGPUVirtualAddress() + 256);
         cmd->SetGraphicsRootUnorderedAccessView(2, uav->GetGPUVirtualAddress() + 256);
 
-        RSSetViewport(cmd, {0.0f, 0.0f, (float)screenWidth, (float)screenHeight, 0.0f, 1.0f});
+        RSSetViewport(cmd, {viewXY.x, viewXY.y, sqSize, sqSize, 0.0f, 1.0f});
         RSSetScissorRect(cmd, {0, 0, screenWidth, screenHeight});
 
         OMSetRenderTargets(cmd, {rtv}, {});
@@ -540,6 +589,7 @@ void main(uint3 gid : SV_GroupID)
         cmd->SetGraphicsRoot32BitConstants(3, 4, baseConstData, 0);
 
         cmd->ExecuteIndirect(patchArgSig2, 1, patchArgBuf2, 0, NULL, 0);
+        NextTest();
       }
 
       popMarker(cmd);
@@ -608,13 +658,14 @@ void main(uint3 gid : SV_GroupID)
         cmd->SetPipelineState(plainpso);
         cmd->SetGraphicsRootSignature(plainsig);
 
-        RSSetViewport(cmd, {0.0f, 0.0f, (float)screenWidth, (float)screenHeight, 0.0f, 1.0f});
+        RSSetViewport(cmd, {viewXY.x, viewXY.y, sqSize, sqSize, 0.0f, 1.0f});
         RSSetScissorRect(cmd, {0, 0, screenWidth, screenHeight});
 
         OMSetRenderTargets(cmd, {rtv}, {});
 
         cmd->ExecuteIndirect(plainArgSig, 8, customvbargs, 4096 * (sizeof(Vec4f)) + sizeof(Vec4u),
                              NULL, 0);
+        NextTest();
       }
       popMarker(cmd);
 
@@ -630,12 +681,13 @@ void main(uint3 gid : SV_GroupID)
         cmd->SetPipelineState(plainpso);
         cmd->SetGraphicsRootSignature(plainsig);
 
-        RSSetViewport(cmd, {0.0f, 0.0f, (float)screenWidth, (float)screenHeight, 0.0f, 1.0f});
+        RSSetViewport(cmd, {viewXY.x, viewXY.y, sqSize, sqSize, 0.0f, 1.0f});
         RSSetScissorRect(cmd, {0, 0, screenWidth, screenHeight});
 
         OMSetRenderTargets(cmd, {rtv}, {});
 
         cmd->ExecuteIndirect(plainArgSig, countDrawsInFullBuffer, fullargsDrawBuf, 0, NULL, 0);
+        NextTest();
       }
       popMarker(cmd);
 
@@ -648,12 +700,13 @@ void main(uint3 gid : SV_GroupID)
         cmd->SetDescriptorHeaps(1, &m_CBVUAVSRV.GetInterfacePtr());
         cmd->SetGraphicsRootDescriptorTable(5, m_CBVUAVSRV->GetGPUDescriptorHandleForHeapStart());
 
-        RSSetViewport(cmd, {0.0f, 0.0f, (float)screenWidth, (float)screenHeight, 0.0f, 1.0f});
+        RSSetViewport(cmd, {viewXY.x, viewXY.y, sqSize, sqSize, 0.0f, 1.0f});
         RSSetScissorRect(cmd, {0, 0, screenWidth, screenHeight});
 
         OMSetRenderTargets(cmd, {rtv}, {});
         cmd->SetGraphicsRoot32BitConstants(3, 4, baseConstData, 0);
         cmd->ExecuteIndirect(patchArgSig, countDrawsInFullBuffer, fullargsStateDrawBuf, 0, NULL, 0);
+        NextTest();
       }
       popMarker(cmd);
 
@@ -666,8 +719,13 @@ void main(uint3 gid : SV_GroupID)
         cmd->SetGraphicsRootConstantBufferView(0, cbv->GetGPUVirtualAddress() + 256);
         cmd->SetGraphicsRootShaderResourceView(1, srv->GetGPUVirtualAddress() + 256);
         cmd->SetGraphicsRootUnorderedAccessView(2, uav->GetGPUVirtualAddress() + 256);
+        D3D12_VERTEX_BUFFER_VIEW view;
+        view.BufferLocation = vb->GetGPUVirtualAddress();
+        view.SizeInBytes = sizeof(tris);
+        view.StrideInBytes = sizeof(A2V);
+        cmd->IASetVertexBuffers(0, 1, &view);
 
-        RSSetViewport(cmd, {0.0f, 0.0f, (float)screenWidth, (float)screenHeight, 0.0f, 1.0f});
+        RSSetViewport(cmd, {viewXY.x, viewXY.y, sqSize, sqSize, 0.0f, 1.0f});
         RSSetScissorRect(cmd, {0, 0, screenWidth, screenHeight});
 
         OMSetRenderTargets(cmd, {rtv}, {});
@@ -675,7 +733,10 @@ void main(uint3 gid : SV_GroupID)
         cmd->SetGraphicsRoot32BitConstants(3, 4, baseConstData, 0);
 
         cmd->ExecuteIndirect(plainArgSig, 1, patchArgBuf3, 0, NULL, 0);
+        NextTest();
+        RSSetViewport(cmd, {viewXY.x, viewXY.y, sqSize, sqSize, 0.0f, 1.0f});
         cmd->ExecuteIndirect(plainArgSig, 1, patchArgBuf3, 0, NULL, 0);
+        NextTest();
       }
       popMarker(cmd);
 

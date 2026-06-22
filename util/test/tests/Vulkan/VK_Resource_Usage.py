@@ -41,11 +41,15 @@ class VK_Resource_Usage(rdtest.TestCase):
         descBuffer = self.find_action("Descriptor Buffer") is not None
         rdtest.log.print(f"Has Descriptor Buffer: {'Yes' if descBuffer else 'No'}")
 
+        meshShader = self.find_action("Mesh Shader") is not None
+        rdtest.log.print(f"Has Mesh Shader: {'Yes' if meshShader else 'No'}")
+
         countDrawIndirectCount = 30 if drawIndirectCount else 0
         countNested = 39 if nestedSecondaries else 0
         countDescBufferCopy = 10 if descBuffer else 0
         countDescBuffer = 21 if descBuffer else 0
         countDescBuffer += countDescBufferCopy
+        countMeshShader = 33 if meshShader else 0
 
         action = self.find_action("Draw")
         self.controller.SetFrameEvent(action.eventId, False)
@@ -75,48 +79,64 @@ class VK_Resource_Usage(rdtest.TestCase):
                                         (62,rd.ResourceUsage.ColorTarget), 
                                         (73,rd.ResourceUsage.ColorTarget), 
                                         (76,rd.ResourceUsage.ColorTarget), 
-                                        (119,rd.ResourceUsage.ColorTarget), 
-                                        (123,rd.ResourceUsage.ColorTarget), 
-                                        (124,rd.ResourceUsage.ColorTarget), 
-                                        (125,rd.ResourceUsage.ColorTarget), 
+                                        (118,rd.ResourceUsage.ColorTarget), 
+                                        (122,rd.ResourceUsage.ColorTarget), 
                                         (126,rd.ResourceUsage.ColorTarget), 
-                                        (131,rd.ResourceUsage.ColorTarget), 
-                                        (132,rd.ResourceUsage.ColorTarget), 
-                                        (133,rd.ResourceUsage.ColorTarget), 
-                                        (169,rd.ResourceUsage.ColorTarget), 
-                                        (173,rd.ResourceUsage.ColorTarget), 
-                                        (174,rd.ResourceUsage.ColorTarget), 
+                                        (127,rd.ResourceUsage.ColorTarget), 
+                                        (128,rd.ResourceUsage.ColorTarget), 
+                                        (129,rd.ResourceUsage.ColorTarget), 
+                                        (134,rd.ResourceUsage.ColorTarget), 
+                                        (135,rd.ResourceUsage.ColorTarget), 
+                                        (136,rd.ResourceUsage.ColorTarget), 
+                                        (140,rd.ResourceUsage.ColorTarget), 
                                         (175,rd.ResourceUsage.ColorTarget), 
-                                        (176,rd.ResourceUsage.ColorTarget), 
+                                        (179,rd.ResourceUsage.ColorTarget), 
+                                        (180,rd.ResourceUsage.ColorTarget), 
                                         (181,rd.ResourceUsage.ColorTarget), 
                                         (182,rd.ResourceUsage.ColorTarget), 
-                                        (183,rd.ResourceUsage.ColorTarget), 
-                                        (200,rd.ResourceUsage.ColorTarget), 
-                                        (204,rd.ResourceUsage.ColorTarget), 
-                                        (205,rd.ResourceUsage.ColorTarget), 
+                                        (187,rd.ResourceUsage.ColorTarget), 
+                                        (188,rd.ResourceUsage.ColorTarget), 
+                                        (189,rd.ResourceUsage.ColorTarget), 
                                         (206,rd.ResourceUsage.ColorTarget), 
-                                        (207,rd.ResourceUsage.ColorTarget), 
+                                        (210,rd.ResourceUsage.ColorTarget), 
+                                        (211,rd.ResourceUsage.ColorTarget), 
                                         (212,rd.ResourceUsage.ColorTarget), 
                                         (213,rd.ResourceUsage.ColorTarget), 
-                                        (214,rd.ResourceUsage.ColorTarget), 
-                                        (219,rd.ResourceUsage.ColorTarget)] 
+                                        (218,rd.ResourceUsage.ColorTarget), 
+                                        (219,rd.ResourceUsage.ColorTarget), 
+                                        (220,rd.ResourceUsage.ColorTarget), 
+                                        (225,rd.ResourceUsage.ColorTarget)] 
                         if drawIndirectCount:
                             expectedUsage += [
-                                        (240,rd.ResourceUsage.ColorTarget), 
+                                        (230,rd.ResourceUsage.ColorTarget), 
+                                        (233,rd.ResourceUsage.ColorTarget), 
+                                        (237,rd.ResourceUsage.ColorTarget), 
                                         (241,rd.ResourceUsage.ColorTarget), 
-                                        (242,rd.ResourceUsage.ColorTarget), 
+                                        (246,rd.ResourceUsage.ColorTarget), 
                                         (247,rd.ResourceUsage.ColorTarget), 
-                                        (248,rd.ResourceUsage.ColorTarget)]
+                                        (248,rd.ResourceUsage.ColorTarget), 
+                                        (253,rd.ResourceUsage.ColorTarget), 
+                                        (254,rd.ResourceUsage.ColorTarget)]
                         if nestedSecondaries:
                             expectedUsage += [
-                                        (243+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.ColorTarget), 
-                                        (246+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.ColorTarget)] 
+                                        (249+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.ColorTarget), 
+                                        (252+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.ColorTarget)] 
                         if descBuffer:
                             expectedUsage += [
-                                        (248+countDrawIndirectCount+countNested,rd.ResourceUsage.ColorTarget), 
-                                        (251+countDrawIndirectCount+countNested,rd.ResourceUsage.ColorTarget)] 
+                                        (254+countDrawIndirectCount+countNested,rd.ResourceUsage.ColorTarget), 
+                                        (257+countDrawIndirectCount+countNested,rd.ResourceUsage.ColorTarget)] 
+                        if meshShader:
+                            expectedUsage += [
+                                        (239+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.ColorTarget), 
+                                        (243+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.ColorTarget), 
+                                        (244+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.ColorTarget), 
+                                        (247+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.ColorTarget), 
+                                        (250+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.ColorTarget), 
+                                        (254+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.ColorTarget), 
+                                        (258+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.ColorTarget), 
+                                        (262+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.ColorTarget)] 
 
-                        expectedUsage += [(227+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier)]
+                        expectedUsage += [(233+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier)]
                     else:
                         expectedUsage = []
                 elif res.type == rd.ResourceType.RenderPass:
@@ -143,84 +163,93 @@ class VK_Resource_Usage(rdtest.TestCase):
                                         (62,rd.ResourceUsage.VertexBuffer), 
                                         (73,rd.ResourceUsage.VertexBuffer), 
                                         (76,rd.ResourceUsage.VertexBuffer), 
-                                        (119,rd.ResourceUsage.VertexBuffer), 
-                                        (123,rd.ResourceUsage.VertexBuffer), 
-                                        (124,rd.ResourceUsage.VertexBuffer), 
-                                        (125,rd.ResourceUsage.VertexBuffer), 
+                                        (118,rd.ResourceUsage.VertexBuffer), 
+                                        (122,rd.ResourceUsage.VertexBuffer), 
                                         (126,rd.ResourceUsage.VertexBuffer), 
-                                        (131,rd.ResourceUsage.VertexBuffer), 
-                                        (132,rd.ResourceUsage.VertexBuffer), 
-                                        (133,rd.ResourceUsage.VertexBuffer), 
-                                        (169,rd.ResourceUsage.VertexBuffer), 
-                                        (173,rd.ResourceUsage.VertexBuffer), 
-                                        (174,rd.ResourceUsage.VertexBuffer), 
+                                        (127,rd.ResourceUsage.VertexBuffer), 
+                                        (128,rd.ResourceUsage.VertexBuffer), 
+                                        (129,rd.ResourceUsage.VertexBuffer), 
+                                        (134,rd.ResourceUsage.VertexBuffer), 
+                                        (135,rd.ResourceUsage.VertexBuffer), 
+                                        (136,rd.ResourceUsage.VertexBuffer), 
+                                        (140,rd.ResourceUsage.VertexBuffer), 
                                         (175,rd.ResourceUsage.VertexBuffer), 
-                                        (176,rd.ResourceUsage.VertexBuffer), 
+                                        (179,rd.ResourceUsage.VertexBuffer), 
+                                        (180,rd.ResourceUsage.VertexBuffer), 
                                         (181,rd.ResourceUsage.VertexBuffer), 
                                         (182,rd.ResourceUsage.VertexBuffer), 
-                                        (183,rd.ResourceUsage.VertexBuffer), 
-                                        (200,rd.ResourceUsage.VertexBuffer), 
-                                        (204,rd.ResourceUsage.VertexBuffer), 
-                                        (205,rd.ResourceUsage.VertexBuffer), 
+                                        (187,rd.ResourceUsage.VertexBuffer), 
+                                        (188,rd.ResourceUsage.VertexBuffer), 
+                                        (189,rd.ResourceUsage.VertexBuffer), 
                                         (206,rd.ResourceUsage.VertexBuffer), 
-                                        (207,rd.ResourceUsage.VertexBuffer), 
+                                        (210,rd.ResourceUsage.VertexBuffer), 
+                                        (211,rd.ResourceUsage.VertexBuffer), 
                                         (212,rd.ResourceUsage.VertexBuffer), 
                                         (213,rd.ResourceUsage.VertexBuffer), 
-                                        (214,rd.ResourceUsage.VertexBuffer),
-                                        (219,rd.ResourceUsage.VertexBuffer)] 
+                                        (218,rd.ResourceUsage.VertexBuffer), 
+                                        (219,rd.ResourceUsage.VertexBuffer), 
+                                        (220,rd.ResourceUsage.VertexBuffer),
+                                        (225,rd.ResourceUsage.VertexBuffer)] 
                         if drawIndirectCount:
                             expectedUsage += [
-                                        (240,rd.ResourceUsage.VertexBuffer), 
+                                        (230,rd.ResourceUsage.VertexBuffer), 
+                                        (233,rd.ResourceUsage.VertexBuffer), 
+                                        (237,rd.ResourceUsage.VertexBuffer), 
                                         (241,rd.ResourceUsage.VertexBuffer), 
-                                        (242,rd.ResourceUsage.VertexBuffer), 
+                                        (246,rd.ResourceUsage.VertexBuffer), 
                                         (247,rd.ResourceUsage.VertexBuffer), 
-                                        (248,rd.ResourceUsage.VertexBuffer)]
+                                        (248,rd.ResourceUsage.VertexBuffer), 
+                                        (253,rd.ResourceUsage.VertexBuffer), 
+                                        (254,rd.ResourceUsage.VertexBuffer)]
                         if nestedSecondaries:
                             expectedUsage += [
-                                        (243+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.VertexBuffer), 
-                                        (246+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.VertexBuffer)]
+                                        (249+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.VertexBuffer), 
+                                        (252+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.VertexBuffer)]
                         if descBuffer:
                             expectedUsage += [
-                                        (248+countDrawIndirectCount+countNested,rd.ResourceUsage.VertexBuffer), 
-                                        (251+countDrawIndirectCount+countNested,rd.ResourceUsage.VertexBuffer)]
+                                        (254+countDrawIndirectCount+countNested,rd.ResourceUsage.VertexBuffer), 
+                                        (257+countDrawIndirectCount+countNested,rd.ResourceUsage.VertexBuffer)]
                     if (res.name == "Index Buffer"):
                         expectedUsage = [(35,rd.ResourceUsage.IndexBuffer),
                                         (45,rd.ResourceUsage.IndexBuffer),
                                         (62,rd.ResourceUsage.IndexBuffer),
                                         (76,rd.ResourceUsage.IndexBuffer),
-                                        (131,rd.ResourceUsage.IndexBuffer),
-                                        (132,rd.ResourceUsage.IndexBuffer),
-                                        (133,rd.ResourceUsage.IndexBuffer),
-                                        (181,rd.ResourceUsage.IndexBuffer),
-                                        (182,rd.ResourceUsage.IndexBuffer),
-                                        (183,rd.ResourceUsage.IndexBuffer),
-                                        (212,rd.ResourceUsage.IndexBuffer),
-                                        (213,rd.ResourceUsage.IndexBuffer),
-                                        (214,rd.ResourceUsage.IndexBuffer)]
+                                        (134,rd.ResourceUsage.IndexBuffer),
+                                        (135,rd.ResourceUsage.IndexBuffer),
+                                        (136,rd.ResourceUsage.IndexBuffer),
+                                        (140,rd.ResourceUsage.IndexBuffer),
+                                        (187,rd.ResourceUsage.IndexBuffer),
+                                        (188,rd.ResourceUsage.IndexBuffer),
+                                        (189,rd.ResourceUsage.IndexBuffer),
+                                        (218,rd.ResourceUsage.IndexBuffer),
+                                        (219,rd.ResourceUsage.IndexBuffer),
+                                        (220,rd.ResourceUsage.IndexBuffer)]
                         if drawIndirectCount:
                             expectedUsage += [
-                                        (247,rd.ResourceUsage.IndexBuffer),
-                                        (248,rd.ResourceUsage.IndexBuffer)]
+                                        (233,rd.ResourceUsage.IndexBuffer), 
+                                        (241,rd.ResourceUsage.IndexBuffer), 
+                                        (253,rd.ResourceUsage.IndexBuffer),
+                                        (254,rd.ResourceUsage.IndexBuffer)]
                         if nestedSecondaries:
                             expectedUsage += [
-                                        (246+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.IndexBuffer)]
+                                        (252+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.IndexBuffer)]
                         if descBuffer:
                             expectedUsage += [
-                                        (251+countDrawIndirectCount+countNested,rd.ResourceUsage.IndexBuffer)]
+                                        (257+countDrawIndirectCount+countNested,rd.ResourceUsage.IndexBuffer)]
                     if (res.name == "Compute Buffer In"):
                         expectedUsage += [(87,rd.ResourceUsage.CS_Constants),
                                         (94,rd.ResourceUsage.CS_Constants)]
                         if nestedSecondaries:
-                            expectedUsage += [(259+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.CS_Constants)]
+                            expectedUsage += [(265+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.CS_Constants)]
                         if descBuffer:
-                            expectedUsage += [(256+countDrawIndirectCount+countNested,rd.ResourceUsage.CS_Constants)]
+                            expectedUsage += [(262+countDrawIndirectCount+countNested,rd.ResourceUsage.CS_Constants)]
                     if (res.name == "Compute Buffer Out"):
                         expectedUsage += [(87,rd.ResourceUsage.CS_RWResource),
                                         (94,rd.ResourceUsage.CS_RWResource)]
                         if nestedSecondaries:
-                            expectedUsage += [(259+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.CS_RWResource)]
+                            expectedUsage += [(265+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.CS_RWResource)]
                         if descBuffer:
-                            expectedUsage += [(256+countDrawIndirectCount+countNested,rd.ResourceUsage.CS_RWResource)]
+                            expectedUsage += [(262+countDrawIndirectCount+countNested,rd.ResourceUsage.CS_RWResource)]
                     if (res.name == "Indirect Data"):
                         expectedUsage += [(14,rd.ResourceUsage.Barrier),
                                         (15,rd.ResourceUsage.Clear),
@@ -231,79 +260,92 @@ class VK_Resource_Usage(rdtest.TestCase):
                                         (106,rd.ResourceUsage.CS_RWResource),
                                         (106,rd.ResourceUsage.Indirect),
                                         (107,rd.ResourceUsage.Barrier),
-                                        (119,rd.ResourceUsage.Indirect),
+                                        (118,rd.ResourceUsage.Indirect),
                                         (122,rd.ResourceUsage.Indirect),
-                                        (130,rd.ResourceUsage.Indirect),
-                                        (136,rd.ResourceUsage.Barrier),
-                                        (141,rd.ResourceUsage.Barrier),
-                                        (142,rd.ResourceUsage.Clear),
-                                        (143,rd.ResourceUsage.Barrier),
-                                        (147,rd.ResourceUsage.CS_RWResource),
+                                        (125,rd.ResourceUsage.Indirect),
+                                        (133,rd.ResourceUsage.Indirect),
+                                        (140,rd.ResourceUsage.Indirect),
+                                        (142,rd.ResourceUsage.Barrier),
+                                        (147,rd.ResourceUsage.Barrier),
+                                        (148,rd.ResourceUsage.Clear),
                                         (149,rd.ResourceUsage.Barrier),
-                                        (151,rd.ResourceUsage.CS_RWResource),
-                                        (151,rd.ResourceUsage.Indirect),
-                                        (152,rd.ResourceUsage.CS_RWResource),
-                                        (152,rd.ResourceUsage.Indirect),
-                                        (153,rd.ResourceUsage.Barrier),
-                                        (154,rd.ResourceUsage.CS_RWResource),
-                                        (154,rd.ResourceUsage.Indirect),
+                                        (153,rd.ResourceUsage.CS_RWResource),
                                         (155,rd.ResourceUsage.Barrier),
-                                        (169,rd.ResourceUsage.Indirect),
-                                        (172,rd.ResourceUsage.Indirect),
-                                        (180,rd.ResourceUsage.Indirect),
-                                        (200,rd.ResourceUsage.Indirect),
-                                        (203,rd.ResourceUsage.Indirect),
-                                        (211,rd.ResourceUsage.Indirect),
-                                        (219,rd.ResourceUsage.IndexBuffer),
-                                        (219,rd.ResourceUsage.Indirect)]
+                                        (157,rd.ResourceUsage.CS_RWResource),
+                                        (157,rd.ResourceUsage.Indirect),
+                                        (158,rd.ResourceUsage.CS_RWResource),
+                                        (158,rd.ResourceUsage.Indirect),
+                                        (159,rd.ResourceUsage.Barrier),
+                                        (160,rd.ResourceUsage.CS_RWResource),
+                                        (160,rd.ResourceUsage.Indirect),
+                                        (161,rd.ResourceUsage.Barrier),
+                                        (175,rd.ResourceUsage.Indirect),
+                                        (178,rd.ResourceUsage.Indirect),
+                                        (186,rd.ResourceUsage.Indirect),
+                                        (206,rd.ResourceUsage.Indirect),
+                                        (209,rd.ResourceUsage.Indirect),
+                                        (217,rd.ResourceUsage.Indirect),
+                                        (225,rd.ResourceUsage.IndexBuffer),
+                                        (225,rd.ResourceUsage.Indirect)]
                         if drawIndirectCount:
                             expectedUsage += [
-                                        (224,rd.ResourceUsage.Indirect),
-                                        (224,rd.ResourceUsage.Indirect),
-                                        (227,rd.ResourceUsage.Indirect),
-                                        (227,rd.ResourceUsage.Indirect),
-                                        (231,rd.ResourceUsage.Indirect),
-                                        (231,rd.ResourceUsage.Indirect),
-                                        (235,rd.ResourceUsage.Indirect),
-                                        (235,rd.ResourceUsage.Indirect),
-                                        (239,rd.ResourceUsage.Indirect),
-                                        (239,rd.ResourceUsage.Indirect),
-                                        (246,rd.ResourceUsage.Indirect),
-                                        (246,rd.ResourceUsage.Indirect)]
-                        expectedUsage += [(223+countDrawIndirectCount,rd.ResourceUsage.Barrier)]
+                                        (230,rd.ResourceUsage.Indirect),
+                                        (230,rd.ResourceUsage.Indirect),
+                                        (233,rd.ResourceUsage.Indirect),
+                                        (233,rd.ResourceUsage.Indirect),
+                                        (237,rd.ResourceUsage.Indirect),
+                                        (237,rd.ResourceUsage.Indirect),
+                                        (241,rd.ResourceUsage.Indirect),
+                                        (241,rd.ResourceUsage.Indirect),
+                                        (245,rd.ResourceUsage.Indirect),
+                                        (245,rd.ResourceUsage.Indirect),
+                                        (252,rd.ResourceUsage.Indirect),
+                                        (252,rd.ResourceUsage.Indirect)]
+                        expectedUsage += [(229+countDrawIndirectCount,rd.ResourceUsage.Barrier)]
                         if nestedSecondaries:
                             expectedUsage += [
-                                        (260+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.Barrier)]
+                                        (266+countDrawIndirectCount+countDescBufferCopy,rd.ResourceUsage.Barrier)]
+                        if meshShader:
+                            expectedUsage += [
+                                        (242+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Indirect),
+                                        (247+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Indirect),
+                                        (250+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Indirect),
+                                        (253+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Indirect),
+                                        (253+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Indirect),
+                                        (258+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Indirect),
+                                        (258+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Indirect),
+                                        (262+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Indirect),
+                                        (262+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Indirect)]
                     if (res.name == "Barrier Buffer"):
-                        expectedUsage = [(234+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (242+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (250+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (258+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (266+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (274+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (282+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (290+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (298+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (306+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier)]
+                        expectedUsage = [(240+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (248+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (256+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (264+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (272+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (280+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (288+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (296+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (304+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (312+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier)]
                     if (res.name == "Barrier2 Buffer"):
-                        expectedUsage = [(314+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (319+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (324+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier),
-                                        (329+countDrawIndirectCount+countNested+countDescBuffer,rd.ResourceUsage.Barrier)]
+                        expectedUsage = [(320+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (325+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (330+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier),
+                                        (335+countDrawIndirectCount+countNested+countDescBuffer+countMeshShader,rd.ResourceUsage.Barrier)]
                     if (res.name == "Descriptor Buffer"):
                         if descBuffer:
-                            expectedUsage = [(227+countDrawIndirectCount,rd.ResourceUsage.Barrier), 
-                                        (228+countDrawIndirectCount,rd.ResourceUsage.CopySrc),
-                                        (229+countDrawIndirectCount,rd.ResourceUsage.Barrier),
-                                        (230+countDrawIndirectCount,rd.ResourceUsage.Clear),
-                                        (233+countDrawIndirectCount,rd.ResourceUsage.Barrier),
-                                        (234+countDrawIndirectCount,rd.ResourceUsage.CopyDst)]
+                            expectedUsage = [(233+countDrawIndirectCount,rd.ResourceUsage.Barrier), 
+                                        (234+countDrawIndirectCount,rd.ResourceUsage.CopySrc),
+                                        (235+countDrawIndirectCount,rd.ResourceUsage.Barrier),
+                                        (236+countDrawIndirectCount,rd.ResourceUsage.Clear),
+                                        (239+countDrawIndirectCount,rd.ResourceUsage.Barrier),
+                                        (240+countDrawIndirectCount,rd.ResourceUsage.CopyDst)]
                     if (res.name == "Descriptor Backup Buffer"):
                         if descBuffer:
-                            expectedUsage = [(227+countDrawIndirectCount,rd.ResourceUsage.Barrier), 
-                                        (228+countDrawIndirectCount,rd.ResourceUsage.CopyDst),
-                                        (233+countDrawIndirectCount,rd.ResourceUsage.Barrier),
-                                        (234+countDrawIndirectCount,rd.ResourceUsage.CopySrc)]
+                            expectedUsage = [(233+countDrawIndirectCount,rd.ResourceUsage.Barrier), 
+                                        (234+countDrawIndirectCount,rd.ResourceUsage.CopyDst),
+                                        (239+countDrawIndirectCount,rd.ResourceUsage.Barrier),
+                                        (240+countDrawIndirectCount,rd.ResourceUsage.CopySrc)]
                 elif res.type == rd.ResourceType.Texture:
                     if (res.name == "Offscreen MSAA Image"):
                         expectedUsage = [(11,rd.ResourceUsage.Barrier), 
@@ -315,42 +357,48 @@ class VK_Resource_Usage(rdtest.TestCase):
                                         (10,rd.ResourceUsage.Clear), 
                                         (42,rd.ResourceUsage.PS_Resource), 
                                         (45,rd.ResourceUsage.PS_Resource), 
-                                        (119,rd.ResourceUsage.PS_Resource), 
-                                        (123,rd.ResourceUsage.PS_Resource), 
-                                        (124,rd.ResourceUsage.PS_Resource), 
-                                        (125,rd.ResourceUsage.PS_Resource), 
+                                        (118,rd.ResourceUsage.PS_Resource), 
+                                        (122,rd.ResourceUsage.PS_Resource), 
                                         (126,rd.ResourceUsage.PS_Resource), 
-                                        (131,rd.ResourceUsage.PS_Resource), 
-                                        (132,rd.ResourceUsage.PS_Resource), 
-                                        (133,rd.ResourceUsage.PS_Resource), 
-                                        (169,rd.ResourceUsage.PS_Resource), 
-                                        (173,rd.ResourceUsage.PS_Resource), 
-                                        (174,rd.ResourceUsage.PS_Resource), 
+                                        (127,rd.ResourceUsage.PS_Resource), 
+                                        (128,rd.ResourceUsage.PS_Resource), 
+                                        (129,rd.ResourceUsage.PS_Resource), 
+                                        (134,rd.ResourceUsage.PS_Resource), 
+                                        (135,rd.ResourceUsage.PS_Resource), 
+                                        (136,rd.ResourceUsage.PS_Resource), 
+                                        (140,rd.ResourceUsage.PS_Resource), 
                                         (175,rd.ResourceUsage.PS_Resource), 
-                                        (176,rd.ResourceUsage.PS_Resource), 
+                                        (179,rd.ResourceUsage.PS_Resource), 
+                                        (180,rd.ResourceUsage.PS_Resource), 
                                         (181,rd.ResourceUsage.PS_Resource), 
                                         (182,rd.ResourceUsage.PS_Resource), 
-                                        (183,rd.ResourceUsage.PS_Resource), 
-                                        (200,rd.ResourceUsage.PS_Resource), 
-                                        (204,rd.ResourceUsage.PS_Resource), 
-                                        (205,rd.ResourceUsage.PS_Resource), 
+                                        (187,rd.ResourceUsage.PS_Resource), 
+                                        (188,rd.ResourceUsage.PS_Resource), 
+                                        (189,rd.ResourceUsage.PS_Resource), 
                                         (206,rd.ResourceUsage.PS_Resource), 
-                                        (207,rd.ResourceUsage.PS_Resource), 
+                                        (210,rd.ResourceUsage.PS_Resource), 
+                                        (211,rd.ResourceUsage.PS_Resource), 
                                         (212,rd.ResourceUsage.PS_Resource), 
                                         (213,rd.ResourceUsage.PS_Resource), 
-                                        (214,rd.ResourceUsage.PS_Resource),
-                                        (219,rd.ResourceUsage.PS_Resource)]
+                                        (218,rd.ResourceUsage.PS_Resource), 
+                                        (219,rd.ResourceUsage.PS_Resource), 
+                                        (220,rd.ResourceUsage.PS_Resource),
+                                        (225,rd.ResourceUsage.PS_Resource)]
                         if drawIndirectCount:
                             expectedUsage += [
-                                        (240,rd.ResourceUsage.PS_Resource), 
+                                        (230,rd.ResourceUsage.PS_Resource), 
+                                        (233,rd.ResourceUsage.PS_Resource), 
+                                        (237,rd.ResourceUsage.PS_Resource), 
                                         (241,rd.ResourceUsage.PS_Resource), 
-                                        (242,rd.ResourceUsage.PS_Resource), 
+                                        (246,rd.ResourceUsage.PS_Resource), 
                                         (247,rd.ResourceUsage.PS_Resource), 
-                                        (248,rd.ResourceUsage.PS_Resource)]
+                                        (248,rd.ResourceUsage.PS_Resource), 
+                                        (253,rd.ResourceUsage.PS_Resource), 
+                                        (254,rd.ResourceUsage.PS_Resource)]
                         if descBuffer:
                             expectedUsage += [
-                                        (248+countDrawIndirectCount+countNested,rd.ResourceUsage.PS_Resource), 
-                                        (251+countDrawIndirectCount+countNested,rd.ResourceUsage.PS_Resource)]
+                                        (254+countDrawIndirectCount+countNested,rd.ResourceUsage.PS_Resource), 
+                                        (257+countDrawIndirectCount+countNested,rd.ResourceUsage.PS_Resource)]
                 elif res.type == rd.ResourceType.CommandBuffer:
                     expectedUsage = [(0,rd.ResourceUsage.Unused)]
                 elif res.type == rd.ResourceType.DescriptorStore:

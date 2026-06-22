@@ -2595,7 +2595,7 @@ bool ThreadState::ExecuteInstruction(const rdcarray<ThreadState> &workgroup)
                   auto it = m_GlobalState.constantBlocksDatas.find(constantBlockRef);
                   if(it != m_GlobalState.constantBlocksDatas.end())
                   {
-                    const bytebuf &cbufferData = it->second;
+                    const bytebuf &cbufferData = it->second.bufferData;
                     if(cbufferData.size() != 0)
                     {
                       size_t offset = 0;
@@ -2681,9 +2681,9 @@ bool ThreadState::ExecuteInstruction(const rdcarray<ThreadState> &workgroup)
                 auto it = m_GlobalState.constantBlocksDatas.find(constantBlockRef);
                 if(it != m_GlobalState.constantBlocksDatas.end())
                 {
-                  const bytebuf &cbufferData = it->second;
-                  const uint32_t bufferSize = (uint32_t)cbufferData.size();
-                  const uint32_t maxIndex = AlignUp16(bufferSize) / 16;
+                  const bytebuf &cbufferData = it->second.bufferData;
+                  const uint32_t dataSize = (uint32_t)(it->second.byteSize);
+                  const uint32_t maxIndex = AlignUp16(dataSize) / 16;
                   RDCASSERTMSG("Out of bounds cbuffer load", regIndex < maxIndex, regIndex, maxIndex);
                   if(regIndex < maxIndex)
                   {
@@ -2691,7 +2691,7 @@ bool ThreadState::ExecuteInstruction(const rdcarray<ThreadState> &workgroup)
                     const uint32_t byteWidth = 4;
                     const byte *base = cbufferData.data() + dataOffset;
                     const uint32_t *data = (const uint32_t *)base;
-                    const uint32_t numComps = RDCMIN(4U, (bufferSize - dataOffset) / byteWidth);
+                    const uint32_t numComps = RDCMIN(4U, (dataSize - dataOffset) / byteWidth);
                     for(uint32_t c = 0; c < numComps; c++)
                       result.value.u32v[c] = data[c];
                   }

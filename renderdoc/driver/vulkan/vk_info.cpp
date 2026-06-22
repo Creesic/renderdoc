@@ -1149,8 +1149,6 @@ void VulkanCreationInfo::ShaderObject::Init(VulkanResourceManager *resourceMan,
   // specialization info
   if(pCreateInfo->pSpecializationInfo)
   {
-    key = ShaderModuleReflectionKey(shad.stage, shad.entryPoint, id);
-
     const byte *data = (const byte *)pCreateInfo->pSpecializationInfo->pData;
 
     const VkSpecializationMapEntry *maps = pCreateInfo->pSpecializationInfo->pMapEntries;

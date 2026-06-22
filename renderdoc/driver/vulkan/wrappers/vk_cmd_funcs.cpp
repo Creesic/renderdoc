@@ -5516,7 +5516,7 @@ bool WrappedVulkan::Serialise_vkCmdExecuteCommands(SerialiserType &ser, VkComman
               "Executing a command buffer with RENDER_PASS_CONTINUE_BIT outside of render pass");
         }
 
-        // insert the baked command buffer in-line into this list of notes, assigning new event and
+        // insert the baked command buffer in-line into this list of nodes, assigning new event and
         // drawIDs
         parentCmdBufInfo.action->InsertAndUpdateIDs(*cmdBufInfo.action, parentCmdBufInfo.curEventID,
                                                     parentCmdBufInfo.actionCount);

@@ -2921,6 +2921,10 @@ QString BufferFormatter::DeclareStruct(Packing::Rules pack, ResourceId shader,
       {
         varTypeName = pointeeType.members[0].type.name;
       }
+      else if(pointeeType.baseType != VarType::Struct && pointeeType.members.size() == 0)
+      {
+        varTypeName = pointeeType.name;
+      }
       else
       {
         varTypeName = MakeIdentifierName(pointeeType.name);

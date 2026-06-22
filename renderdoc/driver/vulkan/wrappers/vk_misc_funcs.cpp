@@ -2814,17 +2814,17 @@ bool WrappedVulkan::Serialise_SetCommandAnnotation(SerialiserType &ser, VkComman
 
   if(IsReplayingAndReading())
   {
+    m_LastCmdBufferID = GetResID(cmd);
+
     if(IsLoading(m_State))
     {
       if(!m_RootAnnotation)
         m_RootAnnotation = new SDObject("Event Annotations"_lit, "Event Annotations"_lit);
 
-      ResourceId cmdId = GetResID(cmd);
-
-      PendingAnnotation annot = {m_BakedCmdBufferInfo[cmdId].curEventID, key, valueType,
+      PendingAnnotation annot = {m_BakedCmdBufferInfo[m_LastCmdBufferID].curEventID, key, valueType,
                                  valueVectorWidth, value};
 
-      m_BakedCmdBufferInfo[cmdId].annotations.push_back(annot);
+      m_BakedCmdBufferInfo[m_LastCmdBufferID].annotations.push_back(annot);
 
       m_Replay->WriteFrameRecord().frameInfo.containsAnnotations = true;
     }

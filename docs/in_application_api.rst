@@ -13,14 +13,14 @@ The recommended way to access the RenderDoc API is to passively check if the mod
 
 To do this you'll use your platforms dynamic library functions to see if the library is open already - e.g. ``GetModuleHandle`` on Windows, or ``dlopen`` with the ``RTLD_NOW | RTLD_NOLOAD`` flags if available on \*nix systems. On most platforms you can just search for the module name - ``renderdoc.dll`` on Windows, or ``librenderdoc.so`` on Linux, or ``libVkLayer_GLES_RenderDoc.so`` on Android should be sufficient here, so you don't need to know the path to where RenderDoc is running from. This will vary by platform however so consult your platform's OS documentation. Then you can use ``GetProcAddress`` or ``dlsym`` to fetch the ``RENDERDOC_GetAPI`` function using the typedef above.
 
+.. _renderdoc-api-example:
+
 .. cpp:function:: int RENDERDOC_GetAPI(RENDERDOC_Version version, void **outAPIPointers)
 
 
     This function is the only entry point actually exported from the RenderDoc module. You call this function with the desired API version, and pass it the address of a pointer to the appropriate struct type. If successful, RenderDoc will set the pointer to point to a struct containing the function pointers for the API functions (detailed below) and return 1.
 
     Note that version numbers follow `semantic versioning <http://semver.org>`_ which means the implementation returned may have a higher minor and/or patch version than requested.
-
-.. _renderdoc-api-example:
 
     Example code:
 

@@ -394,7 +394,8 @@ rdcarray<BufferDescription> D3D12Replay::GetBuffers()
   rdcarray<BufferDescription> ret;
 
   for(auto it = m_pDevice->GetResourceList().begin(); it != m_pDevice->GetResourceList().end(); it++)
-    if(it->second->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+    if(it->second->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER &&
+       !ResourceIDGen::IsReplayOnlyID(it->first))
       ret.push_back(GetBuffer(it->first));
 
   return ret;

@@ -1057,6 +1057,7 @@ void WrappedVulkan::Shutdown()
   m_Replay->DestroyResources();
 
   m_IndirectBuffer.Destroy();
+  m_IndirectBufferCB.Destroy();
 
   // destroy debug manager and any objects it created
   SAFE_DELETE(m_DebugManager);

@@ -995,7 +995,7 @@ void D3D12APIWrapper::AddCBufferToGlobalState(const BindingSlot &slot, bytebuf &
       RDCASSERTMSG("Reassigning previously filled cbuffer", targetVars.empty());
 
       ConstantBlockReference constantBlockRef = {i, arrayIndex};
-      m_ConstantBlocksDatas[constantBlockRef] = cbufData;
+      m_ConstantBlocksDatas[constantBlockRef] = {cbufData, cb.byteSize};
       rdcstr resName = Debugger::GetResourceReferenceName(m_Program, ResourceClass::CBuffer, slot);
       m_ConstantBlocks[i].name = resName;
 

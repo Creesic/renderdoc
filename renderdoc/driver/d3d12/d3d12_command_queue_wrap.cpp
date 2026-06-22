@@ -627,7 +627,7 @@ bool WrappedID3D12CommandQueue::Serialise_ExecuteCommandLists(SerialiserType &se
           m_Cmd.m_RootEventID++;
         }
 
-        // insert the baked command list in-line into this list of notes, assigning new event and
+        // insert the baked command list in-line into this list of nodes, assigning new event and
         // drawIDs
         m_Cmd.InsertActionsAndRefreshIDs(cmd, cmdListInfo);
 

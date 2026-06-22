@@ -339,7 +339,7 @@ void WrappedVulkan::ReplayQueueSubmit(VkQueue queue, VkSubmitInfo2 submitInfo, r
       CommandBufferNode *rebaseNode = BuildSubmitTree(cmd, m_RootEventID);
       m_Partial.commandTree.push_back(rebaseNode);
 
-      // insert the baked command buffer in-line into this list of notes, assigning new event
+      // insert the baked command buffer in-line into this list of nodes, assigning new event
       // and drawIDs
       InsertActionsAndRefreshIDs(cmdBufInfo);
 
@@ -751,6 +751,14 @@ void WrappedVulkan::InsertActionsAndRefreshIDs(BakedCmdBufferInfo &cmdBufInfo)
           // everything afterwards is adjusted. Now see if we need to remove the subdraw or clone it
           if(indirectCount == 0)
           {
+            // Copy the flags and resource usage from the subdraw to the indirect action (push marker)
+            n.action.flags |= cmdBufNodes[i + 1].action.flags;
+            n.resourceUsage.swap(cmdBufNodes[i + 1].resourceUsage);
+            for(rdcpair<ResourceId, EventUsage> &use : n.resourceUsage)
+              use.second.eventId += eidShift;
+            for(const rdcpair<ResourceId, EventUsage> &use : cmdBufNodes[i + 1].resourceUsage)
+              n.resourceUsage.push_back(use);
+
             // i is the pushmarker, which we leave. i+1 is the subdraw
             cmdBufNodes.erase(i + 1);
           }

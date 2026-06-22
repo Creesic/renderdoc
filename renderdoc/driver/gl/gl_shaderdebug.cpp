@@ -1927,13 +1927,25 @@ static bool DeclareSignatureElement(const ShaderReflection *refl, size_t i, rdcs
   if(name.beginsWith("gl_"))
     name.insert(0, '_');
 
-  char prefix = (sig.varType == VarType::Float)  ? ' '
-                : (sig.varType == VarType::UInt) ? 'u'
-                : (sig.varType == VarType::SInt) ? 'i'
-                                                 : 'x';
+  VarType varType = sig.varType;
+
+  // bool in/out variables are not allowed in GLSL but these two builtins may come back as bool from
+  // SPIR-V reflection (GL reflection will type them as ints). Ensure this matches the uint-coerced
+  // value in CreateInputFetcher()
+  if(varType == VarType::Bool)
+  {
+    RDCASSERT(sig.systemValue == ShaderBuiltin::IsFrontFace ||
+              sig.systemValue == ShaderBuiltin::IsHelper);
+    varType = VarType::UInt;
+  }
+
+  char prefix = (varType == VarType::Float)  ? ' '
+                : (varType == VarType::UInt) ? 'u'
+                : (varType == VarType::SInt) ? 'i'
+                                             : 'x';
   if(sig.compCount == 1)
   {
-    sigDecl += ToStr(sig.varType);
+    sigDecl += ToStr(varType);
   }
   else
   {

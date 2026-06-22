@@ -3799,6 +3799,10 @@ RDResult WrappedVulkan::ReadLogInitialisation(RDCFile *rdc, bool storeStructured
                             GPUBuffer::eGPUBufferGPULocal | GPUBuffer::eGPUBufferIndirectBuffer);
     m_IndirectBuffer.Name("m_IndirectBuffer");
 
+    m_IndirectBufferCB.Create(this, GetDev(), m_IndirectBufferSize * 2, 1,
+                              GPUBuffer::eGPUBufferGPULocal | GPUBuffer::eGPUBufferIndirectBuffer);
+    m_IndirectBufferCB.Name("m_IndirectBufferActionCB");
+
     m_IndirectCommandBuffer = GetNextCmd();
 
     // steal the command buffer out of the pending commands - we'll manage its lifetime ourselves
@@ -4084,7 +4088,7 @@ RDResult WrappedVulkan::ContextReplayLog(CaptureState readType, uint32_t startEv
     // boundaries, the event IDs would no longer match up).
     if(m_LastCmdBufferID == ResourceId() || startEventID > 1)
     {
-      if(chunktype != VulkanChunk::SetCommandAnnotation)
+      if(chunktype != VulkanChunk::SetQueueAnnotation)
         m_RootEventID++;
 
       if(startEventID > 1)

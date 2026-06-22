@@ -6,17 +6,50 @@ from typing import List
 class D3D12_Execute_Indirect(rdtest.TestCase):
     demos_test_name = 'D3D12_Execute_Indirect'
 
-    def check_pixel_history_succeeds(self):
+    def check_overlays(self, eid: int, x: int, y: int):
+        with rdtest.log.auto_section(f'EID {eid} Checking Overlays at {x}, {y}'):
+            pipe: rd.PipeState = self.controller.GetPipelineState()
+            if len(pipe.GetOutputTargets()) == 0:
+                raise rdtest.TestFailureException("No output targets found")
+
+            col_tex: rd.ResourceId = pipe.GetOutputTargets()[0].resource
+
+            for overlay in rd.DebugOverlay:
+                if overlay == rd.DebugOverlay.NoOverlay:
+                    continue
+                if overlay == rd.DebugOverlay.NaN or overlay == rd.DebugOverlay.Clipping:
+                    continue
+                if overlay == rd.DebugOverlay.ViewportScissor:
+                    continue
+                tex = rd.TextureDisplay()
+                tex.resourceId = col_tex
+                tex.overlay = overlay
+                tex.subresource.sample = 0
+
+                out: rd.ReplayOutput = self.controller.CreateOutput(rd.CreateHeadlessWindowingData(100, 100), rd.ReplayOutputType.Texture)
+                out.SetTextureDisplay(tex)
+                out.Display()
+                overlayTex: rd.ResourceId = out.GetDebugOverlayTexID()
+                if overlay == rd.DebugOverlay.ClearBeforeDraw:
+                    overlayTex = col_tex
+                if overlay == rd.DebugOverlay.ClearBeforePass:
+                    overlayTex = col_tex
+
+                picked = self.controller.PickPixel(overlayTex, x, y, rd.Subresource(), rd.CompType.UNorm)
+                emptyPixel = (0.0, 0.0, 0.0, 0.0)
+                if picked.floatValue == emptyPixel:
+                    raise rdtest.TestFailureException(f"{overlay.name} overlay is empty")
+                out.Shutdown()
+
+    def check_pixel_history_succeeds(self, x: int, y: int):
         pipe: rd.PipeState = self.controller.GetPipelineState()
         rt = pipe.GetOutputTargets()[0]
         tex = rt.resource
         sub = rd.Subresource()
-        x = 200
-        y = 150
         modifs: List[rd.PixelModification] = self.controller.PixelHistory(tex, x, y, sub, rt.format.compType)
-        if len(modifs) == 0:
-            raise rdtest.TestFailureException("No pixel history found")
-        rdtest.log.success("Pixel History Worked")
+        if len(modifs) < 2:
+            raise rdtest.TestFailureException(f"No pixel history found at ({x}, {y})")
+        rdtest.log.success(f"Pixel History {x}, {y} Worked")
 
     def check_root_consts(self, expected: List[float]):
         pipe: rd.PipeState = self.controller.GetPipelineState()
@@ -41,22 +74,29 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
             if len(pipe.GetOutputTargets()) != 1:
                 raise rdtest.TestFailureException(
                     f"With event {action.eventId + drawNum} selected we should have one output target but there is {len(pipe.GetOutputTargets())}")
-            self.check_pixel_history_succeeds()
+            self.check_pixel_history_succeeds(285, 110)
+            if drawNum == 0:
+                self.check_overlays(action.eventId, 285, 110)
         rdtest.log.success("Draw without Root Signature replayed correctly");
         
         from_eid = self.find_action("Multiple draws").eventId
         ei_eid = self.find_action("ExecuteIndirect", from_eid).eventId
         self.controller.SetFrameEvent(ei_eid - 1, False)
         self.check_root_consts([10.0, 9.0, 8.0, 7.0])
+        viewX = 0
+        viewY = 0
+        sqSize = 300 / 4
+        viewW = sqSize
+        viewH = sqSize
         for i in range(8):
             action = self.find_action("IndirectDraw", from_eid)
-            self.controller.SetFrameEvent(action.eventId, False)
+            eid = action.eventId
+            self.controller.SetFrameEvent(eid, False)
             self.check_root_consts([123.0, 9.0, 8.0, 7.0])
 
-            self.check_triangle(back=[0.0, 0.0, 0.0, 1.0])
-
             # Should be a green triangle in the centre of the screen on a black background
-            self.check_triangle(back=[0.0, 0.0, 0.0, 1.0])
+            self.check_triangle(back=[0.0, 0.0, 0.0, 1.0], vp=[viewX, viewY, viewW, viewH])
+
             vsin_ref = {
                 0: {
                     'vtx': 0,
@@ -101,9 +141,12 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
             }
             self.check_mesh_data(postvs_ref, postvs_data)
 
-            self.check_pixel_history_succeeds()
+            x = int(viewX + viewW/2)
+            y = int(viewY + viewH/2)
+            self.check_pixel_history_succeeds(x,y)
+            self.check_overlays(eid, x,y)
 
-            from_eid = action.eventId + 1
+            from_eid = eid + 1
 
             pipe = self.controller.GetPipelineState()
 
@@ -115,11 +158,18 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
             self.check(rw[0].descriptor.resource != rd.ResourceId())
             self.check(pipe.GetConstantBlock(rd.ShaderStage.Vertex, 0, 0).descriptor.resource != rd.ResourceId())
 
+            viewX += sqSize
+            if viewX + sqSize >= 400:
+                viewX = 0
+                viewY += sqSize
+
+        viewX = 0
+        viewY = 0
         action = self.find_action("Post draw")
         self.controller.SetFrameEvent(action.eventId, False)
 
         # triangle should still be visible
-        self.check_triangle(back=[0.0, 0.0, 0.0, 1.0])
+        self.check_triangle(back=[0.0, 0.0, 0.0, 1.0], vp=[viewX, viewY, viewW, viewH])
 
         # but state should be reset
         pipe = self.controller.GetPipelineState()
@@ -134,7 +184,7 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
 
         rdtest.log.success("State is reset after execute")
 
-        self.check_pixel_history_succeeds()
+        self.check_pixel_history_succeeds(185, 50)
 
         action = self.find_action("Post Single dispatch")
         self.controller.SetFrameEvent(action.eventId, False)
@@ -155,7 +205,7 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
 
         rdtest.log.success("Dispatch buffer output is correct")
 
-        self.check_pixel_history_succeeds()
+        self.check_pixel_history_succeeds(185, 50)
 
         # The final draw is in indeterminate order because the parameters are defined by a compute shader in
         # indeterminate order
@@ -168,16 +218,16 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
         action = self.find_action("IndirectDraw", action.eventId)
 
         drawPoints = [
-            (60, 20),
-            (210, 20),
-            (360, 20),
+            (310, 78),
+            (338, 78),
+            (367, 78),
 
-            (60, 130),
-            (360, 130),
+            (310, 107),
+            (367, 107),
 
-            (60, 240),
-            (210, 240),
-            (360, 240),
+            (310, 135),
+            (338, 135),
+            (367, 135),
         ]
 
         sdfile = self.controller.GetStructuredFile()
@@ -219,7 +269,7 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
                     raise rdtest.TestFailureException(
                         "Detected an exploded polygon with {} selected".format(action.GetName(sdfile)))
 
-                self.check_pixel_history_succeeds()
+                self.check_pixel_history_succeeds(185, 50)
 
             rdtest.log.success(f"Pass {passNum} of unordered draw was correct")
 
@@ -233,7 +283,7 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
             if len(pipe.GetOutputTargets()) != 1:
                 raise rdtest.TestFailureException(
                     f"With event {action.eventId + drawNum} selected we should have one output target but there is {len(pipe.GetOutputTargets())}")
-            self.check_pixel_history_succeeds()
+            self.check_pixel_history_succeeds(185, 50)
         rdtest.log.success("Fully used argument buffer with multiple draws replayed")
 
         # This does not draw anything but its argument buffer is fully used with no spare bytes
@@ -241,12 +291,20 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
         action = self.find_action("Full Arg Buffer: State + Draw")
         action = self.find_action("IndirectDraw", action.eventId)
         for drawNum in range(3):
-            self.controller.SetFrameEvent(action.eventId, False)
+            eid = action.eventId
+            self.controller.SetFrameEvent(eid, False)
             pipe = self.controller.GetPipelineState()
             if len(pipe.GetOutputTargets()) != 1:
                 raise rdtest.TestFailureException(
-                    f"With event {action.eventId + drawNum} selected we should have one output target but there is {len(pipe.GetOutputTargets())}")
-            self.check_pixel_history_succeeds()
+                    f"With event {eid} selected we should have one output target but there is {len(pipe.GetOutputTargets())}")
+            x = 100
+            y = 210 - drawNum * 20
+            self.check_overlays(eid, x, y)
+            self.check_pixel_history_succeeds(x, 210)
+            if drawNum > 0:
+                self.check_pixel_history_succeeds(x, 190)
+            if drawNum > 1:
+                self.check_pixel_history_succeeds(x, 170)
             action = action.next
         rdtest.log.success("Fully used argument buffer with multiple states + draws replayed")
 
@@ -256,12 +314,16 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
             if drawNum == 1:
                 action = self.find_action("IndirectDraw", action.eventId+1)
 
+            eid = action.eventId
             self.controller.SetFrameEvent(action.eventId, False)
             pipe = self.controller.GetPipelineState()
             if len(pipe.GetOutputTargets()) != 1:
                 raise rdtest.TestFailureException(
                     f"With event {action.eventId} selected we should have one output target but there is {len(pipe.GetOutputTargets())}")
-            self.check_pixel_history_succeeds()
+            x = 200 + 80 * drawNum
+            y = 205
+            self.check_pixel_history_succeeds(x, y)
+            self.check_overlays(eid, x, y)
 
             overlay = rd.DebugOverlay.QuadOverdrawPass
             tex = rd.TextureDisplay()
@@ -275,3 +337,22 @@ class D3D12_Execute_Indirect(rdtest.TestCase):
             out.Display()
             out.Shutdown()
         rdtest.log.success("Two Single Draws QuadOverdraw (Pass) replayed correctly");
+
+        with rdtest.log.auto_section('Checking All Overlays'):
+            for eid in range(self.get_first_action().eventId, self.get_last_action().eventId + 1):
+                self.controller.SetFrameEvent(eid, False)
+                pipe = self.controller.GetPipelineState()
+                if len(pipe.GetOutputTargets()) == 0:
+                    continue
+                rdtest.log.print(f"EID: {eid}")
+                for overlay in rd.DebugOverlay:
+                    tex = rd.TextureDisplay()
+                    col_tex: rd.ResourceId = pipe.GetOutputTargets()[0].resource
+                    tex.resourceId = col_tex
+                    tex.overlay = overlay
+                    tex.subresource.sample = 0
+
+                    out: rd.ReplayOutput = self.controller.CreateOutput(rd.CreateHeadlessWindowingData(100, 100), rd.ReplayOutputType.Texture)
+                    out.SetTextureDisplay(tex)
+                    out.Display()
+                    out.Shutdown()
