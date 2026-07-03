@@ -103,11 +103,23 @@ def _var_components(var: Any) -> list[Any]:
 
 
 def shader_variable_to_value(var: Any) -> dict[str, Any]:
-    """Recursively convert a ShaderVariable (register/CB/input value) to a JSON-safe dict."""
+    """Recursively convert a ShaderVariable (register/CB/input value) to a JSON-safe dict.
+
+    Always includes a "value" key (None for composite types) so callers can safely do
+    result["value"] without checking for "members" first -- DXIL traces commonly produce
+    composite (struct/array) ShaderVariables with no single scalar value, which previously
+    produced a dict missing "value" entirely and crashed callers that assumed it was always
+    present (KeyError: 'value').
+    """
     name = str(getattr(var, "name", "") or "")
     members = list(getattr(var, "members", []) or [])
     if members:
-        return {"name": name, "members": [shader_variable_to_value(m) for m in members]}
+        return {
+            "name": name,
+            "type": rdutil.enum_name(getattr(var, "type", None)),
+            "value": None,
+            "members": [shader_variable_to_value(m) for m in members],
+        }
     rows = max(1, int(getattr(var, "rows", 1) or 1))
     cols = max(1, int(getattr(var, "columns", 1) or 1))
     comps = _var_components(var)
@@ -254,15 +266,24 @@ def summarize_debug_trace(
         changes = list(getattr(state, "changes", []) or [])
 
         change_rows: list[dict[str, Any]] = []
-        for ch in changes:
+        for change_index, ch in enumerate(changes):
             after = getattr(ch, "after", None)
             before = getattr(ch, "before", None)
             reg_name = str(getattr(after, "name", "") or getattr(before, "name", "") or "")
+            if not reg_name:
+                # DXIL traces commonly have unnamed intermediate ShaderVariables; fall back to a
+                # positional key so distinct anonymous registers don't silently overwrite each
+                # other in final_registers.
+                reg_name = "_unnamed_{}_{}".format(step_index, change_index)
             row: dict[str, Any] = {"name": reg_name}
             if after is not None:
                 after_val = shader_variable_to_value(after)
-                row["after"] = after_val["value"]
-                final_registers[reg_name] = after_val["value"]
+                # Preserve the full (possibly composite) representation instead of collapsing
+                # struct/array changes to a bare None -- only unwrap to the plain scalar/vector
+                # "value" when there's no member structure to lose.
+                stored = after_val if after_val.get("members") else after_val.get("value")
+                row["after"] = stored
+                final_registers[reg_name] = stored
             change_rows.append(row)
 
         if flags & sample_flag:

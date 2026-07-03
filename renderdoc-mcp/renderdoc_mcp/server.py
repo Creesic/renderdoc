@@ -335,10 +335,13 @@ def build_mcp() -> FastMCP:
         descriptor-buffer offset) to the actual bound resource(s) via GetDescriptors().
 
         Answers "what resource is heap[N]?" for bindless engines that index into a descriptor
-        store from a constant-buffer value. If descriptor_store is omitted and the capture has
-        exactly one descriptor store it's used automatically; otherwise the available stores are
-        returned so the caller can pick one. Pass is_sampler=true to read the sampler-descriptor
-        variant of the store instead of resource descriptors.
+        store from a constant-buffer value. If descriptor_store is omitted: with exactly one
+        descriptor store it's used automatically; with multiple and is_sampler=false, the store
+        with the most descriptors is auto-picked (sampler heaps are capped small, e.g. 2048 on
+        D3D12, so the largest store is almost always the shader-visible CBV/SRV/UAV heap) --
+        the response then includes descriptor_store_auto_selected/_candidates so a caller who
+        wanted a different store knows to pass descriptor_store explicitly. With multiple stores
+        and is_sampler=true, the available stores are returned for the caller to pick from.
         """
         async with replay_execution():
 
@@ -354,6 +357,7 @@ def build_mcp() -> FastMCP:
                     return R.err("no_descriptor_stores", "This capture has no descriptor stores")
 
                 store = None
+                auto_selected = False
                 if descriptor_store:
                     try:
                         want = rdutil.parse_resource_id(descriptor_store)
@@ -367,6 +371,14 @@ def build_mcp() -> FastMCP:
                         return R.err("unknown_descriptor_store", descriptor_store)
                 elif len(stores) == 1:
                     store = stores[0]
+                elif not is_sampler:
+                    # Sampler heaps are capped small (e.g. 2048 on D3D12) while the shader-visible
+                    # CBV/SRV/UAV heap in a bindless engine is typically far larger (tens of
+                    # thousands+), so the largest store is almost always the one being asked
+                    # about here. Note it was auto-picked so a caller who wanted a different one
+                    # (e.g. a non-shader-visible staging heap) knows to pass descriptor_store.
+                    store = max(stores, key=lambda s: int(s.descriptorCount))
+                    auto_selected = True
                 else:
                     return R.err(
                         "ambiguous_descriptor_store",
@@ -408,17 +420,22 @@ def build_mcp() -> FastMCP:
                 except Exception as ex:
                     return R.err("get_descriptor_failed", str(ex))
 
-                return R.ok(
-                    {
-                        "capture_id": capture_id,
-                        "event_id": int(event_id),
-                        "descriptor_store": rdutil.rid_str(store.resourceId),
-                        "heap_index": int(heap_index),
-                        "count": n,
-                        "is_sampler": bool(is_sampler),
-                        "descriptors": rows,
-                    }
-                )
+                out: dict[str, Any] = {
+                    "capture_id": capture_id,
+                    "event_id": int(event_id),
+                    "descriptor_store": rdutil.rid_str(store.resourceId),
+                    "heap_index": int(heap_index),
+                    "count": n,
+                    "is_sampler": bool(is_sampler),
+                    "descriptors": rows,
+                }
+                if auto_selected:
+                    out["descriptor_store_auto_selected"] = True
+                    out["descriptor_store_candidates"] = [
+                        {"resource_id": rdutil.rid_str(s.resourceId), "descriptor_count": int(s.descriptorCount)}
+                        for s in stores
+                    ]
+                return R.ok(out)
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 

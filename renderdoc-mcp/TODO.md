@@ -41,6 +41,18 @@ failed) even though injection reported success; root cause wasn't chased down fu
 sanity-checking `debug_pixel` against one of the real FM2/plume captures this backlog came from
 before relying on it.
 
+**Post-ship bug fix**: exactly this untested gap turned up a real crash — `debug_pixel` on
+`fm2pressstart8.rdc` (DXIL/SM6+ shaders) returned `{"code": "debug_pixel_failed", "message":
+"'value'"}`, a `KeyError` in `shader_variable_to_value()`: composite `ShaderVariable`s (structs/
+arrays, common in DXIL traces, often with empty names) return a dict with `"members"` but no
+`"value"` key, and `summarize_debug_trace` did a blind `after_val["value"]`. Fixed by (1) always
+including a `"value"` key (`None` for composite types) so blind access never crashes again, (2)
+preserving the full composite structure in `final_registers`/`"after"` instead of collapsing it to
+`None`, and (3) falling back to a positional key (`_unnamed_{step}_{change}`) for empty register
+names so distinct anonymous DXIL registers don't silently overwrite each other. Reproduced and
+verified fixed end-to-end against real synthetic `ShaderVariable`/`ShaderDebugState` objects
+(constructed via the actual RenderDoc API, not mocks) matching the exact reported scenario.
+
 ## 2. Shader disassembly that works for DXIL
 
 `get_shader(include_disassembly=true)` returns `"; Invalid Shader Specified"` for DXIL shaders in
@@ -111,6 +123,18 @@ task #1 (see its note) when trying to get a real D3D12 capture with populated de
 test against. Only the API surface itself was validated directly against the built `pymodules`.
 Recommend testing `get_descriptor` against a real bindless-heap capture before relying on it,
 particularly the heap-index-to-byte-offset math and the sampler-vs-resource store disambiguation.
+
+**Post-ship usability fix**: real usage against `fm2pressstart8.rdc` confirmed the tool works, but
+that capture has 4 descriptor stores, forcing the caller to pick one every single call via the
+`ambiguous_descriptor_store` error. Now, when `descriptor_store` is omitted, multiple stores exist,
+and `is_sampler=false` (the common case), the store with the most descriptors is auto-picked
+instead of erroring — sampler heaps are capped small (2048 max on D3D12) while a bindless engine's
+shader-visible CBV/SRV/UAV heap is typically far larger (65536 in the reported case), so store size
+alone reliably distinguishes them. The response includes `descriptor_store_auto_selected`/
+`_candidates` so a caller who actually wanted a different store (e.g. a non-shader-visible staging
+heap) can tell auto-selection happened and pass `descriptor_store` explicitly.
+`is_sampler=true` with multiple stores still requires an explicit choice (unchanged, not part of
+the report).
 
 ## 4. Full/raw constant buffer reads (quick win)
 
