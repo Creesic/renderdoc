@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import os
+import tempfile
 from contextlib import asynccontextmanager
 from typing import Any, Literal, cast
 
@@ -31,10 +33,14 @@ from renderdoc_mcp.mesh_decode import decode_mesh_inputs as decode_mesh_inputs_c
 from renderdoc_mcp.serialize import (
     normalize_bound_resources,
     normalize_pipeline_state,
+    serialize_descriptor,
+    serialize_sampler_descriptor,
     serialize_shader_reflection_summary,
 )
 from renderdoc_mcp.cbuffer import decode_cb_bytes, detect_variable_anomalies
 from renderdoc_mcp.session import CaptureSessionManager, filter_events
+from renderdoc_mcp import shader_debug
+from renderdoc_mcp.structured import serialize_chunk
 
 import logging
 _log = logging.getLogger("renderdoc_mcp.server")
@@ -230,6 +236,45 @@ def build_mcp() -> FastMCP:
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
+    async def get_event_details(capture_id: str, event_id: int) -> dict[str, Any]:
+        """Return the actual API call arguments for an event, from the capture's structured file.
+
+        Critically useful for calls get_pipeline_state/get_resource_usages can't explain, like
+        CopyTextureRegion/CopyBufferRegion -- this returns the real src/dst resources,
+        subresources, and regions directly instead of having to infer them by cross-referencing
+        usage lists. Works for any event, not just draws: state-setting calls (e.g.
+        IASetVertexBuffers) have their own chunk too. Doesn't require SetFrameEvent -- structured
+        data is static per-capture, not tied to replay position.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                rd = rdutil.get_renderdoc()
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                chunk_index = sess.chunk_index_by_event.get(int(event_id))
+                if chunk_index is None:
+                    return R.err(
+                        "no_chunk_for_event", "No structured-file chunk found for event {}".format(event_id)
+                    )
+                chunks = sess.structured_file.chunks
+                if chunk_index < 0 or chunk_index >= len(chunks):
+                    return R.err(
+                        "chunk_index_out_of_range",
+                        "chunk index {} out of range (0..{})".format(chunk_index, len(chunks)),
+                    )
+                try:
+                    data = serialize_chunk(rd, chunks[chunk_index], sess.controller)
+                except Exception as ex:
+                    return R.err("get_event_details_failed", str(ex))
+                data["event_id"] = int(event_id)
+                data["chunk_index"] = int(chunk_index)
+                return R.ok(data)
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
     async def get_pipeline_state(capture_id: str, event_id: int) -> dict[str, Any]:
         async with replay_execution():
 
@@ -260,6 +305,106 @@ def build_mcp() -> FastMCP:
                 except Exception as ex:
                     return R.err("bound_resources_failed", str(ex))
                 return R.ok(data)
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
+    async def get_descriptor(
+        capture_id: str,
+        event_id: int,
+        heap_index: int,
+        descriptor_store: str | None = None,
+        is_sampler: bool = False,
+        count: int = 1,
+    ) -> dict[str, Any]:
+        """Resolve descriptor-store slot(s) (e.g. a D3D12 shader-visible heap index, or a Vulkan
+        descriptor-buffer offset) to the actual bound resource(s) via GetDescriptors().
+
+        Answers "what resource is heap[N]?" for bindless engines that index into a descriptor
+        store from a constant-buffer value. If descriptor_store is omitted and the capture has
+        exactly one descriptor store it's used automatically; otherwise the available stores are
+        returned so the caller can pick one. Pass is_sampler=true to read the sampler-descriptor
+        variant of the store instead of resource descriptors.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                rd = rdutil.get_renderdoc()
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                sessions.set_frame_event(sess, int(event_id), True)
+
+                stores = list(sess.controller.GetDescriptorStores())
+                if not stores:
+                    return R.err("no_descriptor_stores", "This capture has no descriptor stores")
+
+                store = None
+                if descriptor_store:
+                    try:
+                        want = rdutil.parse_resource_id(descriptor_store)
+                    except ValueError as ex:
+                        return R.err("bad_resource_id", str(ex))
+                    for s in stores:
+                        if s.resourceId == want:
+                            store = s
+                            break
+                    if store is None:
+                        return R.err("unknown_descriptor_store", descriptor_store)
+                elif len(stores) == 1:
+                    store = stores[0]
+                else:
+                    return R.err(
+                        "ambiguous_descriptor_store",
+                        "Multiple descriptor stores exist; pass descriptor_store to pick one",
+                        detail=[
+                            {
+                                "resource_id": rdutil.rid_str(s.resourceId),
+                                "descriptor_count": int(s.descriptorCount),
+                                "descriptor_byte_size": int(s.descriptorByteSize),
+                            }
+                            for s in stores
+                        ],
+                    )
+
+                n = max(1, int(count))
+                if store.descriptorCount and int(heap_index) + n > int(store.descriptorCount):
+                    return R.err(
+                        "index_out_of_range",
+                        "heap_index {} + count {} exceeds store descriptor_count {}".format(
+                            heap_index, n, store.descriptorCount
+                        ),
+                    )
+
+                rng = rd.DescriptorRange()
+                rng.offset = int(store.firstDescriptorOffset) + int(heap_index) * int(
+                    store.descriptorByteSize
+                )
+                rng.descriptorSize = int(store.descriptorByteSize)
+                rng.count = n
+                rng.type = rd.DescriptorType.Unknown
+
+                try:
+                    if is_sampler:
+                        descs = sess.controller.GetSamplerDescriptors(store.resourceId, [rng])
+                        rows = [serialize_sampler_descriptor(sess.controller, d) for d in descs]
+                    else:
+                        descs = sess.controller.GetDescriptors(store.resourceId, [rng])
+                        rows = [serialize_descriptor(sess.controller, d) for d in descs]
+                except Exception as ex:
+                    return R.err("get_descriptor_failed", str(ex))
+
+                return R.ok(
+                    {
+                        "capture_id": capture_id,
+                        "event_id": int(event_id),
+                        "descriptor_store": rdutil.rid_str(store.resourceId),
+                        "heap_index": int(heap_index),
+                        "count": n,
+                        "is_sampler": bool(is_sampler),
+                        "descriptors": rows,
+                    }
+                )
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
@@ -482,7 +627,16 @@ def build_mcp() -> FastMCP:
         length: int,
         event_id: int,
         max_bytes: int = 65536,
+        out_file: str | None = None,
     ) -> dict[str, Any]:
+        """Read raw bytes from a buffer resource.
+
+        Pass out_file to write the bytes directly to disk instead of inlining base64 in the
+        response -- skips the ~33% base64 inflation and avoids hitting per-call size limits for
+        large reads. When out_file is set, max_bytes may go up to 256MB instead of the normal 4MB
+        inline cap. hex_preview (first 512 bytes) is always included either way as a quick sanity
+        check.
+        """
         async with replay_execution():
 
             def _go() -> dict[str, Any]:
@@ -494,7 +648,8 @@ def build_mcp() -> FastMCP:
                 except ValueError as ex:
                     return R.err("bad_resource_id", str(ex))
                 sessions.set_frame_event(sess, int(event_id), True)
-                ln = min(int(length), int(max_bytes), 4 * 1024 * 1024)
+                hard_cap = 256 * 1024 * 1024 if out_file else 4 * 1024 * 1024
+                ln = min(int(length), int(max_bytes), hard_cap)
                 data = rdutil.controller_get_buffer_data(sess.controller, rid, int(offset), ln)
                 preview = data[:512]
                 buf_out: dict[str, Any] = {
@@ -503,12 +658,110 @@ def build_mcp() -> FastMCP:
                     "requested_length": ln,
                     "byte_length": len(data),
                     "hex_preview": preview.hex(),
-                    "base64": base64.b64encode(data).decode("ascii"),
                 }
+                if out_file:
+                    try:
+                        with open(out_file, "wb") as f:
+                            f.write(data)
+                    except OSError as ex:
+                        return R.err("out_file_write_failed", str(ex))
+                    buf_out["out_file"] = out_file
+                else:
+                    buf_out["base64"] = base64.b64encode(data).decode("ascii")
                 bfname = rdutil.resource_name_for(sess.controller, rid)
                 if bfname:
                     buf_out["resource_name"] = bfname
                 return R.ok(buf_out)
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
+    async def find_in_buffer(
+        capture_id: str,
+        event_id: int,
+        resource_id: str,
+        pattern_hex: str,
+        start: int = 0,
+        end: int | None = None,
+        max_matches: int = 1000,
+    ) -> dict[str, Any]:
+        """Search a buffer resource for a byte pattern server-side, returning match offsets only.
+
+        Avoids downloading a large buffer through repeated read_buffer calls just to grep it by
+        hand. `end` defaults to the buffer's full length (from GetBuffers()). Matches may overlap
+        each other; results are capped at max_matches (truncated=true if the cap was hit before
+        the whole range was scanned).
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                try:
+                    rid = rdutil.parse_resource_id(resource_id)
+                except ValueError as ex:
+                    return R.err("bad_resource_id", str(ex))
+                try:
+                    pattern = bytes.fromhex(pattern_hex)
+                except ValueError as ex:
+                    return R.err("bad_pattern_hex", str(ex))
+                if not pattern:
+                    return R.err("bad_pattern_hex", "pattern_hex must not be empty")
+
+                sessions.set_frame_event(sess, int(event_id), True)
+
+                range_end = end
+                if range_end is None:
+                    for buf in sess.controller.GetBuffers():
+                        if buf.resourceId == rid:
+                            range_end = int(buf.length)
+                            break
+                    if range_end is None:
+                        return R.err(
+                            "unknown_buffer",
+                            "Could not find buffer {} to determine its length; pass end explicitly".format(
+                                resource_id
+                            ),
+                        )
+
+                range_start = max(0, int(start))
+                range_end = int(range_end)
+                if range_end <= range_start:
+                    return R.ok(
+                        {
+                            "resource_id": resource_id,
+                            "start": range_start,
+                            "end": range_end,
+                            "matches": [],
+                            "match_count": 0,
+                            "truncated": False,
+                        }
+                    )
+
+                def _fetch(off: int, ln: int) -> bytes:
+                    return rdutil.controller_get_buffer_data(sess.controller, rid, off, ln)
+
+                try:
+                    matches, truncated = rdutil.find_pattern_offsets(
+                        _fetch, range_start, range_end, pattern, max(1, int(max_matches))
+                    )
+                except Exception as ex:
+                    return R.err("find_in_buffer_failed", str(ex))
+
+                out: dict[str, Any] = {
+                    "resource_id": resource_id,
+                    "start": range_start,
+                    "end": range_end,
+                    "pattern_byte_length": len(pattern),
+                    "matches": matches,
+                    "match_count": len(matches),
+                    "truncated": truncated,
+                }
+                bfname = rdutil.resource_name_for(sess.controller, rid)
+                if bfname:
+                    out["resource_name"] = bfname
+                return R.ok(out)
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
@@ -624,7 +877,20 @@ def build_mcp() -> FastMCP:
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
-    async def decode_mesh_inputs(capture_id: str, event_id: int, preview_vertices: int = 8) -> dict[str, Any]:
+    async def decode_mesh_inputs(
+        capture_id: str,
+        event_id: int,
+        preview_vertices: int = 8,
+        out_file: str | None = None,
+    ) -> dict[str, Any]:
+        """Decode vertex attributes for a draw's input mesh (instancing not supported).
+
+        preview_vertices controls how many vertices are decoded (up to 8192) -- it's no longer
+        silently capped at 256 regardless of what you ask for. Pass out_file to write every
+        decoded vertex to a CSV (one numeric column per vector component, e.g. POSITION[0..2])
+        instead of inlining them all; the response still includes a small inline sample (first 8)
+        plus vertex_count for context.
+        """
         async with replay_execution():
 
             def _go() -> dict[str, Any]:
@@ -633,7 +899,9 @@ def build_mcp() -> FastMCP:
                     return R.err("unknown_capture", capture_id)
                 try:
                     sessions.set_frame_event(sess, int(event_id), True)
-                    data = decode_mesh_inputs_core(sess.controller, sess.structured_file, int(event_id), preview_vertices)
+                    data = decode_mesh_inputs_core(
+                        sess.controller, sess.structured_file, int(event_id), preview_vertices, out_file
+                    )
                 except Exception as ex:
                     return R.err("decode_mesh_failed", str(ex))
                 if isinstance(data, dict):
@@ -680,14 +948,36 @@ def build_mcp() -> FastMCP:
                     pipe_obj = pipe.GetGraphicsPipelineObject()
                     if pipe_obj == rd.ResourceId.Null():
                         pipe_obj = pipe.GetComputePipelineObject()
-                    targets = sess.controller.GetDisassemblyTargets(True)
-                    target = targets[0] if targets else ""
-                    text = sess.controller.DisassembleShader(pipe_obj, refl, target)
-                    if len(text) > max_disassembly_chars:
-                        out["disassembly"] = text[:max_disassembly_chars]
-                        out["disassembly_truncated"] = True
+                    targets = list(sess.controller.GetDisassemblyTargets(True))
+                    out["available_targets"] = targets
+
+                    text = ""
+                    used_target = ""
+                    failure_reason: str | None = None
+                    if not targets:
+                        failure_reason = "No disassembly targets available for this capture's driver"
                     else:
-                        out["disassembly"] = text
+                        for t in targets:
+                            candidate = sess.controller.DisassembleShader(pipe_obj, refl, t)
+                            reason = shader_debug.disassembly_failure_reason(candidate)
+                            if reason is None:
+                                text = candidate
+                                used_target = t
+                                failure_reason = None
+                                break
+                            failure_reason = reason
+
+                    if failure_reason is not None:
+                        out["disassembly_available"] = False
+                        out["disassembly_error"] = failure_reason
+                    else:
+                        out["disassembly_available"] = True
+                        out["disassembly_target"] = used_target
+                        if len(text) > max_disassembly_chars:
+                            out["disassembly"] = text[:max_disassembly_chars]
+                            out["disassembly_truncated"] = True
+                        else:
+                            out["disassembly"] = text
                 return R.ok(out)
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
@@ -717,17 +1007,192 @@ def build_mcp() -> FastMCP:
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
+    async def debug_pixel(
+        capture_id: str,
+        event_id: int,
+        x: int,
+        y: int,
+        sample: int = 0,
+        primitive: int | None = None,
+        view: int = 0,
+        full_trace: bool = False,
+        full_trace_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Debug the fragment invocation that wrote pixel (x, y) and summarize the trace.
+
+        Uses ReplayController.DebugPixel() + ContinueDebug(). Returns shader inputs, every
+        resource access (sample/load instructions with best-effort resolved descriptor/resource
+        identity — reliable for DXBC-style disassembly, best-effort text-only elsewhere),
+        constant buffer values, and the final output register values (answers "bad sample, bad
+        constant, or no sample at all?" in one call). Pass full_trace=true to additionally dump
+        the complete instruction-by-instruction trace to a JSON file and return its path.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                rd = rdutil.get_renderdoc()
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                try:
+                    sessions.set_frame_event(sess, int(event_id), True)
+                    pipe = sess.controller.GetPipelineState()
+                    stage = rd.ShaderStage.Pixel
+                    refl = pipe.GetShaderReflection(stage)
+                    if refl is None:
+                        return R.err("no_pixel_shader", "No pixel/fragment shader bound at this event")
+
+                    inputs = rd.DebugPixelInputs()
+                    inputs.sample = shader_debug.NO_PREFERENCE if sample is None else int(sample)
+                    inputs.primitive = shader_debug.NO_PREFERENCE if primitive is None else int(primitive)
+                    inputs.view = shader_debug.NO_PREFERENCE if view is None else int(view)
+
+                    trace = sess.controller.DebugPixel(int(x), int(y), inputs)
+                except Exception as ex:
+                    return R.err("debug_pixel_failed", str(ex))
+                if trace is None or trace.debugger is None:
+                    if trace is not None:
+                        sess.controller.FreeTrace(trace)
+                    return R.err(
+                        "debug_failed",
+                        "No fragment writes pixel ({}, {}) at this event, or debugging is unsupported here".format(
+                            x, y
+                        ),
+                    )
+                try:
+                    states = shader_debug.run_debug_trace(sess.controller, trace)
+                    disasm_lines: list[str] = []
+                    try:
+                        pipe_obj = pipe.GetGraphicsPipelineObject()
+                        targets = sess.controller.GetDisassemblyTargets(True)
+                        target = targets[0] if targets else ""
+                        disasm_lines = sess.controller.DisassembleShader(pipe_obj, refl, target).split("\n")
+                    except Exception:
+                        disasm_lines = []
+                    out = shader_debug.summarize_debug_trace(
+                        rd, sess.controller, pipe, stage, refl, trace, states, disasm_lines
+                    )
+                    if full_trace:
+                        path = full_trace_path
+                        if not path:
+                            fd, path = tempfile.mkstemp(suffix=".json", prefix="renderdoc_mcp_trace_")
+                            os.close(fd)
+                        shader_debug.dump_full_trace(rd, trace, states, disasm_lines, path)
+                        out["full_trace_path"] = path
+                except Exception as ex:
+                    return R.err("debug_pixel_failed", str(ex))
+                finally:
+                    sess.controller.FreeTrace(trace)
+
+                out["capture_id"] = capture_id
+                out["event_id"] = int(event_id)
+                out["coordinates"] = {"x": int(x), "y": int(y)}
+                out["stage"] = rdutil.enum_name(stage)
+                return R.ok(out)
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
+    async def debug_vertex(
+        capture_id: str,
+        event_id: int,
+        vertex_id: int,
+        instance_id: int = 0,
+        index: int | None = None,
+        view: int = 0,
+        full_trace: bool = False,
+        full_trace_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Debug the vertex shader invocation for a given vertex and summarize the trace.
+
+        Uses ReplayController.DebugVertex() + ContinueDebug(). ``index`` is the actual index used
+        to look up vertex inputs (from an index buffer, with all drawcall offsets applied) — if
+        omitted it defaults to ``vertex_id``, which is only correct for non-indexed draws with no
+        base vertex offset. Same summary shape as debug_pixel: inputs, resource accesses,
+        constant buffer values, and final output register values.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                rd = rdutil.get_renderdoc()
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                try:
+                    sessions.set_frame_event(sess, int(event_id), True)
+                    pipe = sess.controller.GetPipelineState()
+                    stage = rd.ShaderStage.Vertex
+                    refl = pipe.GetShaderReflection(stage)
+                    if refl is None:
+                        return R.err("no_vertex_shader", "No vertex shader bound at this event")
+
+                    idx = int(vertex_id) if index is None else int(index)
+                    trace = sess.controller.DebugVertex(int(vertex_id), int(instance_id), idx, int(view))
+                except Exception as ex:
+                    return R.err("debug_vertex_failed", str(ex))
+                if trace is None or trace.debugger is None:
+                    if trace is not None:
+                        sess.controller.FreeTrace(trace)
+                    return R.err(
+                        "debug_failed",
+                        "Could not debug vertex {} (instance {}, index {})".format(
+                            vertex_id, instance_id, idx
+                        ),
+                    )
+                try:
+                    states = shader_debug.run_debug_trace(sess.controller, trace)
+                    disasm_lines: list[str] = []
+                    try:
+                        pipe_obj = pipe.GetGraphicsPipelineObject()
+                        targets = sess.controller.GetDisassemblyTargets(True)
+                        target = targets[0] if targets else ""
+                        disasm_lines = sess.controller.DisassembleShader(pipe_obj, refl, target).split("\n")
+                    except Exception:
+                        disasm_lines = []
+                    out = shader_debug.summarize_debug_trace(
+                        rd, sess.controller, pipe, stage, refl, trace, states, disasm_lines
+                    )
+                    if full_trace:
+                        path = full_trace_path
+                        if not path:
+                            fd, path = tempfile.mkstemp(suffix=".json", prefix="renderdoc_mcp_trace_")
+                            os.close(fd)
+                        shader_debug.dump_full_trace(rd, trace, states, disasm_lines, path)
+                        out["full_trace_path"] = path
+                except Exception as ex:
+                    return R.err("debug_vertex_failed", str(ex))
+                finally:
+                    sess.controller.FreeTrace(trace)
+
+                out["capture_id"] = capture_id
+                out["event_id"] = int(event_id)
+                out["vertex_id"] = int(vertex_id)
+                out["instance_id"] = int(instance_id)
+                out["index"] = idx
+                out["stage"] = rdutil.enum_name(stage)
+                return R.ok(out)
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
     async def read_constant_buffer(
         capture_id: str,
         event_id: int,
         stage: str,
         slot: int,
+        raw_offset: int = 0,
+        raw_length: int = 256,
     ) -> dict[str, Any]:
         """Decode a constant buffer slot to typed named variables using shader reflection.
 
         Returns variable names and values (floats, matrices, vectors). Useful for finding
         wrong transform matrices or emulator data-upload bugs. Falls back to raw hex if
         reflection is unavailable.
+
+        `variables` is always decoded from the full constant buffer (up to 65536 bytes), but
+        `raw_bytes_hex` is a windowed preview — use `raw_offset`/`raw_length` (capped at 8192
+        bytes) to page through bytes beyond the default 256-byte preview, e.g. the tail of a
+        large constant buffer. `raw_byte_length` reports the total decoded size to page against.
         """
         async with replay_execution():
 
@@ -772,7 +1237,9 @@ def build_mcp() -> FastMCP:
                         raw = rdutil.controller_get_buffer_data(
                             sess.controller, buf_rid, byte_offset, min(byte_size, 65536)
                         )
-                        raw_hex = raw[:256].hex()
+                        preview_off = max(0, int(raw_offset))
+                        preview_len = max(0, min(int(raw_length), 8192))
+                        raw_hex = raw[preview_off:preview_off + preview_len].hex()
                 except Exception:
                     pass
 
@@ -795,6 +1262,8 @@ def build_mcp() -> FastMCP:
                     "variables": variables,
                     "anomalies": anomaly_list,
                     "raw_bytes_hex": raw_hex,
+                    "raw_offset": max(0, int(raw_offset)),
+                    "raw_byte_length": len(raw),
                 }
                 if not raw:
                     out["buffer_unavailable"] = True

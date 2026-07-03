@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import struct
 from typing import Any
+
+# Safety ceiling on how many vertices decode_mesh_inputs will fetch/decode in one call, regardless
+# of what preview_vertices requests (each vertex does one GetBufferData call per attribute).
+MAX_PREVIEW_VERTICES = 8192
 
 from renderdoc_mcp.rdutil import (
     controller_get_buffer_data,
@@ -151,7 +156,40 @@ def get_mesh_inputs(controller: Any, draw: Any) -> list[MeshData]:
     return mesh_inputs
 
 
-def decode_mesh_inputs(controller: Any, structured_file: Any, event_id: int, preview_vertices: int = 8) -> dict[str, Any]:
+def _write_vertex_csv(path: str, layouts: list[dict[str, Any]], rows: list[dict[str, Any]]) -> None:
+    """Write decoded vertex attributes to CSV, one numeric column per vector component."""
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        header = ["vertex_index", "index"]
+        for layout in layouts:
+            comp_count = max(1, int(layout["format"]["comp_count"]))
+            if comp_count == 1:
+                header.append(layout["name"])
+            else:
+                header.extend("{}[{}]".format(layout["name"], i) for i in range(comp_count))
+        writer.writerow(header)
+
+        for row in rows:
+            csv_row: list[Any] = [row["vertex_index"], row["index"]]
+            for layout in layouts:
+                comp_count = max(1, int(layout["format"]["comp_count"]))
+                value = row["attributes"].get(layout["name"])
+                if value is None:
+                    csv_row.extend([""] * comp_count)
+                    continue
+                vals = list(value) if isinstance(value, tuple) else [value]
+                vals += [""] * (comp_count - len(vals))
+                csv_row.extend(vals[:comp_count])
+            writer.writerow(csv_row)
+
+
+def decode_mesh_inputs(
+    controller: Any,
+    structured_file: Any,
+    event_id: int,
+    preview_vertices: int = 8,
+    out_file: str | None = None,
+) -> dict[str, Any]:
     rd = get_renderdoc()
     draw = find_action(controller, event_id)
     if draw is None:
@@ -199,39 +237,70 @@ def decode_mesh_inputs(controller: Any, structured_file: Any, event_id: int, pre
         if ibn:
             index_summary["index_buffer_name"] = ibn
 
-    previews = []
-    if meshes:
+    # Fetch exactly as many indices as were actually requested (capped for safety), instead of a
+    # fixed 256 disconnected from preview_vertices — previously requesting more than 256 previews
+    # silently got no more than 256 with no indication why.
+    fetch_count = min(int(draw.numIndices), max(0, int(preview_vertices)), MAX_PREVIEW_VERTICES)
+
+    decoded_rows: list[dict[str, Any]] = []
+    if meshes and fetch_count:
         m0 = meshes[0]
         try:
-            indices = fetch_indices(controller, draw, m0, m0.indexOffset, 0, min(int(draw.numIndices), 256))
+            indices = fetch_indices(controller, draw, m0, m0.indexOffset, 0, fetch_count)
         except Exception as ex:
             indices = []
             index_summary["index_decode_error"] = str(ex)
 
-        for vi in range(min(preview_vertices, len(indices))):
+        for vi in range(len(indices)):
             idx_val = indices[vi]
             if idx_val is None:
                 continue
-            vertex_sample: dict[str, Any] = {"vertex_index": vi, "index": int(idx_val), "attributes": {}}
             try:
                 idx_int = int(idx_val)
             except Exception:
                 continue
+            decoded_row: dict[str, Any] = {"vertex_index": vi, "index": idx_int, "attributes": {}}
             for attr_mesh in meshes:
                 offset = attr_mesh.vertexByteOffset + attr_mesh.vertexByteStride * idx_int
                 try:
                     raw = controller_get_buffer_data(
                         controller, attr_mesh.vertexResourceId, offset, attr_mesh.vertexByteStride
                     )
-                    vertex_sample["attributes"][attr_mesh.name] = repr(unpack_data(attr_mesh.format, raw, 0))
+                    decoded_row["attributes"][attr_mesh.name] = unpack_data(attr_mesh.format, raw, 0)
                 except Exception as ex:
-                    vertex_sample["attributes"][attr_mesh.name] = "<error: {}>".format(ex)
-            previews.append(vertex_sample)
+                    decoded_row["attributes"][attr_mesh.name] = None
+                    decoded_row.setdefault("errors", {})[attr_mesh.name] = str(ex)
+            decoded_rows.append(decoded_row)
 
-    return {
+    def _to_preview(decoded_row: dict[str, Any]) -> dict[str, Any]:
+        preview: dict[str, Any] = {
+            "vertex_index": decoded_row["vertex_index"],
+            "index": decoded_row["index"],
+            "attributes": {
+                name: ("<error: {}>".format(decoded_row.get("errors", {}).get(name)) if value is None
+                       and name in decoded_row.get("errors", {}) else repr(value))
+                for name, value in decoded_row["attributes"].items()
+            },
+        }
+        return preview
+
+    out: dict[str, Any] = {
         "event_id": event_id,
         "draw_name": draw.GetName(structured_file),
         "index": index_summary,
         "vertex_attributes": layouts,
-        "vertex_previews": previews,
+        "vertex_count": len(decoded_rows),
     }
+
+    if out_file:
+        try:
+            _write_vertex_csv(out_file, layouts, decoded_rows)
+        except OSError as ex:
+            return {"ok": False, "error": "out_file_write_failed", "message": str(ex), "event_id": event_id}
+        out["out_file"] = out_file
+        out["vertex_previews"] = [_to_preview(r) for r in decoded_rows[:8]]
+        out["vertex_previews_truncated"] = len(decoded_rows) > 8
+    else:
+        out["vertex_previews"] = [_to_preview(r) for r in decoded_rows]
+
+    return out

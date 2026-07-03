@@ -72,6 +72,7 @@ class CaptureSession:
     driver_name: str = ""
     events_by_id: dict[int, IndexedEvent] = field(default_factory=dict)
     events_ordered: list[int] = field(default_factory=list)
+    chunk_index_by_event: dict[int, int] = field(default_factory=dict)
 
     def shutdown(self, rd: Any) -> None:
         try:
@@ -122,6 +123,7 @@ class CaptureSessionManager:
 
         events_by_id: dict[int, IndexedEvent] = {}
         ordered: list[int] = []
+        chunk_index_by_event: dict[int, int] = {}
 
         def visit(act: Any) -> None:
             eid = int(act.eventId)
@@ -137,6 +139,12 @@ class CaptureSessionManager:
             )
             events_by_id[eid] = idx
             ordered.append(eid)
+            # Actions only cover draws/dispatches/copies/etc; act.events also lists the
+            # state-setting API calls leading up to this action, each with its own eventId and a
+            # chunkIndex into structured_file.chunks — this is the only place that mapping is
+            # available, so build it here rather than re-walking the action tree later.
+            for ev in getattr(act, "events", []) or []:
+                chunk_index_by_event[int(ev.eventId)] = int(ev.chunkIndex)
 
         for root in controller.GetRootActions():
             _walk_actions(root, visit)
@@ -149,6 +157,7 @@ class CaptureSessionManager:
             driver_name=driver_name,
             events_by_id=events_by_id,
             events_ordered=ordered,
+            chunk_index_by_event=chunk_index_by_event,
         )
         self._sessions[capture_id] = sess
         return sess

@@ -443,6 +443,60 @@ def normalize_bound_resources(controller: Any, structured_file: Any, event_id: i
     return out
 
 
+def serialize_descriptor(controller: Any, d: Any) -> dict[str, Any]:
+    """Serialize a ``Descriptor`` (resource/image/buffer descriptor) from GetDescriptors()."""
+    out: dict[str, Any] = {
+        "type": enum_name(getattr(d, "type", None)),
+        "flags": int(getattr(d, "flags", 0) or 0),
+    }
+    enrich_resource_dict(controller, out, getattr(d, "resource", None))
+    sec = getattr(d, "secondary", None)
+    if sec is not None:
+        rid = rid_str(sec)
+        if rid not in ("", "Null"):
+            out["secondary_resource_id"] = rid
+            name = resource_name_for(controller, sec)
+            if name:
+                out["secondary_resource_name"] = name
+    view = getattr(d, "view", None)
+    if view is not None:
+        rid = rid_str(view)
+        if rid not in ("", "Null"):
+            out["view_resource_id"] = rid
+    fmt = getattr(d, "format", None)
+    if fmt is not None:
+        out["format"] = enum_name(getattr(fmt, "type", None))
+        out["format_compcount"] = int(getattr(fmt, "compCount", 0) or 0)
+        out["format_bytewidth"] = int(getattr(fmt, "compByteWidth", 0) or 0)
+    out["byte_offset"] = int(getattr(d, "byteOffset", 0) or 0)
+    out["byte_size"] = int(getattr(d, "byteSize", 0) or 0)
+    out["element_byte_size"] = int(getattr(d, "elementByteSize", 0) or 0)
+    out["first_slice"] = int(getattr(d, "firstSlice", 0) or 0)
+    out["num_slices"] = int(getattr(d, "numSlices", 1) or 1)
+    out["first_mip"] = int(getattr(d, "firstMip", 0) or 0)
+    out["num_mips"] = int(getattr(d, "numMips", 1) or 1)
+    out["texture_type"] = enum_name(getattr(d, "textureType", None))
+    return out
+
+
+def serialize_sampler_descriptor(controller: Any, d: Any) -> dict[str, Any]:
+    """Serialize a ``SamplerDescriptor`` from GetSamplerDescriptors()."""
+    out: dict[str, Any] = {"type": enum_name(getattr(d, "type", None))}
+    enrich_resource_dict(controller, out, getattr(d, "object", None))
+    out["address_u"] = enum_name(getattr(d, "addressU", None))
+    out["address_v"] = enum_name(getattr(d, "addressV", None))
+    out["address_w"] = enum_name(getattr(d, "addressW", None))
+    out["compare_function"] = enum_name(getattr(d, "compareFunction", None))
+    out["max_anisotropy"] = float(getattr(d, "maxAnisotropy", 0) or 0)
+    out["min_lod"] = float(getattr(d, "minLOD", 0) or 0)
+    out["max_lod"] = float(getattr(d, "maxLOD", 0) or 0)
+    out["mip_bias"] = float(getattr(d, "mipBias", 0) or 0)
+    out["srgb_border"] = bool(getattr(d, "srgbBorder", False))
+    out["seamless_cubemaps"] = bool(getattr(d, "seamlessCubemaps", True))
+    out["unnormalized"] = bool(getattr(d, "unnormalized", False))
+    return out
+
+
 def serialize_shader_reflection_summary(
     refl: Any, controller: Any | None = None, *, max_resources: int = 64
 ) -> dict[str, Any]:

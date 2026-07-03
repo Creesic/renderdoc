@@ -260,6 +260,62 @@ def capture_driver_name(capture_access: Any) -> str:
     return ""
 
 
+def find_pattern_offsets(
+    fetch_chunk: Any,
+    start: int,
+    end: int,
+    pattern: bytes,
+    max_matches: int,
+    chunk_size: int = 1 << 20,
+) -> tuple[list[int], bool]:
+    """Scan ``[start, end)`` for ``pattern`` via repeated ``fetch_chunk(offset, length)`` calls.
+
+    Fetches overlap by ``len(pattern) - 1`` bytes so matches straddling a chunk boundary aren't
+    missed; ``chunk_size`` is silently raised to comfortably exceed the pattern length so that
+    overlap bookkeeping always has room to work. Returns ``(offsets, truncated)`` where
+    ``truncated`` is ``True`` if ``max_matches`` was hit before the whole range was scanned.
+    """
+    plen = len(pattern)
+    if plen == 0:
+        return [], False
+    effective_chunk = max(int(chunk_size), plen * 8, 4096)
+
+    matches: list[int] = []
+    truncated = False
+    pos = int(start)
+    seen_upto = pos
+    while pos < end:
+        fetch_len = min(effective_chunk, end - pos)
+        data = fetch_chunk(pos, fetch_len)
+        if not data:
+            break
+        actual_len = len(data)
+
+        local = 0
+        while True:
+            idx = data.find(pattern, local)
+            if idx == -1:
+                break
+            abs_off = pos + idx
+            if abs_off >= seen_upto:
+                matches.append(abs_off)
+                if len(matches) >= max_matches:
+                    truncated = True
+                    break
+            local = idx + 1
+        if truncated:
+            break
+
+        if actual_len <= plen - 1 or actual_len < fetch_len:
+            break
+
+        advance = actual_len - (plen - 1)
+        seen_upto = pos + advance
+        pos += advance
+
+    return matches, truncated
+
+
 def replay_driver_hint(controller: Any) -> str:
     """Optional fallback when capture file did not expose a driver name (unusual builds)."""
     if controller is None:
