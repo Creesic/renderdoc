@@ -54,7 +54,15 @@ def serialize_used_descriptor(d: Any, controller: Any) -> dict[str, Any]:
         enrich_resource_dict(controller, out, getattr(desc, "resource", None))
         out["byte_offset"] = int(getattr(desc, "byteOffset", 0))
         out["byte_size"] = int(getattr(desc, "byteSize", 0))
-        out["format"] = enum_name(getattr(desc, "format", None))
+        # desc.format is a ResourceFormat struct, not an enum -- enum_name(fmt) on the struct
+        # itself falls through to str(fmt), a raw "<Swig Object ...>" repr, since ResourceFormat
+        # has no `.name` attribute (only `.type`/`.compCount`/`.compByteWidth` and a Name() method
+        # enum_name() doesn't call). See renderdoc-mcp/TODO.md #11.
+        fmt = getattr(desc, "format", None)
+        if fmt is not None:
+            out["format"] = enum_name(getattr(fmt, "type", None))
+            out["format_compcount"] = int(getattr(fmt, "compCount", 0) or 0)
+            out["format_bytewidth"] = int(getattr(fmt, "compByteWidth", 0) or 0)
         tid = getattr(desc, "texelBufferStructureSize", None)
         if tid is not None:
             out["texel_buffer_structure_size"] = int(tid)
@@ -235,15 +243,21 @@ def serialize_vertex_inputs(pipe: Any, controller: Any) -> dict[str, Any]:
         data["vertex_buffers"].append(vbd)
     data["attributes"] = []
     for a in attrs:
-        data["attributes"].append(
-            {
-                "location": int(getattr(a, "location", 0)),
-                "vertex_buffer_slot": int(getattr(a, "vertexBufferSlot", 0)),
-                "byte_offset": int(getattr(a, "byteOffset", 0)),
-                "per_instance": bool(getattr(a, "perInstance", False)),
-                "format": enum_name(getattr(a, "format", None)),
-            }
-        )
+        # a.format is a ResourceFormat struct, not an enum -- see the identical fix/comment in
+        # serialize_used_descriptor above. Was previously serializing as a raw "<Swig Object ...>"
+        # repr. See renderdoc-mcp/TODO.md #11.
+        fmt = getattr(a, "format", None)
+        attr_row: dict[str, Any] = {
+            "location": int(getattr(a, "location", 0)),
+            "vertex_buffer_slot": int(getattr(a, "vertexBufferSlot", 0)),
+            "byte_offset": int(getattr(a, "byteOffset", 0)),
+            "per_instance": bool(getattr(a, "perInstance", False)),
+        }
+        if fmt is not None:
+            attr_row["format"] = enum_name(getattr(fmt, "type", None))
+            attr_row["format_compcount"] = int(getattr(fmt, "compCount", 0) or 0)
+            attr_row["format_bytewidth"] = int(getattr(fmt, "compByteWidth", 0) or 0)
+        data["attributes"].append(attr_row)
     topo = _try(lambda: pipe.GetTopology())
     data["topology"] = enum_name(topo) if topo is not None else None
     return data
@@ -443,6 +457,45 @@ def normalize_bound_resources(controller: Any, structured_file: Any, event_id: i
     return out
 
 
+def build_draw_state_row(controller: Any, structured_file: Any, event_id: int) -> dict[str, Any]:
+    """Compact per-draw pipeline snapshot for list_draws_with_state/diff_draw_sequences.
+
+    Deliberately narrower than normalize_pipeline_state (~10KB/call): just VB/IB bindings, RT/DS,
+    topology, and shader constant-block names, so scanning/diffing many draws stays cheap.
+    """
+    rd = get_renderdoc()
+    pipe = controller.GetPipelineState()
+    act = find_action(controller, event_id)
+    name = act.GetName(structured_file) if act is not None else ""
+
+    vi = serialize_vertex_inputs(pipe, controller)
+    targets = serialize_graphics_targets(pipe, controller)
+    topo = _try(lambda: pipe.GetTopology())
+
+    shaders: dict[str, Any] = {}
+    for st in collect_shader_stages(rd):
+        refl = _try(lambda s=st: pipe.GetShaderReflection(s))
+        if refl is None:
+            continue
+        entry: dict[str, Any] = {}
+        enrich_resource_dict(controller, entry, getattr(refl, "resourceId", rd.ResourceId.Null()))
+        entry["constant_blocks"] = [
+            str(getattr(cb, "name", "") or "") for cb in (getattr(refl, "constantBlocks", None) or [])
+        ]
+        shaders[enum_name(st).lower()] = entry
+
+    return {
+        "event_id": int(event_id),
+        "name": name,
+        "topology": enum_name(topo) if topo is not None else None,
+        "vertex_buffers": vi.get("vertex_buffers", []),
+        "index_buffer": vi.get("index_buffer"),
+        "color_targets": targets.get("color_targets", []),
+        "depth_target": targets.get("depth_target"),
+        "shaders": shaders,
+    }
+
+
 def serialize_descriptor(controller: Any, d: Any) -> dict[str, Any]:
     """Serialize a ``Descriptor`` (resource/image/buffer descriptor) from GetDescriptors()."""
     out: dict[str, Any] = {
@@ -497,6 +550,87 @@ def serialize_sampler_descriptor(controller: Any, d: Any) -> dict[str, Any]:
     return out
 
 
+_VAR_TYPE_BYTE_WIDTH = {
+    "Float": 4, "UInt": 4, "SInt": 4, "Bool": 4,
+    "Double": 8, "ULong": 8, "SLong": 8, "GPUPointer": 8,
+    "Half": 2, "UShort": 2, "SShort": 2,
+    "UByte": 1, "SByte": 1,
+}
+
+
+def serialize_shader_constant(
+    const: Any, *, max_depth: int = 8, max_members: int = 128, _depth: int = 0
+) -> dict[str, Any]:
+    """A single CB variable's name/offset/type/size, recursing into struct members.
+
+    byteOffset is relative to the immediate parent (struct or CB root), matching the API's own
+    documented semantics -- not accumulated into an absolute CB offset.
+    """
+    t = getattr(const, "type", None)
+    rows = int(getattr(t, "rows", 1) or 1)
+    cols = int(getattr(t, "columns", 1) or 1)
+    elements = int(getattr(t, "elements", 1) or 1)
+    array_stride = int(getattr(t, "arrayByteStride", 0) or 0)
+    base_type_name = enum_name(getattr(t, "baseType", None))
+
+    out: dict[str, Any] = {
+        "name": str(getattr(const, "name", "") or ""),
+        "byte_offset": int(getattr(const, "byteOffset", 0) or 0),
+        "type_name": str(getattr(t, "name", "") or ""),
+        "base_type": base_type_name,
+        "rows": rows,
+        "columns": cols,
+        "elements": elements,
+    }
+
+    members = list(getattr(t, "members", None) or [])
+    single_elem_size: int
+    if members:
+        if _depth >= max_depth:
+            out["members_truncated"] = "max_depth"
+            single_elem_size = 0
+        else:
+            out["members"] = [
+                serialize_shader_constant(m, max_depth=max_depth, max_members=max_members, _depth=_depth + 1)
+                for m in members[:max_members]
+            ]
+            if len(members) > max_members:
+                out["members_truncated"] = "max_members"
+            # a struct's own size isn't a direct field -- approximate as the sum of its
+            # (already-computed) immediate members' sizes, rather than treating it as a scalar.
+            single_elem_size = sum(m["byte_size"] for m in out["members"])
+    else:
+        single_elem_size = _VAR_TYPE_BYTE_WIDTH.get(base_type_name, 4) * rows * cols
+
+    if elements > 1:
+        out["byte_size"] = array_stride * elements if array_stride else single_elem_size * elements
+    else:
+        out["byte_size"] = single_elem_size
+    return out
+
+
+def serialize_sig_parameter(sp: Any) -> dict[str, Any]:
+    """An input/output signature element -- semantic name distinguishes e.g. COLOR from TEXCOORD."""
+    return {
+        "var_name": str(getattr(sp, "varName", "") or ""),
+        "semantic_name": str(getattr(sp, "semanticName", "") or ""),
+        "semantic_index": int(getattr(sp, "semanticIndex", 0) or 0),
+        "reg_index": int(getattr(sp, "regIndex", 0) or 0),
+        "system_value": enum_name(getattr(sp, "systemValue", None)),
+        "var_type": enum_name(getattr(sp, "varType", None)),
+        "comp_count": int(getattr(sp, "compCount", 0) or 0),
+    }
+
+
+def serialize_shader_sampler(sampler: Any) -> dict[str, Any]:
+    return {
+        "name": str(getattr(sampler, "name", "") or ""),
+        "bind_point": int(getattr(sampler, "fixedBindNumber", 0) or 0),
+        "bind_set_or_space": int(getattr(sampler, "fixedBindSetOrSpace", 0) or 0),
+        "array_size": int(getattr(sampler, "bindArraySize", 1) or 1),
+    }
+
+
 def serialize_shader_reflection_summary(
     refl: Any, controller: Any | None = None, *, max_resources: int = 64
 ) -> dict[str, Any]:
@@ -511,15 +645,27 @@ def serialize_shader_reflection_summary(
     cb = getattr(refl, "constantBlocks", None) or []
     out["constant_blocks"] = []
     for i, block in enumerate(cb[:max_resources]):
+        variables = list(getattr(block, "variables", None) or [])
         out["constant_blocks"].append(
             {
                 "index": i,
                 "name": getattr(block, "name", ""),
                 "bind_point": int(getattr(block, "fixedBindNumber", -1)),
+                "byte_size": int(getattr(block, "byteSize", 0) or 0),
+                "variables": [serialize_shader_constant(v) for v in variables[:max_resources]],
             }
         )
     ro = getattr(refl, "readOnlyResources", None) or []
     rw = getattr(refl, "readWriteResources", None) or []
     out["readonly_bindings"] = [getattr(x, "name", str(x)) for x in ro[:max_resources]]
     out["readwrite_bindings"] = [getattr(x, "name", str(x)) for x in rw[:max_resources]]
+
+    samplers = getattr(refl, "samplers", None) or []
+    out["samplers"] = [serialize_shader_sampler(s) for s in samplers[:max_resources]]
+
+    in_sig = getattr(refl, "inputSignature", None) or []
+    out_sig = getattr(refl, "outputSignature", None) or []
+    out["input_signature"] = [serialize_sig_parameter(sp) for sp in in_sig[:max_resources]]
+    out["output_signature"] = [serialize_sig_parameter(sp) for sp in out_sig[:max_resources]]
+
     return out

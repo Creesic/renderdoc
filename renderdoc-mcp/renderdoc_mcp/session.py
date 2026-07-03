@@ -74,11 +74,18 @@ class CaptureSession:
     events_ordered: list[int] = field(default_factory=list)
     chunk_index_by_event: dict[int, int] = field(default_factory=dict)
 
-    def shutdown(self, rd: Any) -> None:
+    def shutdown(self, rd: Any) -> bool:
         try:
             self.controller.Shutdown()
+            return True
         except Exception:
-            pass
+            # Previously swallowed silently -- a failure here can mean the replay device (and its
+            # GPU memory) never actually got released, which is exactly what would make opening
+            # several more captures afterwards more likely to hit a DXGI device error. Surfacing
+            # it doesn't fix anything by itself, but a silent failure here was actively hiding the
+            # evidence needed to diagnose that. See renderdoc-mcp/TODO.md #10.
+            _log.exception("shutdown: controller.Shutdown() failed for capture_id=%s", self.capture_id)
+            return False
 
 
 class CaptureSessionManager:
@@ -89,6 +96,15 @@ class CaptureSessionManager:
         return self._sessions.get(capture_id)
 
     def open_capture(self, path: str) -> CaptureSession:
+        if self._sessions:
+            # Diagnostic breadcrumb, not a limit: each open replay device holds its own GPU
+            # resources for as long as its session stays open (no eviction policy exists). If a
+            # DXGI device error shows up later, this is the trail that shows how many replay
+            # devices were live at the time. See renderdoc-mcp/TODO.md #10.
+            _log.warning(
+                "open_capture: %d other capture session(s) still open (%s) while opening %s",
+                len(self._sessions), list(self._sessions.keys()), path,
+            )
         _log.info("open_capture: OpenCaptureFile path=%s", path)
         rd = rdutil.get_renderdoc()
         cap = rd.OpenCaptureFile()
@@ -162,12 +178,16 @@ class CaptureSessionManager:
         self._sessions[capture_id] = sess
         return sess
 
-    def close_capture(self, capture_id: str) -> None:
+    def close_capture(self, capture_id: str) -> bool | None:
+        """Returns True/False for whether the underlying device actually shut down cleanly, or
+        None if there was no such session. A session is removed from tracking either way -- a
+        failed Shutdown() leaves the device un-freed on the GPU/driver side, but there's nothing
+        further this process can do about a handle that's already reported failure."""
         sess = self._sessions.pop(capture_id, None)
         if sess is None:
-            return
+            return None
         rd = rdutil.get_renderdoc()
-        sess.shutdown(rd)
+        return sess.shutdown(rd)
 
     def close_all(self) -> None:
         rd = rdutil.get_renderdoc()

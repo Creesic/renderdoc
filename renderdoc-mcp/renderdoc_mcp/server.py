@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import difflib
 import os
 import tempfile
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from renderdoc_mcp import rdutil
 from renderdoc_mcp.analysis import (
     analyze_texture_bytes,
     build_frame_overview,
+    deep_diff,
     diff_pipeline_snapshots,
     diff_texture_analysis,
     draw_visibility_analysis,
@@ -31,6 +33,7 @@ from renderdoc_mcp.imaging import (
 )
 from renderdoc_mcp.mesh_decode import decode_mesh_inputs as decode_mesh_inputs_core
 from renderdoc_mcp.serialize import (
+    build_draw_state_row,
     normalize_bound_resources,
     normalize_pipeline_state,
     serialize_descriptor,
@@ -175,11 +178,22 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool()
     async def close_capture(capture_id: str) -> dict[str, Any]:
+        """Close a capture session and release its replay device.
+
+        `closed` reflects whether the underlying device actually reported a clean shutdown --
+        previously this always claimed success even when it silently failed, which could mask a
+        leaked GPU device/resources (see renderdoc-mcp/TODO.md #10 on multi-capture stability).
+        """
         async with replay_execution():
 
             def _go() -> dict[str, Any]:
-                sessions.close_capture(capture_id)
-                return R.ok({"capture_id": capture_id, "closed": True})
+                shutdown_ok = sessions.close_capture(capture_id)
+                if shutdown_ok is None:
+                    return R.err("unknown_capture", capture_id)
+                out: dict[str, Any] = {"capture_id": capture_id, "closed": bool(shutdown_ok)}
+                if not shutdown_ok:
+                    out["warning"] = "Device Shutdown() reported failure; its GPU resources may not have been released"
+                return R.ok(out)
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
@@ -776,7 +790,16 @@ def build_mcp() -> FastMCP:
         slice_index: int = 0,
         sample_index: int = 0,
         type_cast: str = "Typeless",
+        include_interpolants: bool = False,
     ) -> dict[str, Any]:
+        """Pixel history: every fragment that touched (x, y), with pre/post/shader-output values.
+
+        Pass include_interpolants=true to also attach each entry's pixel-shader input values
+        (interpolants) via DebugPixel -- cheap since it only reads trace.inputs from the initial
+        debug state, without walking the full instruction trace. One extra SetFrameEvent +
+        DebugPixel call per history entry, so off by default; entries where debugging fails (e.g.
+        non-fragment-shader operations like a clear) get an interpolants_error instead.
+        """
         async with replay_execution():
 
             def _go() -> dict[str, Any]:
@@ -797,6 +820,33 @@ def build_mcp() -> FastMCP:
                     cast = getattr(rd.CompType, tc)
                 hist = sess.controller.PixelHistory(rid, int(x), int(y), sub, cast)
                 norm = normalize_pixel_history(hist)
+
+                if include_interpolants:
+                    for entry in norm.get("entries", []):
+                        prim = entry.get("primitive_id", -1)
+                        eid = entry.get("event_id")
+                        if eid is None or prim is None or prim < 0:
+                            continue
+                        trace = None
+                        try:
+                            sessions.set_frame_event(sess, int(eid), True)
+                            dpi = rd.DebugPixelInputs()
+                            dpi.sample = int(sample_index)
+                            dpi.primitive = int(prim)
+                            dpi.view = shader_debug.NO_PREFERENCE
+                            trace = sess.controller.DebugPixel(int(x), int(y), dpi)
+                            if trace is None or trace.debugger is None:
+                                entry["interpolants_error"] = "DebugPixel unavailable for this fragment"
+                            else:
+                                entry["interpolants"] = [
+                                    shader_debug.shader_variable_to_value(v) for v in trace.inputs
+                                ]
+                        except Exception as ex:
+                            entry["interpolants_error"] = str(ex)
+                        finally:
+                            if trace is not None:
+                                sess.controller.FreeTrace(trace)
+
                 norm["capture_id"] = capture_id
                 norm["resource_id"] = resource_id
                 pxname = rdutil.resource_name_for(sess.controller, rid)
@@ -1365,6 +1415,156 @@ def build_mcp() -> FastMCP:
                 except Exception as ex:
                     return R.err("visibility_failed", str(ex))
                 return R.ok(vis, evidence=vis.get("evidence"))
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    def _draw_rows(sess: Any, event_ids: list[int] | None, name_contains: str | None, limit: int) -> tuple[list[dict[str, Any]], bool]:
+        if event_ids is not None:
+            candidates = [int(e) for e in event_ids]
+        else:
+            candidates = []
+            for eid in sess.events_ordered:
+                ie = sess.events_by_id[eid]
+                if "Drawcall" not in ie.flags_names:
+                    continue
+                if name_contains and name_contains.lower() not in ie.name.lower():
+                    continue
+                candidates.append(eid)
+
+        capped = candidates[: max(1, int(limit))]
+        rows: list[dict[str, Any]] = []
+        for eid in capped:
+            try:
+                sessions.set_frame_event(sess, eid, True)
+                rows.append(build_draw_state_row(sess.controller, sess.structured_file, eid))
+            except Exception as ex:
+                rows.append({"event_id": eid, "name": "", "error": str(ex)})
+        return rows, len(candidates) > len(capped)
+
+    @mcp.tool()
+    async def list_draws_with_state(
+        capture_id: str,
+        event_ids: list[int] | None = None,
+        name_contains: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """One compact row per draw: VB/IB bindings, RT/DS, topology, shader CB block names.
+
+        Built to replace dozens of individual get_pipeline_state calls (~10KB each) when scanning
+        or comparing many draws. Pass event_ids to restrict to specific draws (e.g. from a prior
+        list_events call); otherwise every Drawcall event is included, up to limit.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                rows, truncated = _draw_rows(sess, event_ids, name_contains, limit)
+                return R.ok(
+                    {"capture_id": capture_id, "draws": rows, "count": len(rows), "truncated": truncated}
+                )
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
+    async def diff_draw_sequences(
+        capture_a: str,
+        capture_b: str,
+        event_ids_a: list[int] | None = None,
+        event_ids_b: list[int] | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Align and diff the draw-state tables of two captures (e.g. two backends of the same
+        content, or good-vs-bad). Draws are aligned by structural shape (topology, buffer/target
+        counts) via sequence alignment -- not by event_id or resource id, which are never
+        comparable across captures -- so insertions/deletions on one side are reported separately
+        from field-level changes on aligned pairs. resource_id/event_id fields are excluded from
+        the per-pair change list (always different across captures, pure noise); resource_name is
+        kept since it's often preserved and meaningfully comparable.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                sess_a = sessions.get(capture_a)
+                sess_b = sessions.get(capture_b)
+                if sess_a is None or sess_b is None:
+                    return R.err("unknown_capture", "capture_a or capture_b invalid")
+
+                rows_a, _ = _draw_rows(sess_a, event_ids_a, None, limit)
+                rows_b, _ = _draw_rows(sess_b, event_ids_b, None, limit)
+
+                def shape_key(row: dict[str, Any]) -> tuple[Any, ...]:
+                    return (
+                        row.get("topology"),
+                        len(row.get("vertex_buffers") or []),
+                        row.get("index_buffer") is not None,
+                        len(row.get("color_targets") or []),
+                        row.get("depth_target") is not None,
+                    )
+
+                def strip_noise(obj: Any) -> Any:
+                    # event_id/resource_id are never comparable across captures; name is the raw
+                    # API call name (e.g. "vkCmdDrawIndexed" vs "DrawIndexedInstanced") so it
+                    # differs by backend even for the same semantic draw -- all three would just
+                    # be noise in every pair's diff. name_a/name_b stay visible at the pair level.
+                    if isinstance(obj, dict):
+                        return {
+                            k: strip_noise(v) for k, v in obj.items() if k not in ("event_id", "resource_id", "name")
+                        }
+                    if isinstance(obj, list):
+                        return [strip_noise(v) for v in obj]
+                    return obj
+
+                keys_a = [shape_key(r) for r in rows_a]
+                keys_b = [shape_key(r) for r in rows_b]
+                matcher = difflib.SequenceMatcher(a=keys_a, b=keys_b, autojunk=False)
+
+                paired: list[tuple[dict[str, Any], dict[str, Any]]] = []
+                only_a: list[dict[str, Any]] = []
+                only_b: list[dict[str, Any]] = []
+                for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                    if tag == "equal":
+                        paired.extend(zip(rows_a[i1:i2], rows_b[j1:j2]))
+                    elif tag == "replace":
+                        n = min(i2 - i1, j2 - j1)
+                        paired.extend(zip(rows_a[i1:i1 + n], rows_b[j1:j1 + n]))
+                        only_a.extend(rows_a[i1 + n:i2])
+                        only_b.extend(rows_b[j1 + n:j2])
+                    elif tag == "delete":
+                        only_a.extend(rows_a[i1:i2])
+                    elif tag == "insert":
+                        only_b.extend(rows_b[j1:j2])
+
+                pairs = []
+                changed_count = 0
+                for ra, rb in paired:
+                    changes = deep_diff(strip_noise(ra), strip_noise(rb))
+                    if changes:
+                        changed_count += 1
+                    pairs.append(
+                        {
+                            "event_id_a": ra.get("event_id"),
+                            "event_id_b": rb.get("event_id"),
+                            "name_a": ra.get("name"),
+                            "name_b": rb.get("name"),
+                            "changes": changes,
+                        }
+                    )
+
+                return R.ok(
+                    {
+                        "capture_a": capture_a,
+                        "capture_b": capture_b,
+                        "draw_count_a": len(rows_a),
+                        "draw_count_b": len(rows_b),
+                        "aligned_count": len(paired),
+                        "changed_count": changed_count,
+                        "only_in_a": [{"event_id": r.get("event_id"), "name": r.get("name")} for r in only_a],
+                        "only_in_b": [{"event_id": r.get("event_id"), "name": r.get("name")} for r in only_b],
+                        "pairs": pairs,
+                    }
+                )
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 

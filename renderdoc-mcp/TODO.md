@@ -228,9 +228,35 @@ block names, VB bindings (resource/offset/stride/size), IB binding, RT/DS, topol
 `get_pipeline_state` calls (~10KB of noise each) were issued by hand to build this table — across
 two captures, to diff backends. Wants `diff_draw_sequences(capture_a, capture_b)` on top.
 
-**Complexity:** medium. Mostly composition of the existing `normalize_pipeline_state`
-(`serialize.py`) across all draw events; `diff_draw_sequences` needs a sequence-alignment strategy
-since draws won't necessarily line up 1:1 between two captures from different backends.
+**Status: implemented.**
+
+- `list_draws_with_state(capture_id, event_ids=None, name_contains=None, limit=200)`: one row per
+  draw via a new `build_draw_state_row()` (`serialize.py`) — deliberately narrower than
+  `normalize_pipeline_state` (no viewports/blend/depth-state/rasterizer/anomaly fields), just VB/IB
+  bindings, RT/DS, topology, and per-stage shader constant-block names. Reuses the existing
+  `serialize_vertex_inputs`/`serialize_graphics_targets` rather than re-deriving them.
+
+- `diff_draw_sequences(capture_a, capture_b, event_ids_a=None, event_ids_b=None, limit=200)`:
+  builds the same compact rows for both captures, then aligns them with stdlib
+  `difflib.SequenceMatcher` over a **shape key** per draw (topology, VB count, has-index-buffer,
+  color-target count, has-depth-target) — not event_id or resource_id, which are never comparable
+  across two different capture files. `equal`/`replace` opcodes become aligned pairs (diffed with
+  the existing `deep_diff` from `analysis.py`); `delete`/`insert` become `only_in_a`/`only_in_b`.
+
+  Found during testing (not in the original plan): `event_id`, `resource_id`, *and* `name` all have
+  to be stripped before diffing a pair, not just resource_id. Draw call names are the raw API
+  function name (e.g. `vkCmdDrawIndexed` vs `DrawIndexedInstanced`) so they differ by backend even
+  for the semantically-identical draw — left in, every single pair would show a spurious "name
+  changed" entry, drowning out real diffs. `resource_name` is deliberately kept (unlike
+  `resource_id`) since it's often preserved across backends and a genuine mismatch there (bound to
+  the wrong named texture) is exactly the kind of thing this tool should surface.
+
+Validated with synthetic draw-row fixtures (pure Python, no capture needed): identical draws
+(differing only in resource ids/names/event ids) correctly produce zero changes; a draw with a
+genuinely different bound texture name surfaces exactly that one change; a structurally different
+draw (extra vertex buffer) surfaces the count change; and a draw entirely missing from one side
+correctly lands in `only_in_a` via the `delete` opcode rather than being force-paired with an
+unrelated neighbor.
 
 ## 9. Reflection completeness
 
@@ -238,8 +264,34 @@ since draws won't necessarily line up 1:1 between two captures from different ba
 interpolated vertex colors from UVs), sampler bindings, and CB variable layouts (names/offsets/
 sizes), not just block names.
 
-**Complexity:** low-medium — likely extends `serialize_shader_reflection_summary`
-(`serialize.py`) with fields already present on `ShaderReflection` but not yet surfaced.
+**Status: implemented.** Extended `serialize_shader_reflection_summary` (`serialize.py`) with three
+new sections, plus richer `constant_blocks` entries — all from fields already on `ShaderReflection`
+that just weren't surfaced:
+
+- `input_signature`/`output_signature`: semantic name/index, register index, system value, var
+  type, component count per `SigParameter` (new `serialize_sig_parameter`) — directly answers "is
+  this interpolant a vertex color or a UV" from the semantic name alone.
+- `samplers`: name, bind point, bind set/space, array size per `ShaderSampler` (new
+  `serialize_shader_sampler`).
+- `constant_blocks[].variables`: name, byte offset, type name/base type/rows/columns/elements, and
+  a computed `byte_size`, recursing into nested struct members (new `serialize_shader_constant`,
+  capped at depth 8 / 128 members for safety). `byte_offset` is relative to the immediate parent
+  (struct or CB root), matching the API's own documented semantics — not accumulated into an
+  absolute CB-root offset.
+
+`readonly_bindings`/`readwrite_bindings` were deliberately left as bare name lists (out of scope —
+the backlog's "not just block names" phrasing was about constant blocks specifically, not
+read-only/read-write resource bindings).
+
+Validated by constructing real `ShaderReflection`/`ConstantBlock`/`ShaderConstant`/`ShaderSampler`/
+`SigParameter` objects directly (all default-constructible from Python, confirmed) and running them
+through the actual serializer — caught and fixed a real bug this way: struct-typed constants
+initially got a bogus 4-byte `byte_size` from the generic scalar-width fallback instead of their
+actual aggregate size. Fixed by computing struct size as the sum of already-serialized member
+sizes (a reasonable approximation that ignores alignment padding between members — true
+std140/std430-exact sizing would need per-API packing-rule knowledge, out of scope here), and using
+the authoritative `arrayByteStride` field directly for arrays (exact, not an approximation) when
+present.
 
 ## 10. Replay stability with multiple captures
 
@@ -251,15 +303,62 @@ of failing calls outright.
 **Current state:** `CaptureSessionManager` (`session.py`) already supports multiple concurrent
 sessions with no eviction policy — every `open_capture` call creates a new `ReplayController`
 without closing any others.
-**Complexity:** high, and the design shouldn't start until the root cause is confirmed — is this a
-real GPU/device concurrent-context limit, or something fixable in session lifecycle? Don't build
-the LRU/recovery workaround before that's known.
+**Status: investigated (code-level only, no live repro available), root cause NOT confirmed. Did
+NOT build the LRU/recovery workaround** — per this item's own instruction, and because I couldn't
+get a conclusive answer.
+
+What I checked in RenderDoc's C++ source: `D3D12_CreateReplayDevice()`
+(`renderdoc/driver/d3d12/d3d12_replay.cpp`) creates a fresh `IDXGIFactory1`/adapter/`ID3D12Device`
+on every call — no cached/singleton device, no `RegisterReplayProvider`-level cap, and no
+"only one replay device" comment or check anywhere in `renderdoc/core/` or the D3D12 driver.
+Architecturally, nothing blocks multiple simultaneous replay devices in one process.
+
+Leading hypothesis (not confirmed): plain GPU/VRAM resource accumulation, not a hard concurrency
+limit. `CaptureSessionManager` (`session.py`) has no eviction policy — every `open_capture` adds a
+session without closing any others — and worse, `CaptureSession.shutdown()` wrapped
+`controller.Shutdown()` in a bare `except Exception: pass`, silently swallowing any failure. If
+Shutdown ever failed for a since-closed capture (plausible if the device was already in a bad
+DXGI-error state), the GPU resources it held would never be freed, and there'd be zero evidence of
+it in the logs — exactly the kind of gap that would make "opens 2-3 captures, hits a DXGI error"
+look mysterious rather than an accumulating-resource problem.
+
+**What I did fix** (safe, no policy/behavior change, purely observability): `shutdown()` now
+returns whether `Shutdown()` actually succeeded and logs a warning with the capture_id on failure,
+instead of swallowing it; `close_capture` propagates this into the tool response (`closed: false` +
+a warning instead of always claiming success); `open_capture` now logs a warning listing which
+other sessions are still open whenever a new one is opened while others are live. None of this caps
+or evicts anything — it just means the *next* time this happens, there will be actual log evidence
+(how many sessions were open, whether any prior Shutdown had silently failed) instead of none.
+
+**What would actually confirm root cause**: reproducing it with logging in place, ideally with
+`--pyrenderdoc`/MCP server logs captured across the failure. I don't have a way to do that in this
+environment (see tasks #1/#3's note on the target-control sandbox blocker — same constraint
+applies here, and this one additionally needs a real multi-GPU-resource scenario, not just a single
+capture). Recommend watching for it to recur now that the logging is in place, or deliberately
+reproducing it (open 3+ real captures via the actual MCP client without closing them, ideally with
+qrenderdoc also open) and sending the resulting log — that would settle it either way before any
+LRU/recovery logic gets built.
 
 ## Small fixes
 
-- `get_pipeline_state`: vertex attribute format fields serialize as `"<Swig Object at 0x...>"`
-  instead of a proper `ResourceFormat` breakdown (type/compCount/byteWidth). Not yet located
-  precisely in `serialize.py` — needs a look before fixing.
-- `pixel_history`: already good; add the fragment's interpolant values if cheap — natural
-  follow-on once #1's `ShaderDebugTrace` plumbing exists, since interpolants come from the same
-  machinery.
+**Status: both implemented.**
+
+- **ResourceFormat serialization bug**: confirmed and reproduced directly against a real
+  `rd.ResourceFormat()` instance — `enum_name(fmt)` on the whole struct falls through to
+  `str(fmt)` (a raw `"<Swig Object of type 'ResourceFormat *' at 0x...>"` repr) because
+  `ResourceFormat` has no `.name` attribute, only `.type`/`.compCount`/`.compByteWidth` and a
+  `Name()` *method* that `enum_name()` never calls. Fixed in `serialize_vertex_inputs` (the
+  reported case) — **and** found the identical bug in `serialize_used_descriptor` via a codebase
+  grep for the same buggy pattern (`enum_name(getattr(..., "format", ...))` without a `.type`
+  sub-access), which feeds `get_bound_resources`/`get_pipeline_state`/`get_shader`'s readonly/
+  readwrite/sampler binding lists — same fix applied there too, since it's the same class of bug
+  the backlog is asking to fix, just present in a second spot. Both now emit `format` (enum name),
+  `format_compcount`, `format_bytewidth` instead of the raw struct repr.
+
+- **pixel_history interpolants**: added `include_interpolants` (default `false`) to `pixel_history`,
+  reusing task #1's `shader_debug.shader_variable_to_value` — for each history entry, calls
+  `DebugPixel` at that entry's own `event_id`/`primitive_id` and reads `trace.inputs` directly
+  without walking the full instruction trace (genuinely cheap, as the backlog hoped), then
+  immediately frees it. Off by default since it's still one extra `SetFrameEvent` + `DebugPixel`
+  call per entry; entries where debugging doesn't apply (e.g. a clear, not a fragment shader
+  invocation) get `interpolants_error` instead of failing the whole call.
