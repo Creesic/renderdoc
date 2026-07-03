@@ -46,10 +46,9 @@ _replay_init_lock = asyncio.Lock()
 _replay_initialized = False
 
 # Single-threaded executor: ReplayController captures m_ThreadID at construction and
-# CHECK_REPLAY_THREAD() enforces that every method (including Shutdown) runs on that
-# same thread.  Using max_workers=1 guarantees InitialiseReplay, all tool calls, and
-# ShutdownReplay all land on the same OS thread, avoiding access violations in D3D12
-# cleanup when the wrong thread releases GPU resources.
+# CHECK_REPLAY_THREAD() enforces that every method runs on that same thread.
+# Using max_workers=1 guarantees InitialiseReplay and all replay-backed tool calls
+# land on the same OS thread.
 _replay_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="renderdoc-replay"
 )
@@ -73,13 +72,6 @@ async def ensure_replay_initialized() -> None:
 
         await asyncio.get_running_loop().run_in_executor(_replay_executor, _init)
         _replay_initialized = True
-
-
-def _shutdown_replay_sync() -> None:
-    try:
-        rdutil.get_renderdoc().ShutdownReplay()
-    except Exception:
-        pass
 
 
 @asynccontextmanager
@@ -128,15 +120,10 @@ def _resource_type_from_string(rd: Any, name: str | None) -> Any | None:
 
 @asynccontextmanager
 async def _lifespan(_: FastMCP):
-    try:
-        yield
-    finally:
-        await asyncio.get_running_loop().run_in_executor(_replay_executor, sessions.close_all)
-        async with _replay_init_lock:
-            global _replay_initialized
-            if _replay_initialized:
-                await asyncio.get_running_loop().run_in_executor(_replay_executor, _shutdown_replay_sync)
-                _replay_initialized = False
+    # FastMCP runs this lifespan for Streamable HTTP session lifetime. Clients
+    # frequently terminate sessions while the process should keep serving MCP, so
+    # replay teardown must stay on explicit tool calls or process exit.
+    yield
 
 
 def build_mcp() -> FastMCP:
