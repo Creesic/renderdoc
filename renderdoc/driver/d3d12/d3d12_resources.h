@@ -888,6 +888,12 @@ public:
       m_Bytecode.assign((const byte *)byteCode.pShaderBytecode, byteCode.BytecodeLength);
       m_DXBCFile = NULL;
       m_Details = new ShaderReflection;
+      // set unconditionally here (not left to BuildReflection()) so a reflection-parsing
+      // failure for this shader can never leave resourceId at its default/invalid value -
+      // GetDetails() permanently caches whatever BuildReflection() managed to fill in
+      // (m_Built latches true even on failure/skip), so this is the only place guaranteed
+      // to run for every shader.
+      m_Details->resourceId = GetResourceID();
 
       if(!m_InternalResources)
       {
