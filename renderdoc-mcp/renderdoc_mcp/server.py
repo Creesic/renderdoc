@@ -1136,7 +1136,7 @@ def build_mcp() -> FastMCP:
                         ),
                     )
                 try:
-                    states = shader_debug.run_debug_trace(sess.controller, trace)
+                    states, truncated = shader_debug.run_debug_trace(sess.controller, trace)
                     disasm_lines: list[str] = []
                     try:
                         pipe_obj = pipe.GetGraphicsPipelineObject()
@@ -1154,6 +1154,15 @@ def build_mcp() -> FastMCP:
                             os.close(fd)
                         shader_debug.dump_full_trace(rd, trace, states, disasm_lines, path)
                         out["full_trace_path"] = path
+                    if truncated:
+                        out["truncated"] = True
+                        out["truncated_reason"] = (
+                            "Trace exceeded {} steps (likely a long-running or infinite shader "
+                            "loop); stopped early to avoid hanging the server. Results reflect "
+                            "only the first {} steps.".format(
+                                shader_debug.MAX_DEBUG_STEPS, shader_debug.MAX_DEBUG_STEPS
+                            )
+                        )
                 except Exception as ex:
                     return R.err("debug_pixel_failed", str(ex))
                 finally:
@@ -1215,7 +1224,7 @@ def build_mcp() -> FastMCP:
                         ),
                     )
                 try:
-                    states = shader_debug.run_debug_trace(sess.controller, trace)
+                    states, truncated = shader_debug.run_debug_trace(sess.controller, trace)
                     disasm_lines: list[str] = []
                     try:
                         pipe_obj = pipe.GetGraphicsPipelineObject()
@@ -1233,6 +1242,15 @@ def build_mcp() -> FastMCP:
                             os.close(fd)
                         shader_debug.dump_full_trace(rd, trace, states, disasm_lines, path)
                         out["full_trace_path"] = path
+                    if truncated:
+                        out["truncated"] = True
+                        out["truncated_reason"] = (
+                            "Trace exceeded {} steps (likely a long-running or infinite shader "
+                            "loop); stopped early to avoid hanging the server. Results reflect "
+                            "only the first {} steps.".format(
+                                shader_debug.MAX_DEBUG_STEPS, shader_debug.MAX_DEBUG_STEPS
+                            )
+                        )
                 except Exception as ex:
                     return R.err("debug_vertex_failed", str(ex))
                 finally:

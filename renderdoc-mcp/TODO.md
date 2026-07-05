@@ -53,6 +53,27 @@ names so distinct anonymous DXIL registers don't silently overwrite each other. 
 verified fixed end-to-end against real synthetic `ShaderVariable`/`ShaderDebugState` objects
 (constructed via the actual RenderDoc API, not mocks) matching the exact reported scenario.
 
+**Post-ship bug fix (2)**: `debug_vertex` (and `debug_pixel`) reported "keeps timing out". Root
+cause confirmed live: `run_debug_trace()`'s `while True: ContinueDebug()` loop has no bound, and
+every tool call is serialized behind a single global lock + single-worker thread (required because
+`ReplayController` is not thread-safe). A shader that runs a very large or genuinely infinite number
+of steps therefore never returns, wedging every subsequent tool call — not just `debug_vertex` — for
+the lifetime of the process. Watched this happen live in this session: the renderdoc-mcp server
+process grew to 20+GB / 1000+s CPU accumulating `ShaderDebugState`s and then crashed outright,
+taking the whole MCP server down (confirmed via `Get-CimInstance`/`Get-Process` and an `open_capture`
+call that itself hung for 300s waiting on the wedged lock). The C++ UI (`ShaderViewer.cpp`) has the
+same unbounded loop but lets the user cancel by closing the debug view — this server has no
+equivalent, so the fix adds a hard cap instead: `run_debug_trace()` now stops after
+`MAX_DEBUG_STEPS` (20000) states and returns `(states, truncated)`; `debug_pixel`/`debug_vertex`
+surface `truncated: true` + a `truncated_reason` in the response instead of hanging. Verified the
+cap actually stops a simulated infinite `ContinueDebug()` loop (500-step cap, exactly 500 calls
+made, `truncated=True`) and that a normal short trace is unaffected (`truncated=False`, all steps
+kept). Synced the fix into the already-vendored `x64/Development/mcp/renderdoc_mcp` and `mcp_site/
+renderdoc_mcp` copies (build outputs, gitignored) so it takes effect on the next server restart
+without waiting for a full rebuild — **the currently-running server process still has the old
+unbounded code loaded in memory and needs a restart** (Settings → MCP toggle off/on, or relaunch
+qrenderdoc) to pick up the fix.
+
 ## 2. Shader disassembly that works for DXIL
 
 `get_shader(include_disassembly=true)` returns `"; Invalid Shader Specified"` for DXIL shaders in

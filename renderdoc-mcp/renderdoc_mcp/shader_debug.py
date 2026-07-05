@@ -21,6 +21,15 @@ from renderdoc_mcp.serialize import serialize_used_descriptor
 
 NO_PREFERENCE = 0xFFFFFFFF  # matches IReplayController::NoPreference (~0U)
 
+# Safety ceiling on ContinueDebug() steps. The C++ UI (qrenderdoc/Windows/ShaderViewer.cpp) runs the
+# same unbounded loop but lets the user cancel by closing the debug view; this server has no such
+# escape hatch and serializes every tool call behind one replay thread/lock, so a shader that runs
+# (near-)indefinitely -- a genuine infinite loop, or just a huge iteration count -- wedges every
+# other tool call too, and the accumulated ShaderDebugState list can grow without bound. Observed in
+# practice: the server process ran for 1000+s and grew to 20+GB before dying, taking the whole MCP
+# server down with it.
+MAX_DEBUG_STEPS = 20000
+
 # DisassembleShader returns these exact sentinel strings (not exceptions) on failure — see
 # e.g. renderdoc/driver/d3d12/d3d12_replay.cpp, d3d11_replay.cpp, vk_replay.cpp, gl_replay.cpp.
 _INVALID_SHADER_MARKER = "; Invalid Shader Specified"
@@ -161,15 +170,25 @@ def shader_variable_to_value(var: Any) -> dict[str, Any]:
     return {"name": name, "type": rdutil.enum_name(getattr(var, "type", None)), "value": value}
 
 
-def run_debug_trace(controller: Any, trace: Any) -> list[Any]:
-    """Repeatedly call ContinueDebug until it returns no more steps (matches the C++ UI's loop)."""
+def run_debug_trace(controller: Any, trace: Any, max_steps: int = MAX_DEBUG_STEPS) -> tuple[list[Any], bool]:
+    """Repeatedly call ContinueDebug until it returns no more steps (matches the C++ UI's loop).
+
+    Stops early once `max_steps` states have been collected, returning what was gathered so far
+    rather than looping forever -- see MAX_DEBUG_STEPS. Returns (states, truncated). Calling
+    FreeTrace on a debugger that hasn't reached its final state is safe (ReplayController::FreeTrace
+    just releases it unconditionally; the C++ UI relies on the same behavior when a user cancels).
+    """
     states: list[Any] = []
+    truncated = False
     while True:
         chunk = list(controller.ContinueDebug(trace.debugger))
         if not chunk:
             break
         states.extend(chunk)
-    return states
+        if len(states) >= max_steps:
+            truncated = True
+            break
+    return states, truncated
 
 
 def _instruction_line_info(inst_info: list[Any], inst_numbers: list[int], instruction: int) -> Any | None:
