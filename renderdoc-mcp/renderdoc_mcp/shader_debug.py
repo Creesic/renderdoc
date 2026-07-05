@@ -29,6 +29,12 @@ _DISASSEMBLY_FAILURE_MARKERS = (
     "; Invalid disassembly target",
     "; No pipeline specified,",
     "; Unknown error fetching disassembly",
+    # ISA targets (AMDIL / GCN / RDNA) can only disassemble native DXBC/SPIR-V; for a
+    # DXIL or SPIR-V shader they return this exact sentinel (no leading ';'). Without it
+    # the target loop accepted this 38-char string as if it were real disassembly and
+    # reported disassembly_available=true with useless text, hiding that the source-level
+    # DXBC/DXIL target was the one that actually failed. Observed on FM2/plume DXIL SM6.0.
+    "Unsupported encoding for shader",
 )
 
 
@@ -55,6 +61,28 @@ def disassembly_failure_reason(text: str) -> str | None:
                 )
             return stripped
     return None
+
+
+def best_disassembly(controller: Any, pipe_obj: Any, refl: Any) -> str:
+    """First disassembly target that returns real text (not a failure sentinel), else ''.
+
+    ISA targets (AMDIL/GCN/RDNA) return an "Unsupported encoding" sentinel for DXIL/SPIR-V
+    shaders; taking ``targets[0]`` blindly and splitting it fed that sentinel to the resource
+    resolver as if it were disassembly. Reuse the same failure detection get_shader uses so the
+    debug-trace resource resolution only ever sees genuine disassembly.
+    """
+    try:
+        targets = list(controller.GetDisassemblyTargets(True))
+    except Exception:
+        return ""
+    for t in targets:
+        try:
+            candidate = controller.DisassembleShader(pipe_obj, refl, t)
+        except Exception:
+            continue
+        if disassembly_failure_reason(candidate) is None:
+            return candidate
+    return ""
 
 _RES_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])([tsu])(\d+)(?![A-Za-z0-9_])")
 _CB_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])cb(\d+)\[(\d+)\]")

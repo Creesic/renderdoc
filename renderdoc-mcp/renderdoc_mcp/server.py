@@ -1021,6 +1021,12 @@ def build_mcp() -> FastMCP:
                     text = ""
                     used_target = ""
                     failure_reason: str | None = None
+                    # Record why each target was rejected so a total failure is diagnosable
+                    # instead of silent. Previously the loop kept only the LAST reason, so when
+                    # the source-level DXBC/DXIL target failed and an ISA target returned an
+                    # "Unsupported encoding" sentinel, the caller saw neither the real cause nor
+                    # (before the sentinel was added to the failure markers) that it had failed.
+                    attempts: list[dict[str, str]] = []
                     if not targets:
                         failure_reason = "No disassembly targets available for this capture's driver"
                     else:
@@ -1032,11 +1038,14 @@ def build_mcp() -> FastMCP:
                                 used_target = t
                                 failure_reason = None
                                 break
+                            attempts.append({"target": t, "reason": reason[:200]})
                             failure_reason = reason
 
                     if failure_reason is not None:
                         out["disassembly_available"] = False
                         out["disassembly_error"] = failure_reason
+                        if attempts:
+                            out["disassembly_attempts"] = attempts
                     else:
                         out["disassembly_available"] = True
                         out["disassembly_target"] = used_target
@@ -1131,9 +1140,8 @@ def build_mcp() -> FastMCP:
                     disasm_lines: list[str] = []
                     try:
                         pipe_obj = pipe.GetGraphicsPipelineObject()
-                        targets = sess.controller.GetDisassemblyTargets(True)
-                        target = targets[0] if targets else ""
-                        disasm_lines = sess.controller.DisassembleShader(pipe_obj, refl, target).split("\n")
+                        disasm_text = shader_debug.best_disassembly(sess.controller, pipe_obj, refl)
+                        disasm_lines = disasm_text.split("\n") if disasm_text else []
                     except Exception:
                         disasm_lines = []
                     out = shader_debug.summarize_debug_trace(
@@ -1211,9 +1219,8 @@ def build_mcp() -> FastMCP:
                     disasm_lines: list[str] = []
                     try:
                         pipe_obj = pipe.GetGraphicsPipelineObject()
-                        targets = sess.controller.GetDisassemblyTargets(True)
-                        target = targets[0] if targets else ""
-                        disasm_lines = sess.controller.DisassembleShader(pipe_obj, refl, target).split("\n")
+                        disasm_text = shader_debug.best_disassembly(sess.controller, pipe_obj, refl)
+                        disasm_lines = disasm_text.split("\n") if disasm_text else []
                     except Exception:
                         disasm_lines = []
                     out = shader_debug.summarize_debug_trace(
