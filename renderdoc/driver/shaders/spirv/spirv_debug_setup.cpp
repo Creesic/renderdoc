@@ -721,7 +721,8 @@ void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
       case Capability::RayTracingKHR:
       case Capability::RayTracingPositionFetchKHR:
       case Capability::RayTraversalPrimitiveCullingKHR:
-      case Capability::RayTracingOpacityMicromapEXT:
+      case Capability::RayTracingOpacityMicromapKHR:
+      case Capability::RayTracingOpacityMicromapExecutionModeKHR:
       {
         supported = false;
         break;
@@ -788,6 +789,21 @@ void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
 
       // SPV_EXT_descriptor_heap
       case Capability::DescriptorHeapEXT:
+      {
+        supported = false;
+        break;
+      }
+
+      // SPV_KHR_constant_data & SPV_KHR_abort
+      case Capability::AbortKHR:
+      case Capability::ConstantDataKHR:
+      {
+        supported = false;
+        break;
+      }
+
+      // SPV_KHR_poison_freeze
+      case Capability::PoisonFreezeKHR:
       {
         supported = false;
         break;
@@ -861,7 +877,7 @@ void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
       case Capability::DebugInfoModuleINTEL:
       case Capability::BindlessTextureNV:
       case Capability::MemoryAccessAliasingINTEL:
-      case Capability::SplitBarrierINTEL:
+      case Capability::SplitBarrierEXT:
       case Capability::GroupUniformArithmeticKHR:
       case Capability::CoreBuiltinsARM:
       case Capability::FPGADSPControlALTERA:
@@ -927,6 +943,22 @@ void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
       case Capability::RayTracingNV:
       case Capability::ShaderInvocationReorderNV:
       case Capability::PushConstantBanksNV:
+      case Capability::MultipleWaitQueuesQCOM:
+      case Capability::Float6EXT:
+      case Capability::Float4EXT:
+      case Capability::Float8UnsignedE8M0EXT:
+      case Capability::MXInt8EXT:
+      case Capability::DotProductBFloat16AccVALVE:
+      case Capability::DotProductFloat16AccFloat16VALVE:
+      case Capability::DotProductFloat16AccFloat32VALVE:
+      case Capability::DotProductFloat8AccFloat32VALVE:
+      case Capability::WeakLinkageAMD:
+      case Capability::PredicatedIOINTEL:
+      case Capability::RoundedDivideSqrtINTEL:
+      case Capability::ImageGatherLinearQCOM:
+      case Capability::ImageGatherExtendedModesQCOM:
+      case Capability::CooperativeMatrixDecodeVectorNV:
+      case Capability::BitcastExtractEXT:
       case Capability::Max:
       case Capability::Invalid:
       {

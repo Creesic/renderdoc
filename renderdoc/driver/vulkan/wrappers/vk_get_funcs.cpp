@@ -1508,3 +1508,16 @@ VkResult WrappedVulkan::vkGetImageDrmFormatModifierPropertiesEXT(
   return ObjDisp(device)->GetImageDrmFormatModifierPropertiesEXT(Unwrap(device), Unwrap(image),
                                                                  pProperties);
 }
+
+void WrappedVulkan::vkGetQueueCheckpointDataNV(VkQueue queue, uint32_t *pCheckpointDataCount,
+                                               VkCheckpointDataNV *pCheckpointData)
+{
+  return ObjDisp(queue)->GetQueueCheckpointDataNV(Unwrap(queue), pCheckpointDataCount,
+                                                  pCheckpointData);
+}
+void WrappedVulkan::vkGetQueueCheckpointData2NV(VkQueue queue, uint32_t *pCheckpointDataCount,
+                                                VkCheckpointData2NV *pCheckpointData)
+{
+  return ObjDisp(queue)->GetQueueCheckpointData2NV(Unwrap(queue), pCheckpointDataCount,
+                                                   pCheckpointData);
+}

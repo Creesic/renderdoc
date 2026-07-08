@@ -1039,6 +1039,8 @@ rdcstr HumanDriverName(VkDriverId driverId)
     case VK_DRIVER_ID_MESA_HONEYKRISP: return "Mesa Honeykrisp";
     case VK_DRIVER_ID_VULKAN_SC_EMULATION_ON_VULKAN: return "Vulkan SC Emulation on Vulkan";
     case VK_DRIVER_ID_MESA_KOSMICKRISP: return "Mesa Kosmickrisp";
+    case VK_DRIVER_ID_MESA_GFXSTREAM: return "Mesa gfxstream";
+    case VK_DRIVER_ID_APE_SOFT: return "Ape Vulkan ICD";
     case VK_DRIVER_ID_MAX_ENUM: break;
   }
 

@@ -560,7 +560,8 @@
   DeclExt(KHR_present_wait2);                          \
   DeclExt(EXT_fragment_density_map_offset);            \
   DeclExt(EXT_image_drm_format_modifier);              \
-  DeclExt(EXT_custom_resolve);
+  DeclExt(EXT_custom_resolve);                         \
+  DeclExt(NV_device_diagnostic_checkpoints);
 
 // for simplicity and since the check itself is platform agnostic,
 // these aren't protected in platform defines
@@ -707,7 +708,8 @@
   CheckExt(KHR_present_wait2, VKXX);                          \
   CheckExt(EXT_fragment_density_map_offset, VKXX);            \
   CheckExt(EXT_image_drm_format_modifier, VKXX);              \
-  CheckExt(EXT_custom_resolve, VKXX);
+  CheckExt(EXT_custom_resolve, VKXX);                         \
+  CheckExt(NV_device_diagnostic_checkpoints, VKXX);
 
 #define HookInitVulkanInstanceExts_PhysDev()                                                         \
   HookInitExtension(KHR_surface, GetPhysicalDeviceSurfaceSupportKHR);                                \
@@ -985,7 +987,6 @@
   HookInitPromotedExtension(KHR_dynamic_rendering, CmdBeginRendering, KHR);                          \
   HookInitPromotedExtension(KHR_dynamic_rendering, CmdEndRendering, KHR);                            \
   HookInitExtension(EXT_fragment_density_map_offset, CmdEndRendering2EXT);                           \
-  HookInitExtension(EXT_custom_resolve, CmdBeginCustomResolveEXT);                                   \
   HookInitPromotedExtension(KHR_dynamic_rendering_local_read, CmdSetRenderingAttachmentLocations,    \
                             KHR);                                                                    \
   HookInitPromotedExtension(KHR_dynamic_rendering_local_read,                                        \
@@ -1114,6 +1115,9 @@
   HookInitExtension(KHR_present_wait2, WaitForPresent2KHR);                                          \
   HookInitExtension(EXT_image_drm_format_modifier, GetImageDrmFormatModifierPropertiesEXT);          \
   HookInitExtension(EXT_custom_resolve, CmdBeginCustomResolveEXT);                                   \
+  HookInitExtension(NV_device_diagnostic_checkpoints, CmdSetCheckpointNV);                           \
+  HookInitExtension(NV_device_diagnostic_checkpoints, GetQueueCheckpointDataNV);                     \
+  HookInitExtension(NV_device_diagnostic_checkpoints, GetQueueCheckpointData2NV);                    \
   HookInitExtension_Device_Win32();                                                                  \
   HookInitExtension_Device_Linux();                                                                  \
   HookInitExtension_Device_Android();                                                                \
@@ -2088,6 +2092,12 @@
               image, VkImageDrmFormatModifierPropertiesEXT *, pProperties);                          \
   HookDefine2(void, vkCmdBeginCustomResolveEXT, VkCommandBuffer, commandBuffer,                      \
               const VkBeginCustomResolveInfoEXT *, pBeginCustomResolveInfo);                         \
+  HookDefine2(void, vkCmdSetCheckpointNV, VkCommandBuffer, commandBuffer, const void *,              \
+              pCheckpointMarker);                                                                    \
+  HookDefine3(void, vkGetQueueCheckpointDataNV, VkQueue, queue, uint32_t *, pCheckpointDataCount,    \
+              VkCheckpointDataNV *, pCheckpointData);                                                \
+  HookDefine3(void, vkGetQueueCheckpointData2NV, VkQueue, queue, uint32_t *, pCheckpointDataCount,   \
+              VkCheckpointData2NV *, pCheckpointData);                                               \
   HookDefine_Win32();                                                                                \
   HookDefine_Linux();                                                                                \
   HookDefine_Android();                                                                              \

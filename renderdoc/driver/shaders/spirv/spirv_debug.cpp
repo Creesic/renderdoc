@@ -5421,6 +5421,14 @@ void ThreadState::StepNext(bool useDebugState, const uint32_t steps,
     case Op::HitObjectIsEmptyEXT:
     case Op::HitObjectIsHitEXT:
     case Op::HitObjectIsMissEXT:
+    case Op::AbortKHR:
+    case Op::PoisonKHR:
+    case Op::FreezeKHR:
+    case Op::BitcastExtractEXT:
+    case Op::FDot2MixAcc16VALVE:
+    case Op::FDot2MixAcc32VALVE:
+    case Op::FDot4MixAcc32VALVE:
+    case Op::ImageGatherQCOM:
     {
       RDCERR("Unsupported extension opcode used %s", ToStr(opdata.op).c_str());
 
@@ -5499,6 +5507,8 @@ void ThreadState::StepNext(bool useDebugState, const uint32_t steps,
     case Op::TypeBufferEXT:
     case Op::MemberDecorateIdEXT:
     case Op::TypeHitObjectEXT:
+    case Op::ConstantDataKHR:
+    case Op::SpecConstantDataKHR:
     {
       RDCERR("Encountered unexpected global SPIR-V operation %s", ToStr(opdata.op).c_str());
       break;
@@ -5564,8 +5574,8 @@ void ThreadState::StepNext(bool useDebugState, const uint32_t steps,
     case Op::TypePipeStorage:
     case Op::ConstantPipeStorage:
     case Op::CreatePipeFromPipeStorage:
-    case Op::ControlBarrierArriveINTEL:
-    case Op::ControlBarrierWaitINTEL:
+    case Op::ControlBarrierArriveEXT:
+    case Op::ControlBarrierWaitEXT:
     case Op::SubgroupMatrixMultiplyAccumulateINTEL:
     case Op::SubgroupBlockPrefetchINTEL:
     case Op::Subgroup2DBlockLoadINTEL:
@@ -5593,6 +5603,8 @@ void ThreadState::StepNext(bool useDebugState, const uint32_t steps,
     case Op::ConvertHandleToSamplerINTEL:
     case Op::SpecConstantCapabilitiesINTEL:
     case Op::ConditionalCopyObjectINTEL:
+    case Op::PredicatedLoadINTEL:
+    case Op::PredicatedStoreINTEL:
     {
       // these are kernel only
       RDCERR("Encountered unexpected kernel SPIR-V operation %s", ToStr(opdata.op).c_str());

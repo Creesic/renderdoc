@@ -203,6 +203,17 @@ while [[ $# -gt 0 ]]; do
 		shift
 		;;
 
+		--python)
+		PYTHON_ROOT="$(realpath "$2")"
+		shift
+		shift
+		;;
+		--qt)
+		QT_ROOT="$(realpath "$2")"
+		shift
+		shift
+		;;
+
 		--skipcompile)
 		SKIPCOMPILE="yes"
 		shift

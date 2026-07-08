@@ -3370,4 +3370,12 @@ public:
   // VK_EXT_custom_resolve
   IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdBeginCustomResolveEXT, VkCommandBuffer commandBuffer,
                                 const VkBeginCustomResolveInfoEXT *pBeginCustomResolveInfo);
+
+  // VK_NV_device_diagnostic_checkpoints
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetCheckpointNV, VkCommandBuffer commandBuffer,
+                                const void *pCheckpointMarker);
+  void vkGetQueueCheckpointDataNV(VkQueue queue, uint32_t *pCheckpointDataCount,
+                                  VkCheckpointDataNV *pCheckpointData);
+  void vkGetQueueCheckpointData2NV(VkQueue queue, uint32_t *pCheckpointDataCount,
+                                   VkCheckpointData2NV *pCheckpointData);
 };

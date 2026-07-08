@@ -1204,6 +1204,11 @@ void LiveCapture::connectionClosed()
         return;
 
       openCapture(cap);
+
+      // if the capture failed to load, don't proceed.
+      if(!m_Ctx.IsCaptureLoaded())
+        return;
+
       if(!cap->saved)
       {
         cap->saved = true;
