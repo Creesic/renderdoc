@@ -51,3 +51,6 @@ __pycache__
 .renderdoc_mcp_cache/
 renderdoc-mcp/build/
 renderdoc-mcp/renderdoc_mcp.egg-info/
+.cursor/
+*.obj
+/*.log
