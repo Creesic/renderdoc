@@ -78,56 +78,69 @@ def _unpack_scalar(raw: bytes, offset: int, base: str, bw: int) -> Any:
     return None
 
 
-def decode_cb_bytes(raw: bytes, constants: list, row_major: bool = True) -> list[dict]:
+def decode_cb_bytes(raw: bytes, constants: list, row_major: bool = True,
+                    base_offset: int = 0) -> list[dict]:
     """Decode constant buffer bytes into a list of typed variable dicts.
 
     Each output dict has keys: name (str), type (str), value (scalar/list/list-of-list).
     row_major=True matches HLSL cbuffer layout (rows padded to 16 bytes in memory).
+    base_offset is the absolute offset of the enclosing struct: ShaderConstant.byteOffset
+    is relative to the parent structure, so recursion accumulates it.
     """
     results: list[dict] = []
     for const in constants:
         name = str(getattr(const, "name", "") or "")
-        base_offset = int(getattr(const, "byteOffset", 0))
+        offset = base_offset + int(getattr(const, "byteOffset", 0))
         ctype = getattr(const, "type", None)
 
         members = list(getattr(ctype, "members", None) or [])
-        if members:
-            nested_results = decode_cb_bytes(raw, members, row_major)
-            for nested in nested_results:
-                nested["name"] = "{}.{}".format(name, nested["name"])
-            results.extend(nested_results)
-            continue
+        elements = int(getattr(ctype, "elements", 1) or 1)
+        array_stride = int(getattr(ctype, "arrayByteStride", 0) or 0)
 
-        rows = int(getattr(ctype, "rows", 1) or 1)
-        cols = int(getattr(ctype, "columns", 1) or 1)
-        base = _comp_type_name(getattr(ctype, "baseType", None))
-        bw = _VARTYPE_BYTES.get(base, 4)
-        type_name = _type_str(rows, cols, base)
-
-        if rows == 1 and cols == 1:
-            value: Any = _unpack_scalar(raw, base_offset, base, bw)
-        elif rows == 1:
-            value = [_unpack_scalar(raw, base_offset + c * bw, base, bw) for c in range(cols)]
+        if elements > 1:
+            instances = [("{}[{}]".format(name, i), offset + i * array_stride)
+                         for i in range(elements)]
         else:
-            # Determine layout for this specific type (with fallback to function param)
-            rm_method = getattr(ctype, "RowMajor", None)
-            type_row_major = rm_method() if callable(rm_method) else row_major
+            instances = [(name, offset)]
 
-            # matrixByteStride is the per-row byte stride; fall back to std140 default of 16
-            row_stride = int(getattr(ctype, "matrixByteStride", 0) or 0) or 16
-            if type_row_major:
-                value = [
-                    [_unpack_scalar(raw, base_offset + r * row_stride + c * bw, base, bw) for c in range(cols)]
-                    for r in range(rows)
-                ]
+        for inst_name, inst_offset in instances:
+            if members:
+                nested_results = decode_cb_bytes(raw, members, row_major, base_offset=inst_offset)
+                for nested in nested_results:
+                    nested["name"] = "{}.{}".format(inst_name, nested["name"])
+                results.extend(nested_results)
+                continue
+
+            rows = int(getattr(ctype, "rows", 1) or 1)
+            cols = int(getattr(ctype, "columns", 1) or 1)
+            base = _comp_type_name(getattr(ctype, "baseType", None))
+            bw = _VARTYPE_BYTES.get(base, 4)
+            type_name = _type_str(rows, cols, base)
+
+            if rows == 1 and cols == 1:
+                value: Any = _unpack_scalar(raw, inst_offset, base, bw)
+            elif rows == 1:
+                value = [_unpack_scalar(raw, inst_offset + c * bw, base, bw) for c in range(cols)]
             else:
-                # Column-major: column stride = row_stride, iterate columns then rows
-                value = [
-                    [_unpack_scalar(raw, base_offset + c * row_stride + r * bw, base, bw) for c in range(cols)]
-                    for r in range(rows)
-                ]
+                # Determine layout for this specific type (with fallback to function param)
+                rm_method = getattr(ctype, "RowMajor", None)
+                type_row_major = rm_method() if callable(rm_method) else row_major
 
-        results.append({"name": name, "type": type_name, "value": value})
+                # matrixByteStride is the per-row byte stride; fall back to std140 default of 16
+                row_stride = int(getattr(ctype, "matrixByteStride", 0) or 0) or 16
+                if type_row_major:
+                    value = [
+                        [_unpack_scalar(raw, inst_offset + r * row_stride + c * bw, base, bw) for c in range(cols)]
+                        for r in range(rows)
+                    ]
+                else:
+                    # Column-major: column stride = row_stride, iterate columns then rows
+                    value = [
+                        [_unpack_scalar(raw, inst_offset + c * row_stride + r * bw, base, bw) for c in range(cols)]
+                        for r in range(rows)
+                    ]
+
+            results.append({"name": inst_name, "type": type_name, "value": value})
 
     return results
 

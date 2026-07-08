@@ -37,18 +37,40 @@ def marker_stack(rd: Any, action: Any, structured_file: Any) -> list[dict[str, A
     return stack
 
 
-def expand_action_flags(rd: Any, flags: int) -> list[str]:
-    names: list[str] = []
+# Flag tables are static per renderdoc module, but expand_action_flags runs once per action
+# during open_capture (100k+ events in real captures) — precompute the (name, value) list and
+# memoize expanded name lists per flags value, since flag combinations repeat heavily.
+# Keyed by id() with the object itself kept in the entry, so identity is verified and ids
+# are never recycled for live entries.
+_FLAG_TABLES: dict[int, tuple[Any, list[tuple[str, int]]]] = {}
+_FLAG_NAMES: dict[tuple[int, int], list[str]] = {}
+
+
+def _action_flag_table(rd: Any) -> list[tuple[str, int]]:
+    entry = _FLAG_TABLES.get(id(rd))
+    if entry is not None and entry[0] is rd:
+        return entry[1]
+    table: list[tuple[str, int]] = []
     for name in dir(rd.ActionFlags):
         if name.startswith("_"):
             continue
         try:
             val = getattr(rd.ActionFlags, name)
-            if isinstance(val, int) and flags & val:
-                names.append(name)
+            if isinstance(val, int):
+                table.append((name, int(val)))
         except Exception:
             continue
-    return sorted(names)
+    _FLAG_TABLES[id(rd)] = (rd, table)
+    return table
+
+
+def expand_action_flags(rd: Any, flags: int) -> list[str]:
+    key = (id(rd), int(flags))
+    cached = _FLAG_NAMES.get(key)
+    if cached is None:
+        cached = sorted(name for name, val in _action_flag_table(rd) if flags & val)
+        _FLAG_NAMES[key] = cached
+    return list(cached)
 
 
 @dataclass
@@ -187,6 +209,7 @@ class CaptureSessionManager:
         if sess is None:
             return None
         rd = rdutil.get_renderdoc()
+        _drop_action_map(sess.controller)
         return sess.shutdown(rd)
 
     def close_all(self) -> None:
@@ -194,11 +217,15 @@ class CaptureSessionManager:
         for sid in list(self._sessions.keys()):
             sess = self._sessions.pop(sid, None)
             if sess is not None:
+                _drop_action_map(sess.controller)
                 sess.shutdown(rd)
 
-    def set_frame_event(self, sess: CaptureSession, event_id: int, force_complete_replay: bool = True) -> None:
+    def set_frame_event(self, sess: CaptureSession, event_id: int, force_complete_replay: bool = False) -> None:
         # SetFrameEvent is void in the native API; Python bindings typically return None — do not
         # treat falsy return values as failure.
+        # force defaults False: the native call already no-ops when the eventId is unchanged,
+        # and this process owns the controller exclusively, so forcing a full frame re-replay
+        # on every tool call is pure waste.
         sess.controller.SetFrameEvent(event_id, force_complete_replay)
 
 
@@ -217,16 +244,36 @@ def encode_cursor(offset: int) -> str:
     return base64.urlsafe_b64encode(json.dumps({"o": offset}).encode("utf-8")).decode("ascii")
 
 
-def find_action(controller: Any, event_id: int) -> Any | None:
-    found: list[Any] = []
+# eventId -> action map per controller, built once on first lookup. Tools like
+# list_draws_with_state call find_action per draw, which was a full tree walk each time
+# (O(draws x events)). Entries hold the controller so id() can't be recycled while cached;
+# CaptureSessionManager drops the entry when the session closes.
+_ACTION_MAPS: dict[int, tuple[Any, dict[int, Any]]] = {}
+
+
+def _actions_by_event(controller: Any) -> dict[int, Any]:
+    entry = _ACTION_MAPS.get(id(controller))
+    if entry is not None and entry[0] is controller:
+        return entry[1]
+    mapping: dict[int, Any] = {}
 
     def visit(act: Any) -> None:
-        if int(act.eventId) == event_id:
-            found.append(act)
+        mapping[int(act.eventId)] = act
 
     for root in controller.GetRootActions():
         _walk_actions(root, visit)
-    return found[0] if found else None
+    _ACTION_MAPS[id(controller)] = (controller, mapping)
+    return mapping
+
+
+def _drop_action_map(controller: Any) -> None:
+    entry = _ACTION_MAPS.get(id(controller))
+    if entry is not None and entry[0] is controller:
+        del _ACTION_MAPS[id(controller)]
+
+
+def find_action(controller: Any, event_id: int) -> Any | None:
+    return _actions_by_event(controller).get(int(event_id))
 
 
 def filter_events(

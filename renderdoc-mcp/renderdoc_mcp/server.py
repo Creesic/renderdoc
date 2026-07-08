@@ -117,6 +117,21 @@ def _stage_from_string(rd: Any, name: str) -> Any | None:
     return None
 
 
+def _select_constant_block(cb_blocks: list, slot: int) -> tuple[Any | None, int]:
+    """Match a register/bind slot to a reflection constant block.
+
+    Returns (block, reflection_index). The index is the block's position in the
+    constantBlocks array — the value PipeState.GetConstantBlock takes — which only
+    coincides with the bind number when registers are dense from 0.
+    """
+    for i, block in enumerate(cb_blocks):
+        if int(getattr(block, "fixedBindNumber", -1)) == int(slot):
+            return block, i
+    if 0 <= int(slot) < len(cb_blocks):
+        return cb_blocks[int(slot)], int(slot)
+    return None, -1
+
+
 def _resource_type_from_string(rd: Any, name: str | None) -> Any | None:
     if not name:
         return None
@@ -225,7 +240,7 @@ def build_mcp() -> FastMCP:
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
-    async def set_event(capture_id: str, event_id: int, force_complete_replay: bool = True) -> dict[str, Any]:
+    async def set_event(capture_id: str, event_id: int, force_complete_replay: bool = False) -> dict[str, Any]:
         async with replay_execution():
 
             def _go() -> dict[str, Any]:
@@ -297,7 +312,7 @@ def build_mcp() -> FastMCP:
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
                 try:
-                    sessions.set_frame_event(sess, int(event_id), True)
+                    sessions.set_frame_event(sess, int(event_id))
                     snap = normalize_pipeline_state(sess.controller, sess.structured_file, int(event_id))
                 except Exception as ex:
                     return R.err("pipeline_state_failed", str(ex))
@@ -314,7 +329,7 @@ def build_mcp() -> FastMCP:
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
                 try:
-                    sessions.set_frame_event(sess, int(event_id), True)
+                    sessions.set_frame_event(sess, int(event_id))
                     data = normalize_bound_resources(sess.controller, sess.structured_file, int(event_id))
                 except Exception as ex:
                     return R.err("bound_resources_failed", str(ex))
@@ -350,7 +365,7 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
-                sessions.set_frame_event(sess, int(event_id), True)
+                sessions.set_frame_event(sess, int(event_id))
 
                 stores = list(sess.controller.GetDescriptorStores())
                 if not stores:
@@ -514,7 +529,7 @@ def build_mcp() -> FastMCP:
                 except ValueError as ex:
                     return R.err("bad_resource_id", str(ex))
                 try:
-                    sessions.set_frame_event(sess, int(event_id), True)
+                    sessions.set_frame_event(sess, int(event_id))
                     tex = find_texture_description(sess.controller, rid)
                     if tex is None:
                         return R.err("not_a_texture", resource_id)
@@ -552,7 +567,7 @@ def build_mcp() -> FastMCP:
                     rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
                     return R.err("bad_resource_id", str(ex))
-                sessions.set_frame_event(sess, int(event_id), True)
+                sessions.set_frame_event(sess, int(event_id))
                 ts = rd.TextureSave()
                 ts.resourceId = rid
                 ts.mip = 0
@@ -613,7 +628,7 @@ def build_mcp() -> FastMCP:
                 except ValueError as ex:
                     return R.err("bad_resource_id", str(ex))
                 try:
-                    sessions.set_frame_event(sess, int(event_id), True)
+                    sessions.set_frame_event(sess, int(event_id))
                     tex = find_texture_description(sess.controller, rid)
                     if tex is None:
                         return R.err("not_a_texture", resource_id)
@@ -678,7 +693,7 @@ def build_mcp() -> FastMCP:
                     rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
                     return R.err("bad_resource_id", str(ex))
-                sessions.set_frame_event(sess, int(event_id), True)
+                sessions.set_frame_event(sess, int(event_id))
                 hard_cap = 256 * 1024 * 1024 if out_file else 4 * 1024 * 1024
                 ln = min(int(length), int(max_bytes), hard_cap)
                 data = rdutil.controller_get_buffer_data(sess.controller, rid, int(offset), ln)
@@ -740,7 +755,7 @@ def build_mcp() -> FastMCP:
                 if not pattern:
                     return R.err("bad_pattern_hex", "pattern_hex must not be empty")
 
-                sessions.set_frame_event(sess, int(event_id), True)
+                sessions.set_frame_event(sess, int(event_id))
 
                 range_end = end
                 if range_end is None:
@@ -829,7 +844,7 @@ def build_mcp() -> FastMCP:
                 except ValueError as ex:
                     return R.err("bad_resource_id", str(ex))
                 if event_id is not None:
-                    sessions.set_frame_event(sess, int(event_id), True)
+                    sessions.set_frame_event(sess, int(event_id))
                 sub = rd.Subresource(int(mip), int(slice_index), int(sample_index))
                 cast = rd.CompType.Typeless
                 tc = type_cast.strip()
@@ -846,7 +861,7 @@ def build_mcp() -> FastMCP:
                             continue
                         trace = None
                         try:
-                            sessions.set_frame_event(sess, int(eid), True)
+                            sessions.set_frame_event(sess, int(eid))
                             dpi = rd.DebugPixelInputs()
                             dpi.sample = int(sample_index)
                             dpi.primitive = int(prim)
@@ -889,9 +904,9 @@ def build_mcp() -> FastMCP:
                 if g is None or b is None:
                     return R.err("unknown_capture", "good or bad capture_id invalid")
                 try:
-                    sessions.set_frame_event(g, int(good_event_id), True)
+                    sessions.set_frame_event(g, int(good_event_id))
                     sg = normalize_pipeline_state(g.controller, g.structured_file, int(good_event_id))
-                    sessions.set_frame_event(b, int(bad_event_id), True)
+                    sessions.set_frame_event(b, int(bad_event_id))
                     sb = normalize_pipeline_state(b.controller, b.structured_file, int(bad_event_id))
                     diff = diff_pipeline_snapshots(sg, sb)
                     diff["good"] = {"capture_id": good_capture_id, "event_id": int(good_event_id)}
@@ -929,7 +944,7 @@ def build_mcp() -> FastMCP:
                     return R.err("bad_resource_id", str(ex))
 
                 def analyze(sess: Any, eid: int, rid: Any, rid_s: str) -> dict[str, Any]:
-                    sessions.set_frame_event(sess, int(eid), True)
+                    sessions.set_frame_event(sess, int(eid))
                     tex = find_texture_description(sess.controller, rid)
                     if tex is None:
                         return {"error": "not_a_texture", "resource_id": rid_s}
@@ -965,7 +980,7 @@ def build_mcp() -> FastMCP:
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
                 try:
-                    sessions.set_frame_event(sess, int(event_id), True)
+                    sessions.set_frame_event(sess, int(event_id))
                     data = decode_mesh_inputs_core(
                         sess.controller, sess.structured_file, int(event_id), preview_vertices, out_file
                     )
@@ -999,7 +1014,7 @@ def build_mcp() -> FastMCP:
                 st = _stage_from_string(rd, stage)
                 if st is None:
                     return R.err("bad_stage", stage)
-                sessions.set_frame_event(sess, int(event_id), True)
+                sessions.set_frame_event(sess, int(event_id))
                 pipe = sess.controller.GetPipelineState()
                 refl = pipe.GetShaderReflection(st)
                 if refl is None:
@@ -1070,7 +1085,7 @@ def build_mcp() -> FastMCP:
                 st = _stage_from_string(rd, stage)
                 if st is None:
                     return R.err("bad_stage", stage)
-                sessions.set_frame_event(sess, int(event_id), True)
+                sessions.set_frame_event(sess, int(event_id))
                 pipe = sess.controller.GetPipelineState()
                 refl = pipe.GetShaderReflection(st)
                 if refl is None:
@@ -1111,7 +1126,7 @@ def build_mcp() -> FastMCP:
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
                 try:
-                    sessions.set_frame_event(sess, int(event_id), True)
+                    sessions.set_frame_event(sess, int(event_id))
                     pipe = sess.controller.GetPipelineState()
                     stage = rd.ShaderStage.Pixel
                     refl = pipe.GetShaderReflection(stage)
@@ -1203,7 +1218,7 @@ def build_mcp() -> FastMCP:
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
                 try:
-                    sessions.set_frame_event(sess, int(event_id), True)
+                    sessions.set_frame_event(sess, int(event_id))
                     pipe = sess.controller.GetPipelineState()
                     stage = rd.ShaderStage.Vertex
                     refl = pipe.GetShaderReflection(stage)
@@ -1297,7 +1312,7 @@ def build_mcp() -> FastMCP:
                 if st is None:
                     return R.err("bad_stage", stage)
 
-                sessions.set_frame_event(sess, int(event_id), True)
+                sessions.set_frame_event(sess, int(event_id))
                 pipe = sess.controller.GetPipelineState()
                 refl = pipe.GetShaderReflection(st)
                 if refl is None:
@@ -1306,13 +1321,7 @@ def build_mcp() -> FastMCP:
                 cb_blocks = list(getattr(refl, "constantBlocks", []) or [])
 
                 # Find by fixed bind number first, then fall back to index
-                cb_block = None
-                for block in cb_blocks:
-                    if int(getattr(block, "fixedBindNumber", -1)) == int(slot):
-                        cb_block = block
-                        break
-                if cb_block is None and int(slot) < len(cb_blocks):
-                    cb_block = cb_blocks[int(slot)]
+                cb_block, cb_index = _select_constant_block(cb_blocks, int(slot))
                 if cb_block is None:
                     return R.err("no_cb_at_slot", "No constant block at slot {}".format(slot))
 
@@ -1320,7 +1329,9 @@ def build_mcp() -> FastMCP:
                 raw = b""
                 raw_hex = ""
                 try:
-                    cb_desc = pipe.GetConstantBlock(st, int(slot), 0)
+                    # GetConstantBlock's second argument is the reflection-array index,
+                    # not the register/bind slot.
+                    cb_desc = pipe.GetConstantBlock(st, cb_index, 0)
                     desc = getattr(cb_desc, "descriptor", None)
                     if desc is not None:
                         buf_rid = getattr(desc, "resource", None)
@@ -1451,7 +1462,7 @@ def build_mcp() -> FastMCP:
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
                 try:
-                    sessions.set_frame_event(sess, int(event_id), True)
+                    sessions.set_frame_event(sess, int(event_id))
                     snap = normalize_pipeline_state(sess.controller, sess.structured_file, int(event_id))
                     vis = draw_visibility_analysis(sess.controller, sess.structured_file, snap, int(event_id))
                 except Exception as ex:
@@ -1477,7 +1488,7 @@ def build_mcp() -> FastMCP:
         rows: list[dict[str, Any]] = []
         for eid in capped:
             try:
-                sessions.set_frame_event(sess, eid, True)
+                sessions.set_frame_event(sess, eid)
                 rows.append(build_draw_state_row(sess.controller, sess.structured_file, eid))
             except Exception as ex:
                 rows.append({"event_id": eid, "name": "", "error": str(ex)})

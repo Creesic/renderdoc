@@ -249,7 +249,7 @@ def serialize_vertex_inputs(pipe: Any, controller: Any) -> dict[str, Any]:
         fmt = getattr(a, "format", None)
         attr_row: dict[str, Any] = {
             "location": int(getattr(a, "location", 0)),
-            "vertex_buffer_slot": int(getattr(a, "vertexBufferSlot", 0)),
+            "vertex_buffer_slot": int(getattr(a, "vertexBuffer", 0)),
             "byte_offset": int(getattr(a, "byteOffset", 0)),
             "per_instance": bool(getattr(a, "perInstance", False)),
         }

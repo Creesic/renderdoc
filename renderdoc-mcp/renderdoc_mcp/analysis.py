@@ -104,6 +104,8 @@ def analyze_texture_bytes(tex: Any, raw: bytes, *, max_pixels: int = 4_194_304) 
             if ct == rd.CompType.Float:
                 if bw == 4:
                     vals.append(float(struct.unpack_from("<f", chunk, 0)[0]))
+                elif bw == 2:
+                    vals.append(float(struct.unpack_from("<e", chunk, 0)[0]))
                 elif bw == 8:
                     vals.append(float(struct.unpack_from("<d", chunk, 0)[0]))
                 else:

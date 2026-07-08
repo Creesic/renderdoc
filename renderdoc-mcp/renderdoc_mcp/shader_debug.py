@@ -44,6 +44,21 @@ _DISASSEMBLY_FAILURE_MARKERS = (
     # reported disassembly_available=true with useless text, hiding that the source-level
     # DXBC/DXIL target was the one that actually failed. Observed on FM2/plume DXIL SM6.0.
     "Unsupported encoding for shader",
+    # AMD ISA paths (amd_isa.cpp / amd_isa_win32.cpp) — replay_controller.cpp routes GCN
+    # targets there before the driver, so these are reachable from any DisassembleShader call.
+    "; Invalid ISA Target specified",
+    "; Failed to Disassemble - ",
+    "; Cannot identify shader type",
+    "; SPIR-V disassembly not supported,",
+    "; Invalid ELF file generated",
+    "; Error loading ",
+    "; Shader disassembly for DXIL shaders is not supported.",
+    "; Failed to disassemble shader",
+    # d3d12_replay.cpp
+    "; Unknown shader stage in shader reflection",
+    "; Couldn't find disassembly for given shader stage",
+    # replay_controller.cpp
+    "; Error: No shader specified",
 )
 
 
@@ -224,26 +239,56 @@ def _heuristic_resource_refs(line_text: str) -> dict[str, list[Any]]:
     return refs
 
 
-def _resolve_binding(pipe: Any, stage: Any, kind: str, index: int, controller: Any) -> dict[str, Any] | None:
+_REFL_LIST_FOR_KIND = {
+    "srv": "readOnlyResources",
+    "uav": "readWriteResources",
+    "sampler": "samplers",
+}
+
+
+def _reflection_index_for_register(refl: Any, list_attr: str, register: int) -> int | None:
+    """Map a bind/register number to its index in the shader reflection array.
+
+    Disassembly register tokens (t#/s#/u#/cb#) are bind numbers; the PipeState accessors
+    key descriptors by DescriptorAccess.index, which is the reflection-array position.
+    """
+    for i, res in enumerate(list(getattr(refl, list_attr, []) or [])):
+        if int(getattr(res, "fixedBindNumber", -1)) == int(register):
+            return i
+    return None
+
+
+def _resolve_binding(pipe: Any, stage: Any, kind: str, register: int, controller: Any,
+                     refl: Any) -> dict[str, Any] | None:
     try:
+        list_attr = _REFL_LIST_FOR_KIND.get(kind)
+        if list_attr is None:
+            return None
+        refl_index = _reflection_index_for_register(refl, list_attr, register)
+        if refl_index is None:
+            return None
         if kind == "srv":
             lst = pipe.GetReadOnlyResources(stage)
         elif kind == "uav":
             lst = pipe.GetReadWriteResources(stage)
-        elif kind == "sampler":
-            lst = pipe.GetSamplers(stage)
         else:
-            return None
-        if index < 0 or index >= len(lst):
-            return None
-        return serialize_used_descriptor(lst[index], controller)
+            lst = pipe.GetSamplers(stage)
+        for used in lst:
+            access = getattr(used, "access", None)
+            if access is not None and int(getattr(access, "index", -1)) == refl_index:
+                return serialize_used_descriptor(used, controller)
+        return None
     except Exception:
         return None
 
 
-def _resolve_cb(pipe: Any, stage: Any, slot: int, controller: Any) -> dict[str, Any] | None:
+def _resolve_cb(pipe: Any, stage: Any, slot: int, controller: Any,
+                refl: Any) -> dict[str, Any] | None:
     try:
-        cb = pipe.GetConstantBlock(stage, int(slot), 0)
+        refl_index = _reflection_index_for_register(refl, "constantBlocks", slot)
+        if refl_index is None:
+            return None
+        cb = pipe.GetConstantBlock(stage, refl_index, 0)
         desc = getattr(cb, "descriptor", None)
         if desc is None:
             return None
@@ -338,16 +383,16 @@ def summarize_debug_trace(
             line_text = _disasm_line_text(disasm_lines, info)
             refs = _heuristic_resource_refs(line_text)
             resolved: dict[str, Any] = {}
-            srv = [r for i in refs["srv"] if (r := _resolve_binding(pipe, stage, "srv", i, controller))]
+            srv = [r for i in refs["srv"] if (r := _resolve_binding(pipe, stage, "srv", i, controller, refl))]
             if srv:
                 resolved["srv"] = srv
-            sampler = [r for i in refs["sampler"] if (r := _resolve_binding(pipe, stage, "sampler", i, controller))]
+            sampler = [r for i in refs["sampler"] if (r := _resolve_binding(pipe, stage, "sampler", i, controller, refl))]
             if sampler:
                 resolved["sampler"] = sampler
-            uav = [r for i in refs["uav"] if (r := _resolve_binding(pipe, stage, "uav", i, controller))]
+            uav = [r for i in refs["uav"] if (r := _resolve_binding(pipe, stage, "uav", i, controller, refl))]
             if uav:
                 resolved["uav"] = uav
-            cb = [r for c in refs["cb"] if (r := _resolve_cb(pipe, stage, c["slot"], controller))]
+            cb = [r for c in refs["cb"] if (r := _resolve_cb(pipe, stage, c["slot"], controller, refl))]
             if cb:
                 resolved["cb"] = cb
             resource_accesses.append(

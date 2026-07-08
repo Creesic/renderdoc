@@ -16,7 +16,7 @@ def _make_base_type(name: str):
 
 
 def _make_const(name, byte_offset, rows=1, cols=1, base_type_name="Float", members=None,
-                matrix_byte_stride=0, row_major=None):
+                matrix_byte_stride=0, row_major=None, elements=1, array_byte_stride=0):
     """Build a mock ShaderConstant-like object mirroring the real RenderDoc API.
 
     Note: no ``baseByteWidth`` field — byte width is derived from baseType.name via _VARTYPE_BYTES.
@@ -33,6 +33,8 @@ def _make_const(name, byte_offset, rows=1, cols=1, base_type_name="Float", membe
     ct.baseType = _make_base_type(base_type_name)
     ct.members = members or []
     ct.matrixByteStride = matrix_byte_stride
+    ct.elements = elements
+    ct.arrayByteStride = array_byte_stride
     if row_major is not None:
         _rm = row_major
         ct.RowMajor = lambda: _rm
@@ -213,6 +215,49 @@ def test_decode_column_major_matrix():
     assert mat[0][1] == 2.0
     assert mat[1][0] == 3.0
     assert mat[1][1] == 4.0
+
+
+# --- nested structs and arrays ---
+
+def test_decode_struct_member_at_parent_offset():
+    """Struct member byteOffset is relative to the parent struct, not the cbuffer root."""
+    from renderdoc_mcp.cbuffer import decode_cb_bytes
+    # cbuffer { float4 pad; struct Light { float4 color; } light; }
+    raw = struct.pack("<ffff", 9.0, 9.0, 9.0, 9.0) + struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0)
+    light = _make_const("light", 16, members=[_make_const("color", 0, rows=1, cols=4)])
+    result = decode_cb_bytes(raw, [light])
+    assert result[0]["name"] == "light.color"
+    assert result[0]["value"] == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_decode_array_elements():
+    """Arrays decode every element at arrayByteStride intervals, not just element 0."""
+    from renderdoc_mcp.cbuffer import decode_cb_bytes
+    # float weights[3] with std140 stride of 16
+    raw = b"".join(struct.pack("<f", v) + b"\x00" * 12 for v in (5.0, 6.0, 7.0))
+    const = _make_const("weights", 0, rows=1, cols=1, elements=3, array_byte_stride=16)
+    result = decode_cb_bytes(raw, [const])
+    names = [r["name"] for r in result]
+    values = [r["value"] for r in result]
+    assert names == ["weights[0]", "weights[1]", "weights[2]"]
+    assert values == [5.0, 6.0, 7.0]
+
+
+def test_decode_struct_array():
+    """Arrays of structs decode each element's members at the right offsets."""
+    from renderdoc_mcp.cbuffer import decode_cb_bytes
+    # struct { float x; } lights[2] with stride 16
+    raw = struct.pack("<f", 5.0) + b"\x00" * 12 + struct.pack("<f", 6.0) + b"\x00" * 12
+    lights = _make_const(
+        "lights", 0,
+        members=[_make_const("x", 0, rows=1, cols=1)],
+        elements=2, array_byte_stride=16,
+    )
+    result = decode_cb_bytes(raw, [lights])
+    names = [r["name"] for r in result]
+    values = [r["value"] for r in result]
+    assert names == ["lights[0].x", "lights[1].x"]
+    assert values == [5.0, 6.0]
 
 
 # --- detect_variable_anomalies ---

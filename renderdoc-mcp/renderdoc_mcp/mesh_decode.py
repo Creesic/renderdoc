@@ -20,6 +20,13 @@ from renderdoc_mcp.rdutil import (
 from renderdoc_mcp.session import expand_action_flags, find_action
 
 
+class _RestartMarker:
+    """Sentinel returned by fetch_indices for primitive-restart index values."""
+
+
+RESTART_INDEX = _RestartMarker()
+
+
 class MeshData:
     """Mesh fields compatible with fetch_indices (decode_mesh sample)."""
 
@@ -69,7 +76,8 @@ def fetch_indices(controller: Any, action: Any, mesh: MeshData, index_offset: in
         if avail_indices < num_indices:
             extra = [None] * (num_indices - avail_indices)
 
-        return [i if restart_enabled and i == restart_idx else i + mesh.baseVertex for i in indices] + extra
+        return [RESTART_INDEX if restart_enabled and i == restart_idx else i + mesh.baseVertex
+                for i in indices] + extra
 
     return tuple(range(first_index, first_index + num_indices))
 
@@ -255,6 +263,10 @@ def decode_mesh_inputs(
             idx_val = indices[vi]
             if idx_val is None:
                 continue
+            if idx_val is RESTART_INDEX:
+                decoded_rows.append({"vertex_index": vi, "index": None, "restart": True,
+                                     "attributes": {}})
+                continue
             try:
                 idx_int = int(idx_val)
             except Exception:
@@ -276,6 +288,7 @@ def decode_mesh_inputs(
         preview: dict[str, Any] = {
             "vertex_index": decoded_row["vertex_index"],
             "index": decoded_row["index"],
+            **({"restart": True} if decoded_row.get("restart") else {}),
             "attributes": {
                 name: ("<error: {}>".format(decoded_row.get("errors", {}).get(name)) if value is None
                        and name in decoded_row.get("errors", {}) else repr(value))
@@ -289,7 +302,7 @@ def decode_mesh_inputs(
         "draw_name": draw.GetName(structured_file),
         "index": index_summary,
         "vertex_attributes": layouts,
-        "vertex_count": len(decoded_rows),
+        "vertex_count": sum(1 for r in decoded_rows if not r.get("restart")),
     }
 
     if out_file:

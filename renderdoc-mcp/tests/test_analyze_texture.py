@@ -12,18 +12,26 @@ class _FmtType:
     def __str__(self):
         return self.name
 
+    def __eq__(self, other):
+        return isinstance(other, _FmtType) and self.name == other.name
+
+    def __hash__(self):
+        return hash(self.name)
+
 
 class _Fmt:
     """Minimal fake ResourceFormat for R10G10B10A2."""
 
-    def __init__(self, type_name="R10G10B10A2", comp_type_name="UNorm", comp_count=4, comp_byte_width=0):
+    def __init__(self, type_name="R10G10B10A2", comp_type_name="UNorm", comp_count=4, comp_byte_width=0,
+                 special=True):
         self.type = _FmtType(type_name)
         self.compType = _FmtType(comp_type_name)
         self.compCount = comp_count
         self.compByteWidth = comp_byte_width
+        self._special = special
 
     def Special(self):
-        return True
+        return self._special
 
 
 class _Tex:
@@ -129,6 +137,22 @@ def test_r10g10b10a2_uint_not_normalized():
     means = result["mean_channels"]
     assert abs(means[0] - 512.0) < 1e-4
     assert abs(means[2] - 1023.0) < 1e-4
+
+
+def test_rgba16f_half_floats_decoded():
+    """16-bit float components decode as halves, not NaN (RGBA16F is the common HDR target)."""
+    fmt = _Fmt("R16G16B16A16_FLOAT", comp_type_name="Float", comp_count=4, comp_byte_width=2,
+               special=False)
+    tex = _Tex(1, 1, fmt)
+    raw = struct.pack("<eeee", 1.5, -2.0, 0.25, 1.0)
+    result = _analyze(tex, raw)
+    assert result["supported_stats"] is True
+    assert result["nan_pixel_count"] == 0
+    means = result["mean_channels"]
+    assert abs(means[0] - 1.5) < 1e-3
+    assert abs(means[1] + 2.0) < 1e-3
+    assert abs(means[2] - 0.25) < 1e-3
+    assert abs(means[3] - 1.0) < 1e-3
 
 
 def test_non_r10g10b10a2_packed_still_unsupported():
