@@ -120,7 +120,8 @@ private slots:
 
   void on_AI_MCP_Enabled_toggled(bool checked);
   void on_AI_MCP_Port_valueChanged(int value);
-  void on_AI_MCP_PythonPath_textEdited(const QString &text);
+  void on_AI_MCP_Port_editingFinished();
+  void on_AI_MCP_PythonPath_editingFinished();
 
   // manual slots
   void formatter_valueChanged(int value);

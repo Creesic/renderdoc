@@ -103,18 +103,18 @@ QStringList windowsRawPymoduleCandidates(const QString &appDir)
 
   addOne(QDir(appDir).absoluteFilePath(lit("pymodules")), false);
 
-  static const char kRel[][56] = {"../pymodules",
-                                   "../../pymodules",
-                                   "../../../pymodules",
-                                   "../x64/Development/pymodules",
-                                   "../../x64/Development/pymodules",
-                                   "../../../x64/Development/pymodules",
-                                   "../../../../x64/Development/pymodules",
-                                   "../x64/Release/pymodules",
-                                   "../../x64/Release/pymodules",
-                                   "../Win32/Development/pymodules",
-                                   "../../Win32/Development/pymodules"};
-  for(const auto &rel : kRel)
+  static const char *kRel[] = {"../pymodules",
+                               "../../pymodules",
+                               "../../../pymodules",
+                               "../x64/Development/pymodules",
+                               "../../x64/Development/pymodules",
+                               "../../../x64/Development/pymodules",
+                               "../../../../x64/Development/pymodules",
+                               "../x64/Release/pymodules",
+                               "../../x64/Release/pymodules",
+                               "../Win32/Development/pymodules",
+                               "../../Win32/Development/pymodules"};
+  for(const char *rel : kRel)
     addOne(QDir(appDir).absoluteFilePath(QString::fromLatin1(rel)), true);
 
   return out;
@@ -422,6 +422,25 @@ bool MCPServerManager::resolvePython(QString &program, QStringList &args, QStrin
 
 void MCPServerManager::applyConfig()
 {
+  const bool enabled = m_Ctx.Config().AI_MCP_Enabled;
+  const int port = m_Ctx.Config().AI_MCP_Port;
+  const QString pythonPath = m_Ctx.Config().AI_MCP_PythonPath;
+
+  // Unchanged config: don't tear down a running server. stop() blocks the GUI thread for up
+  // to ~2.5s waiting on the child process, so a no-op restart is very visible.
+  if(m_AppliedValid && enabled == m_AppliedEnabled && port == m_AppliedPort &&
+     pythonPath == m_AppliedPython)
+  {
+    const bool running = m_Process.state() != QProcess::NotRunning;
+    if(enabled == running)
+      return;
+  }
+
+  m_AppliedValid = true;
+  m_AppliedEnabled = enabled;
+  m_AppliedPort = port;
+  m_AppliedPython = pythonPath;
+
   stop();
   m_LogTail.clear();
 

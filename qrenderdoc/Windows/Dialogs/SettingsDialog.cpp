@@ -1388,23 +1388,41 @@ void SettingsDialog::on_AI_MCP_Port_valueChanged(int value)
   if(m_Init)
     return;
 
+  // valueChanged fires per typed digit / arrow step: save and refresh the label live, but
+  // only restart the server (mcpserverSettingsChanged) once editing finishes.
   m_Ctx.Config().AI_MCP_Port = ui->AI_MCP_Port->value();
   m_Ctx.Config().Save();
   refreshMCPUrlLabel();
-  emit mcpserverSettingsChanged();
 }
 
-void SettingsDialog::on_AI_MCP_PythonPath_textEdited(const QString &text)
+void SettingsDialog::on_AI_MCP_Port_editingFinished()
 {
   if(m_Init)
     return;
 
-  if(QFileInfo::exists(text) || text.trimmed().isEmpty())
-  {
-    m_Ctx.Config().AI_MCP_PythonPath = text;
-    m_Ctx.Config().Save();
-    emit mcpserverSettingsChanged();
-  }
+  emit mcpserverSettingsChanged();
+}
+
+void SettingsDialog::on_AI_MCP_PythonPath_editingFinished()
+{
+  if(m_Init)
+    return;
+
+  const QString text = ui->AI_MCP_PythonPath->text();
+  const QString trimmed = text.trimmed();
+
+  // Empty means auto-detect; otherwise this must be a python executable, not a directory —
+  // QFileInfo::exists() alone accepted directories, which resolvePython later rejects with a
+  // misleading architecture error.
+  if(!trimmed.isEmpty() && !QFileInfo(trimmed).isFile())
+    return;
+
+  if(QString(m_Ctx.Config().AI_MCP_PythonPath) == text)
+    return;
+
+  m_Ctx.Config().AI_MCP_PythonPath = text;
+  m_Ctx.Config().Save();
+  emit mcpserverSettingsChanged();
 }
 
 void SettingsDialog::on_Android_MaxConnectTimeout_valueChanged(double timeout)

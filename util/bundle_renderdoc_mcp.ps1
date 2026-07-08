@@ -145,6 +145,10 @@ if _appdir:
 '@
 
 $pure = (& $pyExe -c 'import sysconfig; print(sysconfig.get_paths()[''purelib''])').Trim()
+if ($LASTEXITCODE -ne 0 -or !$pure) {
+  Write-Error "MCP bundle: bundled python failed to report purelib (exit $($LASTEXITCODE))"
+  exit 5
+}
 $hook = Join-Path $pure 'sitecustomize.py'
 New-Item -ItemType Directory -Force -Path $pure | Out-Null
 Set-Content -LiteralPath $hook -Encoding utf8 -Value $hookBody
@@ -161,6 +165,13 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot 'renderdoc-mcp\renderdoc_mcp') -Dest
 
 $mcpProj = Join-Path $RepoRoot 'renderdoc-mcp'
 & $pyExe -m pip install --disable-pip-version-check --no-input --target $siteDst $mcpProj | Out-Host
+# Native exe exit codes are not covered by $ErrorActionPreference; without this check a failed
+# install (e.g. no PyPI access) still stamped and reported success, leaving mcp_site empty and
+# the MCP server dying at runtime with ModuleNotFoundError. Mirrors check=True in the .py variant.
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "MCP bundle: pip install into mcp_site failed (exit $($LASTEXITCODE))"
+  exit 6
+}
 Write-Host ''
 
 $stamp = Join-Path $RuntimeDir '.renderdoc_mcp_bundle.stamp.txt'

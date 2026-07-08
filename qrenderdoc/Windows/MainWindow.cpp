@@ -112,7 +112,7 @@ void MainWindow::MakeNetworkRequest(QUrl url, std::function<void(QByteArray)> su
 }
 
 MainWindow::MainWindow(ICaptureContext &ctx)
-    : QMainWindow(NULL), ui(new Ui::MainWindow), m_Ctx(ctx), m_MCPServer(ctx, nullptr)
+    : QMainWindow(NULL), ui(new Ui::MainWindow), m_Ctx(ctx), m_MCPServer(ctx, NULL)
 {
   ui->setupUi(this);
 

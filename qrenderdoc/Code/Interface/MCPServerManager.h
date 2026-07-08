@@ -36,7 +36,7 @@ class MCPServerManager : public QObject
   Q_OBJECT
 
 public:
-  explicit MCPServerManager(ICaptureContext &ctx, QObject *parent = nullptr);
+  explicit MCPServerManager(ICaptureContext &ctx, QObject *parent = NULL);
   ~MCPServerManager();
 
   void applyConfig();
@@ -64,8 +64,15 @@ private:
   QString m_StatusTooltip;
   QString m_LogTail;
 
+  // last config actually applied, so redundant applyConfig() calls (the settings dialog can
+  // emit several times per edit) don't stop/restart a server whose config hasn't changed.
+  bool m_AppliedValid = false;
+  bool m_AppliedEnabled = false;
+  int m_AppliedPort = 0;
+  QString m_AppliedPython;
+
   QString buildPythonPath() const;
-  bool resolvePython(QString &program, QStringList &args, QString *errorDetail = nullptr);
+  bool resolvePython(QString &program, QStringList &args, QString *errorDetail = NULL);
   void appendLog(const QByteArray &chunk);
   void rebuildTooltip();
   void scheduleListenProbe(int attempt);

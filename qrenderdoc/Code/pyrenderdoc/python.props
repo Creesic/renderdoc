@@ -122,6 +122,15 @@
 	<Message Importance="high" Text="Built against python from $(PythonOverride)" />
 </Target>
 
+<!-- First-build bootstrap: the bundled MCP python tree is staged by qrenderdoc's PostBuildEvent,
+     which runs after this project on a clean tree, so this build linked pymodules against the
+     default Python $(PythonMajorMinor) while the MCP server will launch the bundled 3.12 —
+     'import renderdoc' fails until pymodules are rebuilt. Warn instead of failing silently. -->
+<Target Name="RenderDocMCPPythonBootstrapWarning" AfterTargets="Build"
+        Condition="'$(Platform)'=='x64' AND '$(CustomPythonUsed)'=='0' AND '$(VSPythonOverridePath)'=='' AND '$(RENDERDOC_PYTHON_PREFIX64)'=='' AND Exists('$(SolutionDir)util\renderdoc_mcp_bundle.json') AND !Exists('$(SolutionDir)x64\$(Configuration)\python\python$(RenderDocMCPPythonMM).dll')">
+	<Warning Text="MCP bundle bootstrap: this build linked python modules against the default Python $(PythonMajorMinor), but the MCP server ships Python $(RenderDocMCPPythonMM). Run the build a second time after it completes (the bundled runtime is staged by qrenderdoc's post-build step) so pymodules relink against x64\$(Configuration)\python — otherwise the MCP server fails at 'import renderdoc'." />
+</Target>
+
 <Target Name="PythonFailedOverridden" AfterTargets="Build" Condition="'$(CustomPythonUsed)'=='0' AND $(PythonOverride)!=''">
 	<Message Importance="high" Text="** Could not use python version $(PythonOverride) due to missing requirements." />
 	<Message Importance="high" Text="** Check for $(PythonOverride)\include\Python.h, $(PythonOverride)\pythonMAJMIN.zip, and either $(PythonOverride)\pythonMAJMIN.lib or $(PythonOverride)\libs\pythonMAJMIN.lib" />
