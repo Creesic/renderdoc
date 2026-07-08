@@ -108,7 +108,7 @@
 #  if _MSC_VER >= 1800 && _MSC_VER < 1940
 #    define QT_MAKE_UNCHECKED_ARRAY_ITERATOR(x) stdext::make_unchecked_array_iterator(x)
 #  endif
-#  if _MSC_VER >= 1500 && _MSC_VER < 1950
+#  if _MSC_VER >= 1500 && _MSC_VER < 1940
 #    define QT_MAKE_CHECKED_ARRAY_ITERATOR(x, N) stdext::make_checked_array_iterator(x, size_t(N))
 #  endif
 /* Intel C++ disguising as Visual C++: the `using' keyword avoids warnings */

@@ -1492,9 +1492,31 @@ bool WrappedVulkan::Serialise_vkQueueSubmit(SerialiserType &ser, VkQueue queue, 
 
       ReplayQueueSubmit(queue, submitInfo, basename);
     }
-    // account for the outer loop thinking we've added one event and incrementing,
-    // since we've done all the handling ourselves this will be off by one.
-    m_RootEventID--;
+    if(submitCount == 0)
+    {
+      AddEvent();
+
+      // we're adding multiple events, need to increment ourselves
+      m_RootEventID++;
+
+      ObjDisp(queue)->QueueSubmit(Unwrap(queue), 0, NULL, VK_NULL_HANDLE);
+
+      ActionDescription action;
+      action.customName = "=> vkQueueSubmit(): No Submit";
+      action.flags |= ActionFlags::CommandBufferBoundary | ActionFlags::PassBoundary;
+      AddEvent();
+
+      m_RootEvents.back().chunkIndex = APIEvent::NoChunk;
+      m_Events.back().chunkIndex = APIEvent::NoChunk;
+
+      AddAction(action);
+    }
+    else
+    {
+      // account for the outer loop thinking we've added one event and incrementing,
+      // since we've done all the handling ourselves this will be off by one.
+      m_RootEventID--;
+    }
   }
 
   return true;
@@ -1663,9 +1685,31 @@ bool WrappedVulkan::Serialise_vkQueueSubmit2(SerialiserType &ser, VkQueue queue,
 
       ReplayQueueSubmit(queue, pSubmits[sub], basename);
     }
-    // account for the outer loop thinking we've added one event and incrementing,
-    // since we've done all the handling ourselves this will be off by one.
-    m_RootEventID--;
+    if(submitCount == 0)
+    {
+      AddEvent();
+
+      // we're adding multiple events, need to increment ourselves
+      m_RootEventID++;
+
+      ObjDisp(queue)->QueueSubmit2(Unwrap(queue), 0, NULL, VK_NULL_HANDLE);
+
+      ActionDescription action;
+      action.customName = "=> vkQueueSubmit2(): No Submit";
+      action.flags |= ActionFlags::CommandBufferBoundary | ActionFlags::PassBoundary;
+      AddEvent();
+
+      m_RootEvents.back().chunkIndex = APIEvent::NoChunk;
+      m_Events.back().chunkIndex = APIEvent::NoChunk;
+
+      AddAction(action);
+    }
+    else
+    {
+      // account for the outer loop thinking we've added one event and incrementing,
+      // since we've done all the handling ourselves this will be off by one.
+      m_RootEventID--;
+    }
   }
 
   return true;
