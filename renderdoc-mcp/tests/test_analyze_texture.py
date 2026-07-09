@@ -163,3 +163,41 @@ def test_non_r10g10b10a2_packed_still_unsupported():
     result = _analyze(tex, raw)
     assert result["supported_stats"] is False
     assert result["reason"] == "complex_or_packed_format"
+
+
+def _bc3_block_solid(color565, alpha):
+    """Build one BC3 block where all 16 pixels select color0 and alpha0."""
+    alpha_block = bytes([alpha, 0]) + b"\x00" * 6
+    color_block = struct.pack("<HHI", color565, 0, 0)
+    return alpha_block + color_block
+
+
+def test_bc3_unorm_stats_supported():
+    """BC3/DXT5 blocks decode enough for min/max/mean/black-ratio stats."""
+    fmt = _Fmt("BC3_UNORM")
+    tex = _Tex(4, 4, fmt)
+    raw = _bc3_block_solid(0xFFFF, 255)
+    result = _analyze(tex, raw)
+    assert result["supported_stats"] is True
+    assert result["format"].get("packed") == "BC3"
+    assert result["pixels_considered"] == 16
+    assert result["near_black_pixel_count"] == 0
+    assert all(abs(v - 1.0) < 1e-6 for v in result["mean_channels"])
+
+
+def test_bc3_unorm_black_counted():
+    fmt = _Fmt("BC3_UNORM")
+    tex = _Tex(4, 4, fmt)
+    raw = _bc3_block_solid(0x0000, 255)
+    result = _analyze(tex, raw)
+    assert result["supported_stats"] is True
+    assert result["near_black_pixel_count"] == 16
+    assert result["near_black_ratio"] == 1.0
+
+
+def test_bc3_truncated_data_reports_reason():
+    fmt = _Fmt("BC3_UNORM")
+    tex = _Tex(4, 4, fmt)
+    result = _analyze(tex, bytes(15))
+    assert result["supported_stats"] is False
+    assert result["reason"] == "truncated_bc3_data"

@@ -150,71 +150,134 @@ def serialize_graphics_targets(pipe: Any, controller: Any) -> dict[str, Any]:
     else:
         data["stencil_target"] = None
 
-    # Clear colour bindings if API exposes them
-    cc = _try(lambda: pipe.GetColorBlends())  # might be wrong method name
-    # Skip if fails - ColorBlend is state not targets
-
     return data
+
+
+def _state_unavailable(methods: list[str]) -> dict[str, Any]:
+    return {
+        "available": False,
+        "reason": "PipeState does not expose {}".format(" or ".join(methods)),
+    }
 
 
 def serialize_rasterizer(pipe: Any) -> dict[str, Any]:
     r = _try(lambda: pipe.GetRasterizer())
     if r is None:
-        return {}
+        r = _try(lambda: pipe.GetRasterState())
+    if r is None:
+        return _state_unavailable(["GetRasterizer", "GetRasterState"])
     return {
+        "available": True,
         "fill_mode": enum_name(getattr(r, "fillMode", None)),
         "cull_mode": enum_name(getattr(r, "cullMode", None)),
         "front_ccw": bool(getattr(r, "frontCCW", False)),
         "depth_clip": bool(getattr(r, "depthClip", True)),
         "depth_bias": float(getattr(r, "depthBias", 0.0)),
+        "depth_bias_clamp": float(getattr(r, "depthBiasClamp", 0.0)),
         "slope_scaled_depth_bias": float(getattr(r, "slopeScaledDepthBias", 0.0)),
         "line_width": float(getattr(r, "lineWidth", 1.0)),
+        "forced_sample_count": int(getattr(r, "forcedSampleCount", 0) or 0),
+        "conservative_rasterization": enum_name(getattr(r, "conservativeRasterization", None)),
     }
 
 
 def serialize_depth_state(pipe: Any) -> dict[str, Any]:
     d = _try(lambda: pipe.GetDepthState())
     if d is None:
-        return {}
+        d = _try(lambda: pipe.GetDepthTestState())
+    if d is None:
+        return _state_unavailable(["GetDepthState", "GetDepthTestState"])
     return {
+        "available": True,
         "depth_enable": bool(getattr(d, "depthEnable", False)),
         "depth_writes": bool(getattr(d, "depthWrites", False)),
         "depth_function": enum_name(getattr(d, "depthFunction", None)),
+        "depth_bounds_enable": bool(getattr(d, "depthBoundsEnable", False)),
+        "min_depth_bounds": float(getattr(d, "minDepthBounds", 0.0)),
+        "max_depth_bounds": float(getattr(d, "maxDepthBounds", 1.0)),
+    }
+
+
+def _serialize_blend_target(bt: Any, slot: int) -> dict[str, Any]:
+    cb_eq = getattr(bt, "colorBlend", None)
+    ab_eq = getattr(bt, "alphaBlend", None)
+    return {
+        "slot": slot,
+        "blend_enable": bool(getattr(bt, "blendEnable", getattr(bt, "enabled", False))),
+        "logic_operation_enable": bool(getattr(bt, "logicOperationEnabled", False)),
+        "logic_operation": enum_name(getattr(bt, "logicOperation", None)),
+        "write_mask": int(getattr(bt, "writeMask", 0)),
+        "src_color": enum_name(getattr(cb_eq, "source", None)) if cb_eq is not None else "",
+        "dst_color": enum_name(getattr(cb_eq, "destination", None)) if cb_eq is not None else "",
+        "color_op": enum_name(getattr(cb_eq, "operation", None)) if cb_eq is not None else "",
+        "src_alpha": enum_name(getattr(ab_eq, "source", None)) if ab_eq is not None else "",
+        "dst_alpha": enum_name(getattr(ab_eq, "destination", None)) if ab_eq is not None else "",
+        "alpha_op": enum_name(getattr(ab_eq, "operation", None)) if ab_eq is not None else "",
     }
 
 
 def serialize_blend_state(pipe: Any) -> dict[str, Any]:
     b = _try(lambda: pipe.GetBlendState())
-    if b is None:
-        return {}
+    color_blends = _try(lambda: pipe.GetColorBlends())
+    if b is None and color_blends is None:
+        return _state_unavailable(["GetBlendState", "GetColorBlends"])
     targets = []
-    bl = getattr(b, "blends", None) or []
+    bl = list(getattr(b, "blends", None) or color_blends or [])
     for i, bt in enumerate(bl):
-        _cb_eq = getattr(bt, "colorBlend", None)
-        targets.append(
-            {
-                "slot": i,
-                "blend_enable": bool(getattr(bt, "blendEnable", False)),
-                "logic_operation": enum_name(getattr(bt, "logicOperation", None)),
-                "write_mask": int(getattr(bt, "writeMask", 0)),
-                "src_color": enum_name(getattr(_cb_eq, "source", None)) if _cb_eq is not None else "",
-                "dst_color": enum_name(getattr(_cb_eq, "destination", None)) if _cb_eq is not None else "",
-                "color_op": enum_name(getattr(_cb_eq, "operation", None)) if _cb_eq is not None else "",
-            }
-        )
+        targets.append(_serialize_blend_target(bt, i))
+    blend_factor = getattr(b, "blendFactor", None) if b is not None else _try(lambda: pipe.GetBlendFactor())
     return {
-        "alpha_to_coverage": bool(getattr(b, "alphaToCoverage", False)),
-        "independent_blend": bool(getattr(b, "independentBlend", False)),
+        "available": True,
+        "alpha_to_coverage": bool(getattr(b, "alphaToCoverage", False)) if b is not None else None,
+        "independent_blend": (
+            bool(getattr(b, "independentBlend", False))
+            if b is not None
+            else bool(_try(lambda: pipe.IsIndependentBlendingEnabled(), False))
+        ),
+        "blend_factor": [float(x) for x in blend_factor] if blend_factor is not None else None,
         "targets": targets,
+    }
+
+
+def _serialize_stencil_face(face: Any) -> dict[str, Any]:
+    if face is None:
+        return {}
+    return {
+        "function": enum_name(getattr(face, "function", None)),
+        "fail_operation": enum_name(getattr(face, "failOperation", None)),
+        "depth_fail_operation": enum_name(getattr(face, "depthFailOperation", None)),
+        "pass_operation": enum_name(getattr(face, "passOperation", None)),
+        "compare_mask": int(getattr(face, "compareMask", 0) or 0),
+        "write_mask": int(getattr(face, "writeMask", 0) or 0),
+        "reference": int(getattr(face, "reference", 0) or 0),
     }
 
 
 def serialize_stencil_state(pipe: Any) -> dict[str, Any]:
     s = _try(lambda: pipe.GetStencilState())
     if s is None:
-        return {}
+        s = _try(lambda: pipe.GetDepthTestState())
+    faces = _try(lambda: pipe.GetStencilFaces())
+    if s is None:
+        enabled = _try(lambda: pipe.IsStencilTestEnabled())
+        if enabled is None and faces is None:
+            return _state_unavailable(["GetStencilState", "GetDepthTestState", "GetStencilFaces"])
+        return {
+            "available": True,
+            "stencil_enable": bool(enabled),
+            "front_face": _serialize_stencil_face(faces[0] if faces else None),
+            "back_face": _serialize_stencil_face(faces[1] if faces and len(faces) > 1 else None),
+        }
+    front = getattr(s, "frontFace", None)
+    back = getattr(s, "backFace", None)
+    if faces:
+        front = front or faces[0]
+        back = back or (faces[1] if len(faces) > 1 else None)
     return {
+        "available": True,
         "stencil_enable": bool(getattr(s, "stencilEnable", False)),
+        "front_face": _serialize_stencil_face(front),
+        "back_face": _serialize_stencil_face(back),
     }
 
 
@@ -387,12 +450,13 @@ def heuristic_pipeline_issues(snapshot: dict[str, Any]) -> list[str]:
         if sc.get("enabled") and (sc["width"] == 0 or sc["height"] == 0):
             hints.append("Enabled scissor has zero area at slot 0.")
     depth = snapshot.get("depth") or {}
-    if depth.get("depth_enable") and depth.get("depth_function") == "Never":
+    if depth.get("available", True) and depth.get("depth_enable") and depth.get("depth_function") == "Never":
         hints.append("Depth test enabled with CompareFunction Never.")
     blend = snapshot.get("blend") or {}
-    for t in blend.get("targets") or []:
-        if int(t.get("write_mask") or 0xF) == 0:
-            hints.append("Color write mask is 0 for at least one RT slot.")
+    if blend.get("available", True):
+        for t in blend.get("targets") or []:
+            if int(t.get("write_mask") or 0xF) == 0:
+                hints.append("Color write mask is 0 for at least one RT slot.")
     colors = (snapshot.get("targets") or {}).get("color_targets") or []
     if colors and all(c.get("resource_id") in ("Null", "") for c in colors):
         hints.append("No bound color targets (all Null).")

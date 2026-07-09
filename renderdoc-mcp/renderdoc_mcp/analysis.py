@@ -48,6 +48,198 @@ def _as_floats_r10g10b10a2(px: bytes, normalize: bool) -> tuple[float, float, fl
     return float(r), float(g), float(b), float(a)
 
 
+def _format_type_name(fmt: Any) -> str:
+    return enum_name(fmt.type) if fmt is not None else ""
+
+
+def _is_bc3_format(fmt: Any) -> bool:
+    name = _format_type_name(fmt).upper()
+    return name == "BC3" or "BC3_" in name or name.endswith("_BC3")
+
+
+def _decode_bc_color_565(v: int) -> tuple[int, int, int]:
+    r5 = (v >> 11) & 0x1F
+    g6 = (v >> 5) & 0x3F
+    b5 = v & 0x1F
+    return (r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2)
+
+
+def _decode_bc3_block(block: bytes) -> list[tuple[float, float, float, float]]:
+    """Decode one BC3/DXT5 4x4 block to normalized RGBA tuples."""
+    if len(block) < 16:
+        return []
+
+    a0 = block[0]
+    a1 = block[1]
+    if a0 > a1:
+        alpha_palette = [
+            a0,
+            a1,
+            (6 * a0 + 1 * a1) // 7,
+            (5 * a0 + 2 * a1) // 7,
+            (4 * a0 + 3 * a1) // 7,
+            (3 * a0 + 4 * a1) // 7,
+            (2 * a0 + 5 * a1) // 7,
+            (1 * a0 + 6 * a1) // 7,
+        ]
+    else:
+        alpha_palette = [
+            a0,
+            a1,
+            (4 * a0 + 1 * a1) // 5,
+            (3 * a0 + 2 * a1) // 5,
+            (2 * a0 + 3 * a1) // 5,
+            (1 * a0 + 4 * a1) // 5,
+            0,
+            255,
+        ]
+    alpha_bits = int.from_bytes(block[2:8], "little")
+
+    c0 = struct.unpack_from("<H", block, 8)[0]
+    c1 = struct.unpack_from("<H", block, 10)[0]
+    r0, g0, b0 = _decode_bc_color_565(c0)
+    r1, g1, b1 = _decode_bc_color_565(c1)
+    colors = [
+        (r0, g0, b0),
+        (r1, g1, b1),
+        ((2 * r0 + r1) // 3, (2 * g0 + g1) // 3, (2 * b0 + b1) // 3),
+        ((r0 + 2 * r1) // 3, (g0 + 2 * g1) // 3, (b0 + 2 * b1) // 3),
+    ]
+    color_bits = struct.unpack_from("<I", block, 12)[0]
+
+    pixels: list[tuple[float, float, float, float]] = []
+    for i in range(16):
+        ci = (color_bits >> (2 * i)) & 0x3
+        ai = (alpha_bits >> (3 * i)) & 0x7
+        r, g, b = colors[ci]
+        pixels.append((r / 255.0, g / 255.0, b / 255.0, alpha_palette[ai] / 255.0))
+    return pixels
+
+
+def _stats_accumulate(
+    mins: list[float],
+    maxs: list[float],
+    sums: list[float],
+    value: tuple[float, float, float, float],
+) -> None:
+    for i, v in enumerate(value):
+        if not math.isnan(v):
+            mins[i] = min(mins[i], v)
+            maxs[i] = max(maxs[i], v)
+            sums[i] += v
+
+
+def _build_stats_result(
+    w: int,
+    h: int,
+    raw: bytes,
+    *,
+    sampled: bool,
+    sample_step: int,
+    count_px: int,
+    nan_ct: int,
+    black_ct: int,
+    expected: int,
+    fmt_info: dict[str, Any],
+    mins: list[float],
+    maxs: list[float],
+    sums: list[float],
+) -> dict[str, Any]:
+    mean = [sums[i] / max(1, count_px) for i in range(4)]
+    black_ratio = float(black_ct) / max(1, count_px)
+
+    return {
+        "supported_stats": True,
+        "dimensions": {"width": w, "height": h},
+        "sampled": sampled,
+        "sample_step": sample_step,
+        "pixels_considered": count_px,
+        "byte_length": len(raw),
+        "expected_min_bytes": expected,
+        "format": fmt_info,
+        "min_channels": [None if math.isinf(m) else m for m in mins],
+        "max_channels": [None if math.isinf(-m) else m for m in maxs],
+        "mean_channels": mean,
+        "nan_pixel_count": nan_ct,
+        "near_black_pixel_count": black_ct,
+        "near_black_ratio": black_ratio,
+    }
+
+
+def _analyze_bc3_texture(tex: Any, raw: bytes, *, max_pixels: int) -> dict[str, Any]:
+    fmt = tex.format
+    w = max(1, int(tex.width))
+    h = max(1, int(tex.height))
+    blocks_x = (w + 3) // 4
+    blocks_y = (h + 3) // 4
+    expected = blocks_x * blocks_y * 16
+    if len(raw) < expected:
+        return {
+            "supported_stats": False,
+            "reason": "truncated_bc3_data",
+            "byte_length": len(raw),
+            "expected_min_bytes": expected,
+            "format": _format_type_name(fmt),
+        }
+
+    sampled = False
+    step = 1
+    total_px = w * h
+    if total_px > max_pixels:
+        step = int(math.ceil(math.sqrt(total_px / max_pixels)))
+        sampled = True
+
+    mins = [math.inf, math.inf, math.inf, math.inf]
+    maxs = [-math.inf, -math.inf, -math.inf, -math.inf]
+    sums = [0.0, 0.0, 0.0, 0.0]
+    count_px = 0
+    nan_ct = 0
+    black_ct = 0
+
+    for by in range(blocks_y):
+        row_off = by * blocks_x * 16
+        for bx in range(blocks_x):
+            block = raw[row_off + bx * 16 : row_off + (bx + 1) * 16]
+            pixels = _decode_bc3_block(block)
+            for py in range(4):
+                y = by * 4 + py
+                if y >= h or y % step != 0:
+                    continue
+                for px in range(4):
+                    x = bx * 4 + px
+                    if x >= w or x % step != 0:
+                        continue
+                    r, g, b, a = pixels[py * 4 + px]
+                    if any(math.isnan(v) for v in (r, g, b, a)):
+                        nan_ct += 1
+                    if not math.isnan(r + g + b) and abs(r) < 1e-6 and abs(g) < 1e-6 and abs(b) < 1e-6:
+                        black_ct += 1
+                    _stats_accumulate(mins, maxs, sums, (r, g, b, a))
+                    count_px += 1
+
+    return _build_stats_result(
+        w,
+        h,
+        raw,
+        sampled=sampled,
+        sample_step=step,
+        count_px=count_px,
+        nan_ct=nan_ct,
+        black_ct=black_ct,
+        expected=expected,
+        fmt_info={
+            "type": _format_type_name(fmt),
+            "comp_type": enum_name(fmt.compType),
+            "comp_count": 4,
+            "comp_byte_width": 1,
+            "packed": "BC3",
+        },
+        mins=mins,
+        maxs=maxs,
+        sums=sums,
+    )
+
+
 def analyze_texture_bytes(tex: Any, raw: bytes, *, max_pixels: int = 4_194_304) -> dict[str, Any]:
     rd = get_renderdoc()
     fmt = tex.format
@@ -58,7 +250,9 @@ def analyze_texture_bytes(tex: Any, raw: bytes, *, max_pixels: int = 4_194_304) 
     # R10G10B10A2: 4-byte packed format, 10+10+10+2 bits
     packed_r10g10b10a2 = False
     if stride is None:
-        fmt_type_name = enum_name(fmt.type) if fmt else ""
+        fmt_type_name = _format_type_name(fmt)
+        if _is_bc3_format(fmt):
+            return _analyze_bc3_texture(tex, raw, max_pixels=max_pixels)
         if "R10G10B10A2" in fmt_type_name:
             stride = 4
             packed_r10g10b10a2 = True
@@ -166,31 +360,27 @@ def analyze_texture_bytes(tex: Any, raw: bytes, *, max_pixels: int = 4_194_304) 
                     sums[i] += v
             count_px += 1
 
-    mean = [sums[i] / max(1, count_px) for i in range(4)]
-    black_ratio = float(black_ct) / max(1, count_px)
-
-    return {
-        "supported_stats": True,
-        "dimensions": {"width": w, "height": h},
-        "sampled": sampled,
-        "sample_step": step,
-        "pixels_considered": count_px,
-        "byte_length": len(raw),
-        "expected_min_bytes": expected,
-        "format": {
+    return _build_stats_result(
+        w,
+        h,
+        raw,
+        sampled=sampled,
+        sample_step=step,
+        count_px=count_px,
+        nan_ct=nan_ct,
+        black_ct=black_ct,
+        expected=expected,
+        fmt_info={
             "type": enum_name(fmt.type),
             "comp_type": enum_name(fmt.compType),
             "comp_count": 4 if packed_r10g10b10a2 else int(fmt.compCount),
             "comp_byte_width": int(fmt.compByteWidth),
             **({"packed": "R10G10B10A2"} if packed_r10g10b10a2 else {}),
         },
-        "min_channels": [None if math.isinf(m) else m for m in mins],
-        "max_channels": [None if math.isinf(-m) else m for m in maxs],
-        "mean_channels": mean,
-        "nan_pixel_count": nan_ct,
-        "near_black_pixel_count": black_ct,
-        "near_black_ratio": black_ratio,
-    }
+        mins=mins,
+        maxs=maxs,
+        sums=sums,
+    )
 
 
 def normalize_pixel_history(hist: Any) -> dict[str, Any]:
@@ -384,7 +574,7 @@ def draw_visibility_analysis(
         evidence.append({"kind": "scissor", "detail": scissors[0]})
 
     depth = pipe_snapshot.get("depth") or {}
-    if depth.get("depth_enable") and depth.get("depth_function") == "Never":
+    if depth.get("available", True) and depth.get("depth_enable") and depth.get("depth_function") == "Never":
         hypotheses.append("Depth compare Never rejects all fragments.")
 
     action = pipe_snapshot.get("action") or {}
@@ -444,9 +634,10 @@ def detect_pipeline_anomalies(snapshot: dict[str, Any]) -> list[str]:
     has_color_output = any(
         c.get("resource_id") not in ("Null", "", None) for c in color_targets
     )
-    if not depth_enable and is_draw and has_color_output:
+    depth_available = depth.get("available", True)
+    if depth_available and not depth_enable and is_draw and has_color_output:
         anomalies.append("depth_test_disabled")
-    if depth_enable and not depth_writes:
+    if depth_available and depth_enable and not depth_writes:
         anomalies.append("depth_write_disabled")
 
     # Color outputs
@@ -457,10 +648,11 @@ def detect_pipeline_anomalies(snapshot: dict[str, Any]) -> list[str]:
 
     # Additive blend
     blend = snapshot.get("blend") or {}
-    for t in blend.get("targets") or []:
-        if t.get("blend_enable") and t.get("dst_color") == "One" and t.get("color_op", "Add") == "Add":
-            anomalies.append("additive_blend")
-            break
+    if blend.get("available", True):
+        for t in blend.get("targets") or []:
+            if t.get("blend_enable") and t.get("dst_color") == "One" and t.get("color_op", "Add") == "Add":
+                anomalies.append("additive_blend")
+                break
 
     return anomalies
 
@@ -509,7 +701,7 @@ def build_frame_overview(controller: Any, structured_file: Any) -> dict[str, Any
 
     Uses only GetRootActions(), GetTextures(), and GetUsage() so it is fast
     even on large captures. Returns render passes (named marker groups), render
-    targets (textures with ColourTarget/DepthStencilTarget usages), and counts.
+    targets (textures with ColorTarget/DepthStencilTarget usages), and counts.
     """
     rd = get_renderdoc()
 
@@ -538,7 +730,7 @@ def build_frame_overview(controller: Any, structured_file: Any) -> dict[str, Any
             })
 
     # Find render targets via resource usages (no SetFrameEvent needed)
-    ColourTarget = getattr(rd.ResourceUsage, "ColourTarget", None)
+    ColorTarget = getattr(rd.ResourceUsage, "ColorTarget", getattr(rd.ResourceUsage, "ColourTarget", None))
     DepthStencilTarget = getattr(rd.ResourceUsage, "DepthStencilTarget", None)
     ClearUsage = getattr(rd.ResourceUsage, "Clear", None)
 
@@ -560,7 +752,7 @@ def build_frame_overview(controller: Any, structured_file: Any) -> dict[str, Any
 
         rt_usages = [
             u for u in usages
-            if (ColourTarget is not None and u.usage == ColourTarget)
+            if (ColorTarget is not None and u.usage == ColorTarget)
             or (DepthStencilTarget is not None and u.usage == DepthStencilTarget)
         ]
         if not rt_usages:
