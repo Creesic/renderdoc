@@ -102,20 +102,31 @@ http://127.0.0.1:8765/mcp
 | `open_capture` | Load `.rdc`, returns `capture_id` |
 | `close_capture` | Release replay resources |
 | `list_events` | Filter/search frame actions + marker stacks |
+| `search_marker_paths` | Search nested marker paths and return matching events/actions |
 | `set_event` | Replay to `event_id` |
 | `get_pipeline_state` | Normalized RTs/depth, viewport/scissor, raster/blend/depth, shaders/bindings |
 | `get_bound_resources` | Descriptor/bind summaries merged across stages |
+| `get_descriptor` | Resolve descriptor-store/heap slots to bound resources or samplers |
+| `get_frame_overview` | Fast render-pass / RT / depth-target summary without replaying to each event |
 | `list_resources` | Resources optionally filtered by `resource_type` |
 | `get_resource_usages` | Per-resource usage timeline (`event_id`, usage enum) |
+| `trace_resource` | Walk producer/consumer usage chains for a texture/buffer around an event |
 | `analyze_texture` | mip/slice stats: min/max/mean channels, black ratio, NaN count |
+| `get_texture_image` | Downsample/export texture image previews plus safe stats when format is simple |
 | `save_texture` | Export PNG/JPEG/HDR/DDS/BMP via `TextureSave` |
 | `read_buffer` | `GetBufferData` as hex preview + base64 (size capped) |
+| `diff_buffer_between_events` | Compare a buffer byte range at two events and return changed ranges |
+| `find_in_buffer` | Server-side byte-pattern search in large buffers |
+| `read_constant_buffer` | Decode constant buffers by reflection and page raw byte previews |
 | `pixel_history` | Structured pixel modifications (+ optional `event_id`) |
 | `diff_pipeline_state` | Deep diff of normalized pipeline snapshots |
+| `list_draws_with_state` | Compact per-draw state table for scanning many draws |
+| `diff_draw_sequences` | Align and diff compact draw-state rows between captures |
 | `diff_texture_stats` | Compare `analyze_texture`-style stats good vs bad |
 | `decode_mesh_inputs` | Vertex layout + indexbuffer summary + vertex previews |
 | `get_shader` | Shader IDs + optional disassembly/reflection |
 | `get_shader_reflection` | Constant buffers / binding names summary |
+| `debug_pixel` / `debug_vertex` | Shader trace summaries with inputs, resource accesses, constants, and outputs |
 | `analyze_draw_visibility` | `SamplesPassed` counter when available + viewport/scissor heuristics |
 
 ## Smoke check
@@ -135,6 +146,9 @@ python scripts/smoke_import.py
 ## Limitations
 
 - **`SamplesPassed`** and **pixel history** may be unavailable or slow depending on API/GPU.
+- Some RenderDoc Python builds expose raster/depth/stencil/blend state through different PipeState
+  method names. The MCP tries the known generic and D3D12-style accessors; if none are available,
+  those sections return `available: false` instead of silently pretending defaults.
 - **`decode_mesh_inputs`** rejects instanced draws (same as upstream decode_mesh sample).
 - Replay APIs must run serialized; the server uses a lock around all tools.
 

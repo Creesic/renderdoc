@@ -63,6 +63,131 @@ _replay_executor = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+_WRITE_USAGE_NAMES = {
+    "ColorTarget",
+    "ColourTarget",
+    "DepthStencilTarget",
+    "Clear",
+    "Copy",
+    "CopyDst",
+    "Resolve",
+    "ResolveDst",
+    "GenMips",
+    "StreamOut",
+    "CPUWrite",
+    "Discard",
+    "VertexBufferWrite",
+    "IndexBufferWrite",
+    "Indirect",
+}
+
+_READ_USAGE_NAMES = {
+    "All_Constants",
+    "VS_Resource",
+    "VS_Constants",
+    "HS_Resource",
+    "HS_Constants",
+    "DS_Resource",
+    "DS_Constants",
+    "GS_Resource",
+    "GS_Constants",
+    "PS_Resource",
+    "PS_Constants",
+    "CS_Resource",
+    "CS_Constants",
+    "MS_Resource",
+    "MS_Constants",
+    "TS_Resource",
+    "TS_Constants",
+    "All_Resource",
+    "InputTarget",
+    "VertexBuffer",
+    "IndexBuffer",
+    "CopySrc",
+    "ResolveSrc",
+    "ConstantBuffer",
+}
+
+
+def _event_summary(sess: Any, event_id: int) -> dict[str, Any]:
+    ie = sess.events_by_id.get(int(event_id))
+    if ie is None:
+        return {"event_id": int(event_id)}
+    return {
+        "event_id": ie.event_id,
+        "name": ie.name,
+        "flags": ie.flags_names,
+        "marker_stack": ie.marker_stack,
+        "draw": {
+            "num_vertices": ie.num_vertices,
+            "num_instances": ie.num_instances,
+            "num_indices": ie.num_indices,
+        },
+    }
+
+
+def _marker_path_for_event(ie: Any, include_event_name: bool = True) -> str:
+    names = [str(m.get("name", "")) for m in ie.marker_stack if str(m.get("name", "")).strip()]
+    if include_event_name:
+        names.append(str(ie.name))
+    return " / ".join(n for n in names if n)
+
+
+def _usage_rows(controller: Any, rid: Any) -> list[dict[str, Any]]:
+    return [
+        {"event_id": int(u.eventId), "usage": rdutil.enum_name(u.usage)}
+        for u in controller.GetUsage(rid)
+    ]
+
+
+def _is_write_usage(name: str) -> bool:
+    return name in _WRITE_USAGE_NAMES or "Write" in name or "RWResource" in name or name.endswith("Dst")
+
+
+def _is_read_usage(name: str) -> bool:
+    return name in _READ_USAGE_NAMES or name.endswith("Resource") or name.endswith("Constants") or name.endswith("Src")
+
+
+def _changed_ranges(a: bytes, b: bytes, base_offset: int, max_ranges: int) -> tuple[list[dict[str, int]], bool]:
+    ranges: list[dict[str, int]] = []
+    i = 0
+    ln = min(len(a), len(b))
+    while i < ln:
+        if a[i] == b[i]:
+            i += 1
+            continue
+        start = i
+        while i < ln and a[i] != b[i]:
+            i += 1
+        if len(ranges) < max_ranges:
+            ranges.append({"offset": base_offset + start, "length": i - start})
+        else:
+            return ranges, True
+    if len(a) != len(b):
+        if len(ranges) < max_ranges:
+            ranges.append({"offset": base_offset + ln, "length": abs(len(a) - len(b))})
+            return ranges, False
+        return ranges, True
+    return ranges, False
+
+
+def _target_resource_ids(targets: dict[str, Any] | None) -> set[str]:
+    ids: set[str] = set()
+    if not targets:
+        return ids
+    for target in targets.get("color_targets") or []:
+        rid = target.get("resource_id")
+        if rid and rid != "Null":
+            ids.add(str(rid))
+    for key in ("depth_target", "stencil_target"):
+        target = targets.get(key)
+        if target:
+            rid = target.get("resource_id")
+            if rid and rid != "Null":
+                ids.add(str(rid))
+    return ids
+
+
 async def ensure_replay_initialized() -> None:
     """Load pymodules and InitialiseReplay on first tool use — keeps MCP handshake instant."""
     global _replay_initialized
@@ -236,6 +361,64 @@ def build_mcp() -> FastMCP:
                     limit=min(limit, 1000),
                 )
                 return R.ok({"events": rows, "next_cursor": next_cur})
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
+    async def search_marker_paths(
+        capture_id: str,
+        path_contains: str | None = None,
+        name_contains: str | None = None,
+        require_flags: list[str] | None = None,
+        include_actions: bool = True,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Search nested marker paths, not just flat event names.
+
+        Returns each matching event with `marker_path` built from PushMarker ancestry plus the
+        event name. This is intended for jumping straight to pass paths like "EDRAM / Resolve"
+        in deeper captures where a flat name search is too noisy.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+
+                path_q = (path_contains or "").lower()
+                name_q = (name_contains or "").lower()
+                wanted_flags = {f.lower() for f in (require_flags or [])}
+                rows: list[dict[str, Any]] = []
+                matched = 0
+
+                for eid in sess.events_ordered:
+                    ie = sess.events_by_id[eid]
+                    if not include_actions and "Drawcall" in ie.flags_names:
+                        continue
+                    if wanted_flags and not wanted_flags.issubset({f.lower() for f in ie.flags_names}):
+                        continue
+                    path = _marker_path_for_event(ie)
+                    if path_q and path_q not in path.lower():
+                        continue
+                    if name_q and name_q not in ie.name.lower():
+                        continue
+                    matched += 1
+                    if len(rows) >= max(1, min(int(limit), 1000)):
+                        continue
+                    row = _event_summary(sess, eid)
+                    row["marker_path"] = path
+                    rows.append(row)
+
+                return R.ok(
+                    {
+                        "capture_id": capture_id,
+                        "matches": rows,
+                        "count": len(rows),
+                        "total_matches": matched,
+                        "truncated": matched > len(rows),
+                    }
+                )
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
@@ -509,6 +692,125 @@ def build_mcp() -> FastMCP:
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
     @mcp.tool()
+    async def trace_resource(
+        capture_id: str,
+        resource_id: str,
+        event_id: int | None = None,
+        direction: str = "backward",
+        max_steps: int = 4,
+        include_bound_resources: bool = True,
+        include_event_details: bool = True,
+    ) -> dict[str, Any]:
+        """Trace a resource's producer/consumer chain through GetUsage().
+
+        `direction="backward"` finds the latest writes before `event_id` (or before the end of
+        the frame), then summarizes what each producer draw/copy read. This collapses the common
+        manual chain of get_resource_usages -> get_event_details -> get_pipeline_state when
+        tracking EDRAM/resolve resources. `direction="forward"` reports later consumers instead.
+        """
+        async with replay_execution():
+
+            def _event_details(sess: Any, eid: int) -> dict[str, Any] | None:
+                if not include_event_details:
+                    return None
+                chunk_index = sess.chunk_index_by_event.get(int(eid))
+                if chunk_index is None:
+                    return None
+                chunks = sess.structured_file.chunks
+                if chunk_index < 0 or chunk_index >= len(chunks):
+                    return None
+                try:
+                    return serialize_chunk(rdutil.get_renderdoc(), chunks[chunk_index], sess.controller)
+                except Exception as ex:
+                    return {"error": str(ex)}
+
+            def _producer_row(sess: Any, rid_s: str, usage: dict[str, Any]) -> dict[str, Any]:
+                eid = int(usage["event_id"])
+                row = _event_summary(sess, eid)
+                row["resource_usage"] = usage["usage"]
+                row["resource_id"] = rid_s
+                try:
+                    sessions.set_frame_event(sess, eid)
+                    if include_bound_resources:
+                        bound = normalize_bound_resources(sess.controller, sess.structured_file, eid)
+                        targets = bound.get("targets")
+                        write_ids = _target_resource_ids(targets)
+                        row["targets"] = targets
+                        row["write_targets"] = [
+                            r for r in (bound.get("merged_resources", []) or [])
+                            if str(r.get("resource_id", "")) in write_ids
+                        ][:64]
+                        row["inputs"] = [
+                            r for r in (bound.get("merged_resources", []) or [])
+                            if str(r.get("resource_id", "")) not in write_ids
+                        ][:200]
+                except Exception as ex:
+                    row["bound_resources_error"] = str(ex)
+                details = _event_details(sess, eid)
+                if details is not None:
+                    row["event_details"] = details
+                return row
+
+            def _go() -> dict[str, Any]:
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                try:
+                    rid = rdutil.parse_resource_id(resource_id)
+                except ValueError as ex:
+                    return R.err("bad_resource_id", str(ex))
+
+                usages = _usage_rows(sess.controller, rid)
+                target_eid = int(event_id) if event_id is not None else (
+                    max((u["event_id"] for u in usages), default=0) + 1
+                )
+                direction_norm = direction.strip().lower()
+                max_n = max(1, min(int(max_steps), 32))
+
+                if direction_norm in ("backward", "back", "producer", "producers"):
+                    candidates = [
+                        u for u in usages if u["event_id"] <= target_eid and _is_write_usage(u["usage"])
+                    ]
+                    selected = list(reversed(candidates))[:max_n]
+                    rows = [_producer_row(sess, resource_id, u) for u in selected]
+                    mode = "backward"
+                elif direction_norm in ("forward", "fwd", "consumer", "consumers"):
+                    candidates = [
+                        u for u in usages if u["event_id"] >= target_eid and _is_read_usage(u["usage"])
+                    ]
+                    selected = candidates[:max_n]
+                    rows = []
+                    for u in selected:
+                        row = _event_summary(sess, int(u["event_id"]))
+                        row["resource_usage"] = u["usage"]
+                        details = _event_details(sess, int(u["event_id"]))
+                        if details is not None:
+                            row["event_details"] = details
+                        rows.append(row)
+                    mode = "forward"
+                else:
+                    return R.err("bad_direction", "Use backward or forward")
+
+                payload: dict[str, Any] = {
+                    "capture_id": capture_id,
+                    "resource_id": resource_id,
+                    "event_id": target_eid,
+                    "direction": mode,
+                    "steps": rows,
+                    "step_count": len(rows),
+                    "all_usages_near_event": [
+                        u for u in usages if abs(int(u["event_id"]) - target_eid) <= 8
+                    ][:100],
+                    "truncated": len(candidates) > len(selected),
+                }
+                rn = rdutil.resource_name_for(sess.controller, rid)
+                if rn:
+                    payload["resource_name"] = rn
+                return R.ok(payload)
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
     async def analyze_texture(
         capture_id: str,
         resource_id: str,
@@ -718,6 +1020,88 @@ def build_mcp() -> FastMCP:
                 if bfname:
                     buf_out["resource_name"] = bfname
                 return R.ok(buf_out)
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
+    async def diff_buffer_between_events(
+        capture_id: str,
+        resource_id: str,
+        event_a: int,
+        event_b: int,
+        offset: int = 0,
+        length: int = 65536,
+        max_changed_ranges: int = 128,
+        include_previews: bool = True,
+    ) -> dict[str, Any]:
+        """Compare a buffer's bytes at two events and return changed ranges.
+
+        Useful for constant-buffer upload bugs: answers "did buffer X actually change between
+        draw A and draw B?" without dumping base64 manually. Response is capped to avoid huge
+        payloads; increase offset/length or page ranges for detailed inspection.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                try:
+                    rid = rdutil.parse_resource_id(resource_id)
+                except ValueError as ex:
+                    return R.err("bad_resource_id", str(ex))
+
+                off = max(0, int(offset))
+                ln = max(0, min(int(length), 16 * 1024 * 1024))
+                if ln == 0:
+                    return R.err("bad_length", "length must be > 0")
+
+                try:
+                    sessions.set_frame_event(sess, int(event_a))
+                    data_a = rdutil.controller_get_buffer_data(sess.controller, rid, off, ln)
+                    sessions.set_frame_event(sess, int(event_b))
+                    data_b = rdutil.controller_get_buffer_data(sess.controller, rid, off, ln)
+                except Exception as ex:
+                    return R.err("diff_buffer_failed", str(ex))
+
+                ranges, truncated = _changed_ranges(
+                    data_a, data_b, off, max(1, min(int(max_changed_ranges), 4096))
+                )
+                changed_bytes = sum(r["length"] for r in ranges)
+                out: dict[str, Any] = {
+                    "capture_id": capture_id,
+                    "resource_id": resource_id,
+                    "event_a": int(event_a),
+                    "event_b": int(event_b),
+                    "offset": off,
+                    "requested_length": ln,
+                    "byte_length_a": len(data_a),
+                    "byte_length_b": len(data_b),
+                    "changed": bool(ranges) or data_a != data_b,
+                    "changed_ranges": ranges,
+                    "changed_range_count": len(ranges),
+                    "changed_ranges_truncated": truncated,
+                    "changed_bytes_in_returned_ranges": changed_bytes,
+                }
+                if include_previews:
+                    previews = []
+                    for r in ranges[:16]:
+                        rel = r["offset"] - off
+                        plen = min(r["length"], 64)
+                        previews.append(
+                            {
+                                "offset": r["offset"],
+                                "length": r["length"],
+                                "a_hex": data_a[rel:rel + plen].hex(),
+                                "b_hex": data_b[rel:rel + plen].hex(),
+                                "preview_truncated": r["length"] > plen,
+                            }
+                        )
+                    out["previews"] = previews
+                bfname = rdutil.resource_name_for(sess.controller, rid)
+                if bfname:
+                    out["resource_name"] = bfname
+                return R.ok(out)
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
@@ -1368,6 +1752,18 @@ def build_mcp() -> FastMCP:
                     "raw_offset": max(0, int(raw_offset)),
                     "raw_byte_length": len(raw),
                 }
+                if variables:
+                    real_names = [
+                        str(v.get("name", "") or "")
+                        for v in variables
+                        if str(v.get("name", "") or "") and not str(v.get("name", "") or "").startswith("unknown[")
+                    ]
+                    out["reflection_names_available"] = bool(real_names)
+                    if not real_names:
+                        out["reflection_names_note"] = (
+                            "RenderDoc shader reflection did not provide original constant names; "
+                            "values are decoded from byte offsets with generated unknown[N] names."
+                        )
                 if not raw:
                     out["buffer_unavailable"] = True
 

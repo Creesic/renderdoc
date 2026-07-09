@@ -46,6 +46,13 @@ def test_depth_test_disabled_on_draw():
     assert "depth_test_disabled" in detect_pipeline_anomalies(snap)
 
 
+def test_unavailable_depth_state_does_not_claim_disabled():
+    from renderdoc_mcp.analysis import detect_pipeline_anomalies
+    snap = _snap(depth={"available": False, "reason": "not exposed"})
+    assert "depth_test_disabled" not in detect_pipeline_anomalies(snap)
+    assert "depth_write_disabled" not in detect_pipeline_anomalies(snap)
+
+
 def test_depth_write_disabled_when_test_on():
     from renderdoc_mcp.analysis import detect_pipeline_anomalies
     snap = _snap(depth={"depth_enable": True, "depth_writes": False, "depth_function": "Less"})
@@ -77,6 +84,12 @@ def test_additive_blend_not_flagged_when_disabled():
             "src_color": "SrcAlpha", "dst_color": "One", "color_op": "Add",
         }]
     })
+    assert "additive_blend" not in detect_pipeline_anomalies(snap)
+
+
+def test_unavailable_blend_state_does_not_claim_additive():
+    from renderdoc_mcp.analysis import detect_pipeline_anomalies
+    snap = _snap(blend={"available": False, "reason": "not exposed"})
     assert "additive_blend" not in detect_pipeline_anomalies(snap)
 
 
