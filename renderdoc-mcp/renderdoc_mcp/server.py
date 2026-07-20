@@ -1693,6 +1693,128 @@ def build_mcp() -> FastMCP:
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
+    def _collect_comparable_shader_trace(
+        sess: Any,
+        event_id: int,
+        stage_name: str,
+        invocation: dict[str, int],
+    ) -> tuple[dict[str, Any], bool]:
+        """Debug one invocation and retain the executed steps needed by the cross-capture diff."""
+        rd = rdutil.get_renderdoc()
+        stage_key = stage_name.strip().lower()
+        if stage_key == "vertex":
+            stage = rd.ShaderStage.Vertex
+        elif stage_key in ("pixel", "fragment"):
+            stage = rd.ShaderStage.Pixel
+        else:
+            raise ValueError("stage must be 'vertex' or 'pixel'/'fragment'")
+
+        sessions.set_frame_event(sess, int(event_id))
+        pipe = sess.controller.GetPipelineState()
+        refl = pipe.GetShaderReflection(stage)
+        if refl is None:
+            raise ValueError("No {} shader is bound at event {}".format(stage_name, event_id))
+
+        if stage_key == "vertex":
+            vertex_id = int(invocation.get("vertex_id", 0))
+            instance_id = int(invocation.get("instance_id", 0))
+            index = int(invocation.get("index", vertex_id))
+            view = int(invocation.get("view", 0))
+            trace = sess.controller.DebugVertex(vertex_id, instance_id, index, view)
+        else:
+            if "x" not in invocation or "y" not in invocation:
+                raise ValueError("pixel invocations require integer 'x' and 'y' keys")
+            inputs = rd.DebugPixelInputs()
+            inputs.sample = int(invocation.get("sample", 0))
+            inputs.primitive = int(invocation.get("primitive", shader_debug.NO_PREFERENCE))
+            inputs.view = int(invocation.get("view", 0))
+            trace = sess.controller.DebugPixel(int(invocation["x"]), int(invocation["y"]), inputs)
+
+        if trace is None or trace.debugger is None:
+            if trace is not None:
+                sess.controller.FreeTrace(trace)
+            raise RuntimeError("Shader debugging is unavailable for this invocation")
+
+        try:
+            states, truncated = shader_debug.run_debug_trace(sess.controller, trace)
+            disasm_lines: list[str] = []
+            try:
+                pipe_obj = pipe.GetGraphicsPipelineObject()
+                disasm_text = shader_debug.best_disassembly(sess.controller, pipe_obj, refl)
+                disasm_lines = disasm_text.split("\n") if disasm_text else []
+            except Exception:
+                pass
+            data = shader_debug.build_comparable_debug_trace(
+                rd, refl, trace, states, disasm_lines
+            )
+            return data, truncated
+        finally:
+            sess.controller.FreeTrace(trace)
+
+    @mcp.tool()
+    async def diff_shader_invocations(
+        capture_a: str,
+        event_id_a: int,
+        invocation_a: dict[str, int],
+        capture_b: str,
+        event_id_b: int,
+        invocation_b: dict[str, int],
+        stage: str,
+        abs_tolerance: float = 1e-6,
+        rel_tolerance: float = 1e-5,
+        max_differences: int = 100,
+    ) -> dict[str, Any]:
+        """Compare two vertex or pixel shader invocations and find the first divergent step.
+
+        For vertex traces, each invocation object accepts ``vertex_id`` (default 0),
+        ``instance_id`` (default 0), ``index`` (default vertex_id), and ``view``. For pixel traces,
+        each object requires ``x``/``y`` and optionally accepts ``sample``, ``primitive``, and
+        ``view``. Inputs and typed constant blocks are compared before execution; executed
+        instructions are aligned by normalized disassembly (falling back to execution position),
+        then temporary/register changes and final semantic outputs are compared with configurable
+        float tolerances. The response reports the first divergent instruction automatically.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                sess_a = sessions.get(capture_a)
+                sess_b = sessions.get(capture_b)
+                if sess_a is None or sess_b is None:
+                    return R.err("unknown_capture", "capture_a or capture_b invalid")
+                try:
+                    trace_a, truncated_a = _collect_comparable_shader_trace(
+                        sess_a, int(event_id_a), stage, invocation_a
+                    )
+                    trace_b, truncated_b = _collect_comparable_shader_trace(
+                        sess_b, int(event_id_b), stage, invocation_b
+                    )
+                    out = shader_debug.compare_debug_traces(
+                        trace_a,
+                        trace_b,
+                        abs_tolerance=max(0.0, float(abs_tolerance)),
+                        rel_tolerance=max(0.0, float(rel_tolerance)),
+                        max_differences=max(1, min(int(max_differences), 1000)),
+                    )
+                except Exception as ex:
+                    return R.err("diff_shader_invocations_failed", str(ex))
+
+                out.update(
+                    {
+                        "capture_a": capture_a,
+                        "event_id_a": int(event_id_a),
+                        "invocation_a": invocation_a,
+                        "capture_b": capture_b,
+                        "event_id_b": int(event_id_b),
+                        "invocation_b": invocation_b,
+                        "stage": stage,
+                        "trace_truncated_a": truncated_a,
+                        "trace_truncated_b": truncated_b,
+                    }
+                )
+                return R.ok(out)
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
     @mcp.tool()
     async def debug_pixel(
         capture_id: str,

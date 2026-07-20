@@ -127,6 +127,7 @@ http://127.0.0.1:8765/mcp
 | `get_shader` | Shader IDs + optional disassembly/reflection |
 | `get_shader_reflection` | Constant buffers / binding names summary |
 | `debug_pixel` / `debug_vertex` | Shader trace summaries with inputs, resource accesses, constants, and outputs |
+| `diff_shader_invocations` | Compare two vertex/pixel traces and report the first divergent instruction/result |
 | `analyze_draw_visibility` | `SamplesPassed` counter when available + viewport/scissor heuristics |
 
 ## Smoke check
@@ -150,6 +151,9 @@ python scripts/smoke_import.py
   method names. The MCP tries the known generic and D3D12-style accessors; if none are available,
   those sections return `available: false` instead of silently pretending defaults.
 - **`decode_mesh_inputs`** rejects instanced draws (same as upstream decode_mesh sample).
+- **`diff_shader_invocations`** aligns matching disassembly text when available, otherwise it falls
+  back to execution position. Cross-API shaders compiled to substantially different instruction
+  streams may therefore need manual interpretation even though input/constant/output diffs remain useful.
 - Replay APIs must run serialized; the server uses a lock around all tools.
 
 ## License
