@@ -125,6 +125,7 @@ http://127.0.0.1:8765/mcp
 | `diff_draw_sequences` | Align and diff compact draw-state rows between captures |
 | `diff_texture_stats` | Compare `analyze_texture`-style stats good vs bad |
 | `decode_mesh_inputs` | Vertex layout + indexbuffer summary + vertex previews |
+| `decode_post_vs_outputs` | Decode a draw's post-VS/GS output into typed semantics (POSITION, COLORn, texcoords) for selected vertices |
 | `get_shader` | Shader IDs + optional disassembly/reflection |
 | `get_shader_reflection` | Constant buffers / binding names summary |
 | `debug_pixel` / `debug_vertex` | Shader trace summaries with inputs, resource accesses, constants, and outputs |
@@ -169,6 +170,11 @@ python scripts/smoke_import.py
   `copySourceSubresource.sample` isn't a single meaningful sample (all samples combine into the
   destination pixel), so the walk falls back to `sample_index=0` when continuing into a resolve
   source rather than fanning out into every sample.
+- **`decode_post_vs_outputs`** only decodes the primary output stream (`stream=0`) of a Geometry
+  shader's multi-stream output, and only supports `VSOut`/`GSOut` -- mesh-shader/task-shader
+  stages (`MeshOut`/`TaskOut`) aren't exposed by this tool. POSITION's reported NDC value is a
+  perspective divide only (`xyz/w`), not a full camera/view-matrix reconstruction into screen
+  pixel coordinates -- use `pixel_history`/`trace_pixel_provenance` for that.
 
 ## License
 
