@@ -1,3 +1,5 @@
+import math
+
 import renderdoc as rd
 import rdtest
 
@@ -6,7 +8,7 @@ class D3D11_Mesh_Zoo_PostVS(rdtest.TestCase):
     demos_test_name = 'D3D11_Mesh_Zoo'
 
     def check_capture(self):
-        from renderdoc_mcp.mesh_decode import build_output_column_layout
+        from renderdoc_mcp.mesh_decode import build_output_column_layout, decode_post_vs_outputs
         from renderdoc_mcp.rdutil import enum_name
 
         action = self.find_action("Quad")
@@ -70,3 +72,68 @@ class D3D11_Mesh_Zoo_PostVS(rdtest.TestCase):
         rdtest.log.success(
             "decode_post_vs_outputs column layout matches Mesh_Zoo's own reference offsets "
             "(POSITION=0, COLOR0=16, COLOR1={}, aligned={})".format(expected_color1_offset, aligned))
+
+        self.check_decode_post_vs_outputs(action.next.eventId)
+
+    def check_decode_post_vs_outputs(self, event_id):
+        # End-to-end call of the actual orchestration function (not just the pure
+        # build_output_column_layout helper checked above) against a real capture. This is the
+        # regression check for the just-fixed Critical index-buffer bug: the Quad draw is
+        # non-indexed (ctx->DrawInstanced(6, 2, 0, 0) in d3d11_mesh_zoo.cpp), so
+        # _fetch_postvs_indices must return a plain sequential range and every row's "index" must
+        # equal its "vertex_index".
+        from renderdoc_mcp.mesh_decode import decode_post_vs_outputs
+
+        self.controller.SetFrameEvent(event_id, False)
+
+        result = decode_post_vs_outputs(
+            self.controller, self.controller.GetStructuredFile(), event_id,
+            stage="vsout", instance=0, view=0, preview_vertices=8, out_file=None)
+
+        # decode_post_vs_outputs returns a plain dict, not the MCP R.ok()/R.err() envelope (that
+        # only exists in server.py's tool wrapper) -- check for failure the same way server.py's
+        # own decode_post_vs_outputs tool wrapper does.
+        if result.get("error") or result.get("ok") is False:
+            raise rdtest.TestFailureException(
+                "decode_post_vs_outputs failed on the Quad draw: {}".format(result))
+
+        vertex_count = result.get("vertex_count")
+        if vertex_count != 6:
+            raise rdtest.TestFailureException(
+                "Expected 6 vertices per instance for the Quad draw (DrawInstanced(6, 2, 0, 0)), "
+                "got {}".format(vertex_count))
+
+        previews = result.get("vertex_previews", [])
+        if len(previews) == 0:
+            raise rdtest.TestFailureException("Expected at least one decoded vertex preview")
+
+        for row in previews:
+            if row.get("index") != row.get("vertex_index"):
+                raise rdtest.TestFailureException(
+                    "Non-indexed Quad draw should have index == vertex_index for every row, "
+                    "got {}".format(row))
+
+        pos_name = next(
+            (s["name"] for s in result.get("semantics", []) if s.get("system_value") == "Position"),
+            None)
+        if pos_name is None:
+            raise rdtest.TestFailureException("Expected a POSITION/SV_Position column in semantics")
+
+        for row in previews:
+            pos = row["values"].get(pos_name)
+            clip = pos.get("clip") if isinstance(pos, dict) else None
+            if not clip or len(clip) != 4 or not all(math.isfinite(v) for v in clip):
+                raise rdtest.TestFailureException(
+                    "Expected 4 finite clip-space floats for POSITION, got {}".format(clip))
+
+            if result.get("unproject"):
+                ndc = pos.get("ndc")
+                if not ndc or len(ndc) != 3 or not all(math.isfinite(v) for v in ndc):
+                    raise rdtest.TestFailureException(
+                        "Expected 3 finite NDC floats for POSITION when unproject is set, "
+                        "got {}".format(ndc))
+
+        rdtest.log.success(
+            "decode_post_vs_outputs decoded {} vertices end-to-end for the non-indexed Quad "
+            "draw, with index == vertex_index for every row (regression check for the just-fixed "
+            "index-buffer bug)".format(vertex_count))
