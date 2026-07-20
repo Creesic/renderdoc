@@ -5,6 +5,13 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from renderdoc_mcp.analysis import analyze_texture_bytes, find_texture_description
+from renderdoc_mcp.cbuffer import decode_cb_bytes
+from renderdoc_mcp.mesh_decode import decode_post_vs_outputs
+from renderdoc_mcp.rdutil import controller_get_buffer_data, get_renderdoc, parse_resource_id
+from renderdoc_mcp.serialize import build_draw_state_row
+from renderdoc_mcp.session import expand_action_flags, find_action
+
 
 def draw_shape_key(draw_row: dict[str, Any]) -> tuple[Any, ...]:
     """Structural prefilter key: topology, has-index-buffer, VB count, target counts.
@@ -159,3 +166,211 @@ def combine_signals(geometry: float, texture: float, constants: float, shader_sh
         + _SIGNAL_WEIGHTS["constants"] * constants
         + _SIGNAL_WEIGHTS["shader_shape"] * shader_shape
     )
+
+
+def _iter_drawcall_events(controller: Any, rd: Any, limit: int) -> list[int]:
+    """Walk the action tree collecting Drawcall event IDs, in frame order, capped at limit."""
+    out: list[int] = []
+
+    def visit(action: Any) -> None:
+        if len(out) >= limit:
+            return
+        if "Drawcall" in expand_action_flags(rd, int(action.flags)):
+            out.append(int(action.eventId))
+        for child in action.children:
+            if len(out) >= limit:
+                return
+            visit(child)
+
+    for root in controller.GetRootActions():
+        if len(out) >= limit:
+            break
+        visit(root)
+    return out
+
+
+def _draw_fingerprint(controller: Any, structured_file: Any, event_id: int) -> dict[str, Any] | None:
+    """Gather every signal needed to score one draw against another.
+
+    Returns None if the event isn't found or isn't a Drawcall -- the reference draw's caller
+    turns this into an explicit error; a non-drawcall candidate id is simply skipped.
+    """
+    rd = get_renderdoc()
+    action = find_action(controller, event_id)
+    if action is None:
+        return None
+    if "Drawcall" not in expand_action_flags(rd, int(action.flags)):
+        return None
+
+    controller.SetFrameEvent(int(event_id), False)
+    pipe = controller.GetPipelineState()
+    draw_row = build_draw_state_row(controller, structured_file, event_id)
+
+    # Geometry: element count (RenderDoc's ActionDescription.numIndices is the generic per-draw
+    # element count for both indexed and non-indexed draws) + post-VS position bounding box.
+    num_elements = int(getattr(action, "numIndices", 0) or 0)
+    positions: list[list[float]] = []
+    postvs = decode_post_vs_outputs(
+        controller, structured_file, event_id, stage="vsout", instance=0, view=0,
+        preview_vertices=32, out_file=None,
+    )
+    if not postvs.get("error") and postvs.get("ok") is not False:
+        pos_name = next(
+            (s["name"] for s in postvs.get("semantics", []) if s.get("system_value") == "Position"),
+            None,
+        )
+        if pos_name is not None:
+            for row in postvs.get("vertex_previews", []):
+                pos = row.get("values", {}).get(pos_name)
+                clip = pos.get("clip") if isinstance(pos, dict) else None
+                if clip and len(clip) >= 3:
+                    positions.append(clip)
+
+    # Texture: primary color target dimensions + mean channel content.
+    tex_dims: tuple[int, int] | None = None
+    tex_mean: list[float] | None = None
+    color_targets = draw_row.get("color_targets") or []
+    if color_targets:
+        rid_str_val = color_targets[0].get("resource_id")
+        if rid_str_val and rid_str_val != "Null":
+            try:
+                rid = parse_resource_id(rid_str_val)
+                tex = find_texture_description(controller, rid)
+                if tex is not None:
+                    tex_dims = (int(tex.width), int(tex.height))
+                    sub = rd.Subresource(0, 0, 0)
+                    raw = controller.GetTextureData(rid, sub)
+                    stats = analyze_texture_bytes(tex, raw)
+                    if stats.get("supported_stats") and "mean_channels" in stats:
+                        tex_mean = stats["mean_channels"]
+            except Exception:
+                pass
+
+    # Constants: decode Vertex + Pixel constant buffers, keyed by variable name.
+    constants: dict[str, Any] = {}
+    cb_names: set[str] = set()
+    for stage in (rd.ShaderStage.Vertex, rd.ShaderStage.Pixel):
+        refl = pipe.GetShaderReflection(stage)
+        if refl is None:
+            continue
+        for cb_index, cb_block in enumerate(list(getattr(refl, "constantBlocks", []) or [])):
+            cb_names.add(str(getattr(cb_block, "name", "") or ""))
+            try:
+                cb_desc = pipe.GetConstantBlock(stage, cb_index, 0)
+                desc = getattr(cb_desc, "descriptor", None)
+                if desc is None:
+                    continue
+                buf_rid = getattr(desc, "resource", None)
+                byte_offset = int(getattr(desc, "byteOffset", 0))
+                byte_size = int(getattr(desc, "byteSize", 0)) or 65536
+                raw = controller_get_buffer_data(controller, buf_rid, byte_offset, min(byte_size, 65536))
+                for var in decode_cb_bytes(raw, list(getattr(cb_block, "variables", []) or [])):
+                    constants[var["name"]] = var["value"]
+            except Exception:
+                continue
+
+    # Shader shape: VS output-signature semantic names.
+    output_semantics: set[str] = set()
+    vs_refl = pipe.GetShaderReflection(rd.ShaderStage.Vertex)
+    if vs_refl is not None:
+        for sig in getattr(vs_refl, "outputSignature", []) or []:
+            name = str(getattr(sig, "semanticName", "") or "")
+            if name:
+                output_semantics.add(name)
+
+    return {
+        "event_id": int(event_id),
+        "name": draw_row.get("name", ""),
+        "shape_key": draw_shape_key(draw_row),
+        "num_elements": num_elements,
+        "position_extents": bbox_extents(positions),
+        "texture_dims": tex_dims,
+        "texture_mean": tex_mean,
+        "constants": constants,
+        "constant_block_names": cb_names,
+        "output_semantics": output_semantics,
+    }
+
+
+def _score_pair(ref: dict[str, Any], cand: dict[str, Any]) -> dict[str, float]:
+    count_score = count_closeness(ref["num_elements"], cand["num_elements"])
+    if ref["position_extents"] is not None and cand["position_extents"] is not None:
+        bbox_score = bbox_ratio_similarity(ref["position_extents"], cand["position_extents"])
+        geometry = (count_score + bbox_score) / 2.0
+    else:
+        geometry = count_score
+
+    texture = texture_signal(
+        ref["texture_dims"], cand["texture_dims"], ref["texture_mean"], cand["texture_mean"]
+    )
+    constants = constants_score(ref["constants"], cand["constants"])
+    shader_shape = (
+        jaccard_similarity(ref["output_semantics"], cand["output_semantics"])
+        + jaccard_similarity(ref["constant_block_names"], cand["constant_block_names"])
+    ) / 2.0
+
+    return {
+        "geometry": geometry,
+        "texture": texture,
+        "constants": constants,
+        "shader_shape": shader_shape,
+        "confidence": combine_signals(geometry, texture, constants, shader_shape),
+    }
+
+
+def find_corresponding_draws(
+    controller_a: Any,
+    structured_file_a: Any,
+    event_id_a: int,
+    controller_b: Any,
+    structured_file_b: Any,
+    event_ids_b: list[int] | None = None,
+    limit: int = 200,
+    top_k: int = 5,
+) -> dict[str, Any]:
+    """Rank draws in (controller_b, structured_file_b) against one reference draw in
+    (controller_a, structured_file_a). These are two separate (controller, structured_file)
+    pairs, not one -- capture_a and capture_b are ordinarily different open replay sessions.
+    Passing the same pair for both is valid too (e.g. finding a similar draw within one capture).
+    """
+    rd = get_renderdoc()
+    ref = _draw_fingerprint(controller_a, structured_file_a, event_id_a)
+    if ref is None:
+        return {"ok": False, "error": "not_a_drawcall", "event_id": event_id_a}
+
+    limit = max(1, int(limit))
+    candidate_ids = (
+        [int(e) for e in event_ids_b] if event_ids_b is not None
+        else _iter_drawcall_events(controller_b, rd, limit)
+    )
+    candidate_ids = candidate_ids[:limit]
+
+    fingerprints = []
+    for eid in candidate_ids:
+        fp = _draw_fingerprint(controller_b, structured_file_b, eid)
+        if fp is not None:
+            fingerprints.append(fp)
+
+    prefiltered = [fp for fp in fingerprints if fp["shape_key"] == ref["shape_key"]]
+    shape_prefilter_applied = len(prefiltered) > 0
+    pool = prefiltered if shape_prefilter_applied else fingerprints
+
+    scored = []
+    for fp in pool:
+        signals = _score_pair(ref, fp)
+        scored.append({
+            "event_id": fp["event_id"],
+            "name": fp["name"],
+            "confidence": signals["confidence"],
+            "signals": {k: signals[k] for k in ("geometry", "texture", "constants", "shader_shape")},
+        })
+
+    scored.sort(key=lambda c: c["confidence"], reverse=True)
+
+    return {
+        "reference": {"event_id": ref["event_id"], "name": ref["name"]},
+        "prefiltered_count": len(prefiltered),
+        "scored_count": len(pool),
+        "shape_prefilter_applied": shape_prefilter_applied,
+        "candidates": scored[: max(1, int(top_k))],
+    }
