@@ -156,10 +156,16 @@ python scripts/smoke_import.py
   back to execution position. Cross-API shaders compiled to substantially different instruction
   streams may therefore need manual interpretation even though input/constant/output diffs remain useful.
 - Replay APIs must run serialized; the server uses a lock around all tools.
-- **`trace_pixel_provenance`** only crosses a Copy/Resolve hop when the source and destination
-  dimensions match at their respective mips (renderdoc's `ActionDescription` doesn't expose a
-  sub-rectangle offset, so a partial-rect copy/blit can't be safely assumed aligned) -- it stops
-  with `stopped_reason: "partial_rect_copy_unsupported"` instead. A true `Resolve` action's
+- **`trace_pixel_provenance`** stops a Copy/Resolve hop with
+  `stopped_reason: "partial_rect_copy_unsupported"` when source and destination dimensions differ
+  at their respective mips, since renderdoc's `ActionDescription` exposes only a resource +
+  subresource for a copy, never a sub-rectangle offset. This only catches partial-rect
+  copies/blits that also change the overall resource size -- an offset partial-rect copy between
+  two equally-sized resources (e.g. `CopySubresourceRegion`/`CopyTextureRegion` copying just the
+  bottom half of a texture into an equally-sized one) is indistinguishable from a full-surface
+  copy through this API, so the tool silently assumes `(x, y)` is aligned; this is a real,
+  undetectable-from-here limitation rather than something the dimension check guards against. A
+  true `Resolve` action's
   `copySourceSubresource.sample` isn't a single meaningful sample (all samples combine into the
   destination pixel), so the walk falls back to `sample_index=0` when continuing into a resolve
   source rather than fanning out into every sample.
