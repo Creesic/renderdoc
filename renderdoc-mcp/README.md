@@ -119,6 +119,7 @@ http://127.0.0.1:8765/mcp
 | `find_in_buffer` | Server-side byte-pattern search in large buffers |
 | `read_constant_buffer` | Decode constant buffers by reflection and page raw byte previews |
 | `pixel_history` | Structured pixel modifications (+ optional `event_id`) |
+| `trace_pixel_provenance` | Walk a final pixel's provenance backward across draws, copies, and resolves in one call |
 | `diff_pipeline_state` | Deep diff of normalized pipeline snapshots |
 | `list_draws_with_state` | Compact per-draw state table for scanning many draws |
 | `diff_draw_sequences` | Align and diff compact draw-state rows between captures |
@@ -154,6 +155,13 @@ python scripts/smoke_import.py
 - **`diff_shader_invocations`** aligns matching disassembly text when available, otherwise it falls
   back to execution position. Cross-API shaders compiled to substantially different instruction
   streams may therefore need manual interpretation even though input/constant/output diffs remain useful.
+- **`trace_pixel_provenance`** only crosses a Copy/Resolve hop when the source and destination
+  dimensions match at their respective mips (renderdoc's `ActionDescription` doesn't expose a
+  sub-rectangle offset, so a partial-rect copy/blit can't be safely assumed aligned) -- it stops
+  with `stopped_reason: "partial_rect_copy_unsupported"` instead. A true `Resolve` action's
+  `copySourceSubresource.sample` isn't a single meaningful sample (all samples combine into the
+  destination pixel), so the walk falls back to `sample_index=0` when continuing into a resolve
+  source rather than fanning out into every sample.
 - Replay APIs must run serialized; the server uses a lock around all tools.
 
 ## License
