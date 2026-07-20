@@ -189,6 +189,23 @@ def _iter_drawcall_events(controller: Any, rd: Any, limit: int) -> list[int]:
     return out
 
 
+def _draw_shape(controller: Any, structured_file: Any, event_id: int) -> tuple[Any, ...] | None:
+    """Cheap structural shape key for one draw -- no post-VS/texture/constants readback.
+    Returns None if the event isn't found or isn't a Drawcall. This is the Phase 1 prefilter
+    step from the spec: it must stay cheap (build_draw_state_row only) so it can run over
+    every candidate before the expensive per-candidate fingerprinting in _draw_fingerprint.
+    """
+    rd = get_renderdoc()
+    action = find_action(controller, event_id)
+    if action is None:
+        return None
+    if "Drawcall" not in expand_action_flags(rd, int(action.flags)):
+        return None
+    controller.SetFrameEvent(int(event_id), False)
+    draw_row = build_draw_state_row(controller, structured_file, event_id)
+    return draw_shape_key(draw_row)
+
+
 def _draw_fingerprint(controller: Any, structured_file: Any, event_id: int) -> dict[str, Any] | None:
     """Gather every signal needed to score one draw against another.
 
@@ -345,18 +362,24 @@ def find_corresponding_draws(
     )
     candidate_ids = candidate_ids[:limit]
 
-    fingerprints = []
+    shapes: dict[int, tuple[Any, ...]] = {}
     for eid in candidate_ids:
+        shape = _draw_shape(controller_b, structured_file_b, eid)
+        if shape is not None:
+            shapes[eid] = shape
+
+    prefiltered_ids = [eid for eid, shape in shapes.items() if shape == ref["shape_key"]]
+    shape_prefilter_applied = len(prefiltered_ids) > 0
+    pool_ids = prefiltered_ids if shape_prefilter_applied else list(shapes.keys())
+
+    fingerprints = []
+    for eid in pool_ids:
         fp = _draw_fingerprint(controller_b, structured_file_b, eid)
         if fp is not None:
             fingerprints.append(fp)
 
-    prefiltered = [fp for fp in fingerprints if fp["shape_key"] == ref["shape_key"]]
-    shape_prefilter_applied = len(prefiltered) > 0
-    pool = prefiltered if shape_prefilter_applied else fingerprints
-
     scored = []
-    for fp in pool:
+    for fp in fingerprints:
         signals = _score_pair(ref, fp)
         scored.append({
             "event_id": fp["event_id"],
@@ -369,8 +392,8 @@ def find_corresponding_draws(
 
     return {
         "reference": {"event_id": ref["event_id"], "name": ref["name"]},
-        "prefiltered_count": len(prefiltered),
-        "scored_count": len(pool),
+        "prefiltered_count": len(prefiltered_ids),
+        "scored_count": len(fingerprints),
         "shape_prefilter_applied": shape_prefilter_applied,
         "candidates": scored[: max(1, int(top_k))],
     }
