@@ -317,3 +317,40 @@ def test_fetch_postvs_indices_pads_with_none_past_available_data(monkeypatch):
     resolved = md._fetch_postvs_indices(controller=None, mesh_fmt=mesh_fmt, fetch_count=4)
 
     assert resolved == [5, 6, None, None]
+
+
+def test_fetch_postvs_indices_resolves_4byte_stride_and_restart(monkeypatch):
+    """4-byte rebased index buffers use a different struct format char ('I') and a different
+    restart sentinel (0xFFFFFFFF, not 0xFFFF) -- exercised separately from the 2-byte test above
+    since a wrong format char or restart mask here wouldn't be caught by that test."""
+    import renderdoc_mcp.mesh_decode as md
+
+    ib = struct.pack("<3I", 100, 200, 0xFFFFFFFF)
+
+    monkeypatch.setattr(md, "get_renderdoc", lambda: _RdFakeForIndices())
+    monkeypatch.setattr(md, "controller_get_buffer_data",
+                         lambda controller, rid, offset, size: ib[offset:offset + size])
+
+    mesh_fmt = _MeshFmtForIndices(index_resource_id="IB", index_byte_stride=4)
+    resolved = md._fetch_postvs_indices(controller=None, mesh_fmt=mesh_fmt, fetch_count=3)
+
+    assert resolved == [100, 200, None]
+
+
+def test_fetch_postvs_indices_resolves_1byte_stride(monkeypatch):
+    """1-byte rebased index buffers occur for VK_INDEX_TYPE_UINT8 (VK_EXT/KHR_index_type_uint8)
+    draws -- indexByteStride == 1 is a real, documented case (control_types.h's own docstring for
+    MeshFormat.indexByteStride: "Valid values are 1 (depending on API), 2 or 4."), not something
+    that can be treated as non-indexed."""
+    import renderdoc_mcp.mesh_decode as md
+
+    ib = struct.pack("<4B", 3, 1, 0xFF, 2)
+
+    monkeypatch.setattr(md, "get_renderdoc", lambda: _RdFakeForIndices())
+    monkeypatch.setattr(md, "controller_get_buffer_data",
+                         lambda controller, rid, offset, size: ib[offset:offset + size])
+
+    mesh_fmt = _MeshFmtForIndices(index_resource_id="IB", index_byte_stride=1)
+    resolved = md._fetch_postvs_indices(controller=None, mesh_fmt=mesh_fmt, fetch_count=4)
+
+    assert resolved == [3, 1, None, 2]

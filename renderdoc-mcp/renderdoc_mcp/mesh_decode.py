@@ -199,14 +199,16 @@ def _fetch_postvs_indices(controller: Any, mesh_fmt: Any, fetch_count: int) -> l
         return list(range(fetch_count))
 
     stride = int(mesh_fmt.indexByteStride)
-    if stride not in (2, 4):
+    if stride not in (1, 2, 4):
         return list(range(fetch_count))
 
     raw = controller_get_buffer_data(
         controller, mesh_fmt.indexResourceId, int(mesh_fmt.indexByteOffset), stride * fetch_count
     )
-    fmt_char = "H" if stride == 2 else "I"
-    restart = 0xFFFF if stride == 2 else 0xFFFFFFFF
+    # 1-byte indices are a real, documented case (VK_INDEX_TYPE_UINT8 /
+    # VK_EXT_index_type_uint8) -- matches fetch_indices' own "B" fallback for non-2/4 strides.
+    fmt_char = {1: "B", 2: "H", 4: "I"}[stride]
+    restart = {1: 0xFF, 2: 0xFFFF, 4: 0xFFFFFFFF}[stride]
     avail = len(raw) // stride
     n = min(avail, fetch_count)
     values = struct.unpack_from("=" + str(n) + fmt_char, raw, 0) if n else ()
