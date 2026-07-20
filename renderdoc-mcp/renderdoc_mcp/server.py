@@ -39,6 +39,7 @@ from renderdoc_mcp.mesh_decode import (
     decode_mesh_inputs as decode_mesh_inputs_core,
     decode_post_vs_outputs as decode_post_vs_outputs_core,
 )
+from renderdoc_mcp.draw_matching import find_corresponding_draws as find_corresponding_draws_core
 from renderdoc_mcp.serialize import (
     build_draw_state_row,
     normalize_bound_resources,
@@ -2396,6 +2397,49 @@ def build_mcp() -> FastMCP:
                         "pairs": pairs,
                     }
                 )
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
+    async def find_corresponding_draws(
+        capture_a: str,
+        event_id_a: int,
+        capture_b: str,
+        event_ids_b: list[int] | None = None,
+        limit: int = 200,
+        top_k: int = 5,
+    ) -> dict[str, Any]:
+        """Rank the most likely corresponding draw(s) in capture_b for one draw in capture_a.
+
+        Content-based fingerprint matching (post-VS position bounding-box shape, primary
+        render-target dimensions/content, constant-buffer values, shader output-signature/
+        constant-block name sets) -- deliberately does not compare shader bytecode/disassembly,
+        which is meaningless across different graphics APIs. Pass event_ids_b to restrict the
+        candidate pool (e.g. from a prior list_draws_with_state/list_events call); otherwise
+        every Drawcall event in capture_b is considered, up to limit. Returns up to top_k
+        candidates sorted by confidence, each with a per-signal breakdown so the result can be
+        judged rather than trusted blindly -- this is a heuristic ranking, not a guaranteed match.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                sess_a = sessions.get(capture_a)
+                sess_b = sessions.get(capture_b)
+                if sess_a is None or sess_b is None:
+                    return R.err("unknown_capture", "capture_a or capture_b invalid")
+                try:
+                    result = find_corresponding_draws_core(
+                        sess_a.controller, sess_a.structured_file, int(event_id_a),
+                        sess_b.controller, sess_b.structured_file, event_ids_b, limit, top_k,
+                    )
+                except Exception as ex:
+                    return R.err("find_corresponding_draws_failed", str(ex))
+                if isinstance(result, dict):
+                    if result.get("error"):
+                        return R.err(str(result.get("error")), str(result.get("message", result)))
+                    if result.get("ok") is False:
+                        return R.err("find_corresponding_draws_failed", str(result.get("error", "")))
+                return R.ok(result)
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
 
