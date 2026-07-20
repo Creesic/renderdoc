@@ -144,6 +144,179 @@ def decode_semantic_bytes(
     return struct.unpack_from(fmt, data, offset)
 
 
+def _write_post_vs_csv(path: str, columns: list[dict[str, Any]], rows: list[dict[str, Any]]) -> None:
+    """Write decoded post-VS/GS semantics to CSV, one numeric column per vector component.
+    POSITION additionally gets 3 NDC[0..2] columns (blank if not unprojected)."""
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        header = ["vertex_index"]
+        for col in columns:
+            comp_count = max(1, int(col["comp_count"]))
+            if comp_count == 1:
+                header.append(col["name"])
+            else:
+                header.extend("{}[{}]".format(col["name"], i) for i in range(comp_count))
+            if col["system_value"] == "Position":
+                header.extend("{}_ndc[{}]".format(col["name"], i) for i in range(3))
+        writer.writerow(header)
+
+        for row in rows:
+            csv_row: list[Any] = [row["vertex_index"]]
+            for col in columns:
+                comp_count = max(1, int(col["comp_count"]))
+                value = row["values"].get(col["name"])
+                if col["system_value"] == "Position":
+                    clip = value.get("clip") if isinstance(value, dict) else None
+                    ndc = value.get("ndc") if isinstance(value, dict) else None
+                    vals = list(clip) if clip else []
+                    vals += [""] * (comp_count - len(vals))
+                    csv_row.extend(vals[:comp_count])
+                    ndc_vals = (list(ndc) if ndc else []) + ["", "", ""]
+                    csv_row.extend(ndc_vals[:3])
+                else:
+                    vals = list(value) if isinstance(value, (list, tuple)) else []
+                    vals += [""] * (comp_count - len(vals))
+                    csv_row.extend(vals[:comp_count])
+            writer.writerow(csv_row)
+
+
+def decode_post_vs_outputs(
+    controller: Any,
+    structured_file: Any,
+    event_id: int,
+    stage: str = "vsout",
+    instance: int = 0,
+    view: int = 0,
+    preview_vertices: int = 8,
+    out_file: str | None = None,
+) -> dict[str, Any]:
+    rd = get_renderdoc()
+    draw = find_action(controller, event_id)
+    if draw is None:
+        return {"error": "event_not_found", "event_id": event_id}
+
+    flags = expand_action_flags(rd, int(draw.flags))
+    if "Drawcall" not in flags:
+        return {
+            "event_id": event_id,
+            "note": "Not a draw call; post-VS outputs undefined.",
+            "flags": flags,
+        }
+
+    stage_key = stage.strip().lower()
+    if stage_key not in ("vsout", "gsout"):
+        return {"ok": False, "error": "bad_stage",
+                "message": "stage must be 'vsout' or 'gsout'", "event_id": event_id}
+
+    pipe = controller.GetPipelineState()
+
+    if stage_key == "vsout":
+        refl = pipe.GetShaderReflection(rd.ShaderStage.Vertex)
+        mesh_stage = rd.MeshDataStage.VSOut
+    else:
+        has_geometry = pipe.GetShader(rd.ShaderStage.Geometry) != rd.ResourceId.Null()
+        has_domain = pipe.GetShader(rd.ShaderStage.Domain) != rd.ResourceId.Null()
+        resolved = select_gsout_reflection_stage(has_geometry, has_domain)
+        if resolved is None:
+            return {
+                "ok": False, "error": "no_geometry_or_tessellation_stage",
+                "message": "No Geometry or Domain (tessellation) shader is active for this draw",
+                "event_id": event_id,
+            }
+        gsout_stage = rd.ShaderStage.Geometry if resolved == "geometry" else rd.ShaderStage.Domain
+        refl = pipe.GetShaderReflection(gsout_stage)
+        mesh_stage = rd.MeshDataStage.GSOut
+
+    if refl is None:
+        return {
+            "ok": False, "error": "no_shader_reflection",
+            "message": "Could not get shader reflection for stage {}".format(stage_key),
+            "event_id": event_id,
+        }
+
+    mesh_fmt = controller.GetPostVSData(int(instance), int(view), mesh_stage)
+    if mesh_fmt.vertexResourceId == rd.ResourceId.Null():
+        return {
+            "ok": False, "error": "no_post_vs_data",
+            "message": "No post-VS data available for this draw (status: {})".format(mesh_fmt.status),
+            "event_id": event_id,
+        }
+
+    sig_params = []
+    for sig in refl.outputSignature:
+        sig_params.append({
+            "name": sig.varName if sig.varName else sig.semanticIdxName,
+            "semantic_name": sig.semanticName,
+            "semantic_index": int(sig.semanticIndex),
+            "system_value": enum_name(sig.systemValue),
+            "var_type": enum_name(sig.varType),
+            "comp_count": int(sig.compCount),
+            "stream": int(sig.stream),
+        })
+
+    aligned = bool(pipe.HasAlignedPostVSData(mesh_stage))
+    columns = build_output_column_layout(sig_params, aligned)
+    vertex_stride = sum(c["comp_count"] * c["elem_byte_width"] for c in columns)
+
+    fetch_count = min(int(mesh_fmt.numIndices), max(0, int(preview_vertices)), MAX_PREVIEW_VERTICES)
+
+    decoded_rows: list[dict[str, Any]] = []
+    for vi in range(fetch_count):
+        offset = int(mesh_fmt.vertexByteOffset) + vertex_stride * vi
+        try:
+            raw = controller_get_buffer_data(controller, mesh_fmt.vertexResourceId, offset, vertex_stride)
+        except Exception as ex:
+            decoded_rows.append({"vertex_index": vi, "values": {}, "error": str(ex)})
+            continue
+
+        values: dict[str, Any] = {}
+        for col in columns:
+            decoded = decode_semantic_bytes(
+                raw, col["byte_offset"], col["comp_type"], col["comp_count"], col["elem_byte_width"]
+            )
+            if decoded is None:
+                values[col["name"]] = None
+                continue
+            if col["system_value"] == "Position":
+                entry: dict[str, Any] = {"clip": list(decoded)}
+                if mesh_fmt.unproject:
+                    ndc = perspective_divide_position(list(decoded))
+                    if ndc is not None:
+                        entry["ndc"] = ndc
+                values[col["name"]] = entry
+            else:
+                values[col["name"]] = list(decoded)
+
+        decoded_rows.append({"vertex_index": vi, "values": values})
+
+    out: dict[str, Any] = {
+        "event_id": event_id,
+        "stage": stage_key,
+        "draw_name": draw.GetName(structured_file),
+        "semantics": [
+            {k: v for k, v in col.items() if k != "elem_byte_width"} for col in columns
+        ],
+        "vertex_count": int(mesh_fmt.numIndices),
+        "unproject": bool(mesh_fmt.unproject),
+        "flip_y": bool(mesh_fmt.flipY),
+        "near_plane": float(mesh_fmt.nearPlane),
+        "far_plane": float(mesh_fmt.farPlane),
+    }
+
+    if out_file:
+        try:
+            _write_post_vs_csv(out_file, columns, decoded_rows)
+        except OSError as ex:
+            return {"ok": False, "error": "out_file_write_failed", "message": str(ex), "event_id": event_id}
+        out["out_file"] = out_file
+        out["vertex_previews"] = decoded_rows[:8]
+        out["vertex_previews_truncated"] = len(decoded_rows) > 8
+    else:
+        out["vertex_previews"] = decoded_rows
+
+    return out
+
+
 from renderdoc_mcp.rdutil import (
     controller_get_buffer_data,
     enum_name,
