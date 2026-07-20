@@ -8,7 +8,7 @@ class D3D11_Mesh_Zoo_PostVS(rdtest.TestCase):
     demos_test_name = 'D3D11_Mesh_Zoo'
 
     def check_capture(self):
-        from renderdoc_mcp.mesh_decode import build_output_column_layout, decode_post_vs_outputs
+        from renderdoc_mcp.mesh_decode import build_output_column_layout
         from renderdoc_mcp.rdutil import enum_name
 
         action = self.find_action("Quad")
