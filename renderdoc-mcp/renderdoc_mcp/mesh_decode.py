@@ -38,6 +38,21 @@ def var_type_comp_type(var_type_name: str) -> str:
     return _VAR_TYPE_COMP_TYPE.get(var_type_name, "Typeless")
 
 
+def select_gsout_reflection_stage(has_geometry: bool, has_domain: bool) -> str | None:
+    """Which shader's reflection describes GSOut data for this draw.
+
+    Only a bound Geometry shader, or a bound Domain (tessellation-eval) shader when tessellation
+    is active with no Geometry shader, produces the final pre-rasterization output -- matches the
+    real constraint in qrenderdoc's BufferViewer.cpp:5683 ("if geometry/tessellation is enabled,
+    only the GS out stage is rasterized output"). Returns None if GSOut doesn't apply to this draw.
+    """
+    if has_geometry:
+        return "geometry"
+    if has_domain:
+        return "domain"
+    return None
+
+
 from renderdoc_mcp.rdutil import (
     controller_get_buffer_data,
     enum_name,

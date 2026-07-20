@@ -50,3 +50,22 @@ def test_var_type_comp_type_unknown_type_is_typeless():
     from renderdoc_mcp.mesh_decode import var_type_comp_type
 
     assert var_type_comp_type("Struct") == "Typeless"
+
+
+def test_select_gsout_reflection_stage_prefers_geometry():
+    from renderdoc_mcp.mesh_decode import select_gsout_reflection_stage
+
+    assert select_gsout_reflection_stage(has_geometry=True, has_domain=True) == "geometry"
+    assert select_gsout_reflection_stage(has_geometry=True, has_domain=False) == "geometry"
+
+
+def test_select_gsout_reflection_stage_falls_back_to_domain():
+    from renderdoc_mcp.mesh_decode import select_gsout_reflection_stage
+
+    assert select_gsout_reflection_stage(has_geometry=False, has_domain=True) == "domain"
+
+
+def test_select_gsout_reflection_stage_none_when_neither_bound():
+    from renderdoc_mcp.mesh_decode import select_gsout_reflection_stage
+
+    assert select_gsout_reflection_stage(has_geometry=False, has_domain=False) is None
