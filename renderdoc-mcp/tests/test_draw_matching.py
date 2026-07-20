@@ -165,3 +165,56 @@ def test_texture_signal_averages_both_halves_when_available():
     result = texture_signal((256, 256), (256, 256), [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0])
     # dimension half = 1.0, content half = 0.25 (per test above) -> average 0.625
     assert result == 0.625
+
+
+def test_constants_score_all_shared_values_match():
+    from renderdoc_mcp.draw_matching import constants_score
+
+    a = {"scale": 2.0, "offset": [1.0, 2.0, 3.0]}
+    b = {"scale": 2.0, "offset": [1.0, 2.0, 3.0]}
+    assert constants_score(a, b) == 1.0
+
+
+def test_constants_score_partial_match():
+    from renderdoc_mcp.draw_matching import constants_score
+
+    a = {"scale": 2.0, "offset": 5.0}
+    b = {"scale": 2.0, "offset": 999.0}
+    assert constants_score(a, b) == 0.5
+
+
+def test_constants_score_neutral_when_no_shared_names():
+    from renderdoc_mcp.draw_matching import constants_score
+
+    assert constants_score({"a": 1.0}, {"b": 2.0}) == 0.5
+    assert constants_score({}, {}) == 0.5
+
+
+def test_constants_score_respects_tolerance():
+    from renderdoc_mcp.draw_matching import constants_score
+
+    a = {"x": 1.0}
+    b = {"x": 1.0000001}
+    assert constants_score(a, b, abs_tolerance=1e-6, rel_tolerance=1e-5) == 1.0
+
+    b_far = {"x": 1.1}
+    assert constants_score(a, b_far, abs_tolerance=1e-6, rel_tolerance=1e-5) == 0.0
+
+
+def test_constants_score_handles_matrix_values():
+    from renderdoc_mcp.draw_matching import constants_score
+
+    a = {"mvp": [[1.0, 0.0], [0.0, 1.0]]}
+    b = {"mvp": [[1.0, 0.0], [0.0, 1.0]]}
+    assert constants_score(a, b) == 1.0
+
+    b_diff = {"mvp": [[1.0, 0.0], [0.0, 2.0]]}
+    assert constants_score(a, b_diff) == 0.0
+
+
+def test_constants_score_only_counts_names_present_in_both():
+    from renderdoc_mcp.draw_matching import constants_score
+
+    a = {"shared": 1.0, "only_in_a": 2.0}
+    b = {"shared": 1.0, "only_in_b": 3.0}
+    assert constants_score(a, b) == 1.0

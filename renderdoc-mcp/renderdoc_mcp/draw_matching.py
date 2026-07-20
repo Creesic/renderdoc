@@ -113,3 +113,36 @@ def texture_signal(
     if content_score is None:
         return dim_score
     return (dim_score + content_score) / 2.0
+
+
+def _scalar_close(a: Any, b: Any, abs_tolerance: float, rel_tolerance: float) -> bool:
+    """Numeric/list/list-of-list closeness check for cbuffer.decode_cb_bytes' value shapes
+    (scalar, flat list, or nested list for matrices) -- deliberately narrower than
+    shader_debug._values_equal, which also handles dict-shaped values this module never sees."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return math.isclose(float(a), float(b), abs_tol=abs_tolerance, rel_tol=rel_tolerance)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(
+            _scalar_close(av, bv, abs_tolerance, rel_tolerance) for av, bv in zip(a, b)
+        )
+    return a == b
+
+
+def constants_score(
+    values_a: dict[str, Any],
+    values_b: dict[str, Any],
+    abs_tolerance: float = 1e-6,
+    rel_tolerance: float = 1e-5,
+) -> float:
+    """Fraction of name-matched constants (present in both draws) that agree within tolerance.
+    Neutral (0.5) if no names are shared -- no evidence either way shouldn't swing the score."""
+    shared = set(values_a) & set(values_b)
+    if not shared:
+        return 0.5
+    matches = sum(
+        1 for name in shared
+        if _scalar_close(values_a[name], values_b[name], abs_tolerance, rel_tolerance)
+    )
+    return matches / len(shared)
