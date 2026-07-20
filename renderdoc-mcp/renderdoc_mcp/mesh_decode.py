@@ -256,7 +256,12 @@ def decode_post_vs_outputs(
 
     aligned = bool(pipe.HasAlignedPostVSData(mesh_stage))
     columns = build_output_column_layout(sig_params, aligned)
-    vertex_stride = sum(c["comp_count"] * c["elem_byte_width"] for c in columns)
+    # GetPostVSData's own vertexByteStride is the authoritative per-vertex record size in the
+    # physical buffer -- on Vulkan's aligned path the driver pads the *whole* per-vertex struct up
+    # to a 16-byte boundary (vk_postvs.cpp's AlignUp16(memberOffset)), which can exceed the sum of
+    # the individual decoded field sizes. Using a recomputed sum here instead of this driver value
+    # would silently misalign every vertex from index 1 onward.
+    vertex_stride = int(mesh_fmt.vertexByteStride)
 
     fetch_count = min(int(mesh_fmt.numIndices), max(0, int(preview_vertices)), MAX_PREVIEW_VERTICES)
 
