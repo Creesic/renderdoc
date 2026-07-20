@@ -286,7 +286,10 @@ def serialize_vertex_inputs(pipe: Any, controller: Any) -> dict[str, Any]:
     vbs = _try(lambda: pipe.GetVBuffers(), [])
     attrs = _try(lambda: pipe.GetVertexInputs(), [])
     data: dict[str, Any] = {}
-    if ib is not None:
+    # GetIBuffer() always returns a BoundVBuffer struct, never Python None -- non-indexed draws
+    # get one with resourceId == ResourceId::Null(), so presence must be checked via the
+    # resource id, not an `is not None` check that's always true.
+    if ib is not None and rid_str(ib.resourceId) not in ("", "Null"):
         ibd: dict[str, Any] = {
             "byte_offset": int(ib.byteOffset),
             "byte_stride": int(ib.byteStride),
@@ -321,7 +324,7 @@ def serialize_vertex_inputs(pipe: Any, controller: Any) -> dict[str, Any]:
             attr_row["format_compcount"] = int(getattr(fmt, "compCount", 0) or 0)
             attr_row["format_bytewidth"] = int(getattr(fmt, "compByteWidth", 0) or 0)
         data["attributes"].append(attr_row)
-    topo = _try(lambda: pipe.GetTopology())
+    topo = _try(lambda: pipe.GetPrimitiveTopology())
     data["topology"] = enum_name(topo) if topo is not None else None
     return data
 
@@ -534,7 +537,7 @@ def build_draw_state_row(controller: Any, structured_file: Any, event_id: int) -
 
     vi = serialize_vertex_inputs(pipe, controller)
     targets = serialize_graphics_targets(pipe, controller)
-    topo = _try(lambda: pipe.GetTopology())
+    topo = _try(lambda: pipe.GetPrimitiveTopology())
 
     shaders: dict[str, Any] = {}
     for st in collect_shader_stages(rd):
