@@ -436,6 +436,29 @@ def classify_producer_action(flags_names: list[str]) -> str:
     return "unsupported"
 
 
+_PROVENANCE_FAILURE_FIELDS = (
+    "depth_test_failed",
+    "backface_culled",
+    "clipped",
+    "stencil_test_failed",
+    "predicate_failed",
+)
+
+
+def select_provenance_producer(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the PixelHistory entry that established the currently-visible value.
+
+    Walks backward through normalize_pixel_history()'s entries and returns the last one where
+    none of the failure/cull reasons are set -- i.e. the fragment (or clear/resolve/copy write)
+    that actually reached the target. Returns None if every entry failed (nothing visible was
+    ever established at this point in the chain).
+    """
+    for entry in reversed(entries):
+        if not any(entry.get(field) for field in _PROVENANCE_FAILURE_FIELDS):
+            return entry
+    return None
+
+
 def _summarize_pixel_value_union(pv: Any) -> dict[str, Any]:
     """PixelValue is a C++ union exposed as floatValue / uintValue / intValue (not .value)."""
     if pv is None:
