@@ -10,6 +10,34 @@ from typing import Any
 # of what preview_vertices requests (each vertex does one GetBufferData call per attribute).
 MAX_PREVIEW_VERTICES = 8192
 
+# VarType -> byte size / CompType, replicated from renderdoc/api/replay/replay_enums.h's
+# VarTypeByteSize()/VarTypeCompType() constexpr functions (304-414) -- these are free functions,
+# not virtual interface methods, so there's no confirmed SWIG binding to call into instead.
+_VAR_TYPE_BYTE_SIZE = {
+    "UByte": 1, "SByte": 1,
+    "Half": 2, "UShort": 2, "SShort": 2,
+    "Float": 4, "UInt": 4, "SInt": 4, "Bool": 4, "Enum": 4,
+    "Double": 8, "ULong": 8, "SLong": 8, "GPUPointer": 8,
+}
+
+_VAR_TYPE_COMP_TYPE = {
+    "Float": "Float", "Double": "Float", "Half": "Float",
+    "UInt": "UInt", "ULong": "UInt", "UShort": "UInt", "UByte": "UInt", "Bool": "UInt",
+    "Enum": "UInt", "GPUPointer": "UInt",
+    "SInt": "SInt", "SLong": "SInt", "SShort": "SInt", "SByte": "SInt",
+}
+
+
+def var_type_byte_size(var_type_name: str) -> int:
+    """Byte size of a VarType; 0 for types with no fixed scalar size (Struct, Unknown, etc.)."""
+    return _VAR_TYPE_BYTE_SIZE.get(var_type_name, 0)
+
+
+def var_type_comp_type(var_type_name: str) -> str:
+    """Component type ('Float'/'UInt'/'SInt') of a VarType; 'Typeless' if not one of those."""
+    return _VAR_TYPE_COMP_TYPE.get(var_type_name, "Typeless")
+
+
 from renderdoc_mcp.rdutil import (
     controller_get_buffer_data,
     enum_name,
