@@ -218,3 +218,33 @@ def test_constants_score_only_counts_names_present_in_both():
     a = {"shared": 1.0, "only_in_a": 2.0}
     b = {"shared": 1.0, "only_in_b": 3.0}
     assert constants_score(a, b) == 1.0
+
+
+def test_combine_signals_all_ones_is_one():
+    from renderdoc_mcp.draw_matching import combine_signals
+
+    assert combine_signals(1.0, 1.0, 1.0, 1.0) == 1.0
+
+
+def test_combine_signals_all_zeros_is_zero():
+    from renderdoc_mcp.draw_matching import combine_signals
+
+    assert combine_signals(0.0, 0.0, 0.0, 0.0) == 0.0
+
+
+def test_combine_signals_uses_documented_weights():
+    """Locks in the exact weights the spec commits to: geometry=0.4, texture=0.25,
+    constants=0.2, shader_shape=0.15."""
+    from renderdoc_mcp.draw_matching import combine_signals
+
+    result = combine_signals(geometry=1.0, texture=0.0, constants=0.0, shader_shape=0.0)
+    assert result == 0.4
+
+    result = combine_signals(geometry=0.0, texture=1.0, constants=0.0, shader_shape=0.0)
+    assert result == 0.25
+
+    result = combine_signals(geometry=0.0, texture=0.0, constants=1.0, shader_shape=0.0)
+    assert result == 0.2
+
+    result = combine_signals(geometry=0.0, texture=0.0, constants=0.0, shader_shape=1.0)
+    assert result == 0.15

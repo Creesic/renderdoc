@@ -146,3 +146,16 @@ def constants_score(
         if _scalar_close(values_a[name], values_b[name], abs_tolerance, rel_tolerance)
     )
     return matches / len(shared)
+
+
+_SIGNAL_WEIGHTS = {"geometry": 0.4, "texture": 0.25, "constants": 0.2, "shader_shape": 0.15}
+
+
+def combine_signals(geometry: float, texture: float, constants: float, shader_shape: float) -> float:
+    """Weighted confidence score: geometry 0.4, texture 0.25, constants 0.2, shader_shape 0.15."""
+    return (
+        _SIGNAL_WEIGHTS["geometry"] * geometry
+        + _SIGNAL_WEIGHTS["texture"] * texture
+        + _SIGNAL_WEIGHTS["constants"] * constants
+        + _SIGNAL_WEIGHTS["shader_shape"] * shader_shape
+    )
