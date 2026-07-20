@@ -155,6 +155,7 @@ python scripts/smoke_import.py
 - **`diff_shader_invocations`** aligns matching disassembly text when available, otherwise it falls
   back to execution position. Cross-API shaders compiled to substantially different instruction
   streams may therefore need manual interpretation even though input/constant/output diffs remain useful.
+- Replay APIs must run serialized; the server uses a lock around all tools.
 - **`trace_pixel_provenance`** only crosses a Copy/Resolve hop when the source and destination
   dimensions match at their respective mips (renderdoc's `ActionDescription` doesn't expose a
   sub-rectangle offset, so a partial-rect copy/blit can't be safely assumed aligned) -- it stops
@@ -162,7 +163,6 @@ python scripts/smoke_import.py
   `copySourceSubresource.sample` isn't a single meaningful sample (all samples combine into the
   destination pixel), so the walk falls back to `sample_index=0` when continuing into a resolve
   source rather than fanning out into every sample.
-- Replay APIs must run serialized; the server uses a lock around all tools.
 
 ## License
 
