@@ -107,3 +107,40 @@ def test_select_provenance_producer_returns_none_for_empty_entries():
     from renderdoc_mcp.analysis import select_provenance_producer
 
     assert select_provenance_producer([]) is None
+
+
+def test_mip_dims_at_base_mip_is_unchanged():
+    from renderdoc_mcp.analysis import mip_dims
+
+    assert mip_dims(1920, 1080, 0) == (1920, 1080)
+
+
+def test_mip_dims_halves_per_mip_level():
+    from renderdoc_mcp.analysis import mip_dims
+
+    assert mip_dims(1920, 1080, 1) == (960, 540)
+    assert mip_dims(1920, 1080, 2) == (480, 270)
+
+
+def test_mip_dims_floors_at_one_pixel():
+    from renderdoc_mcp.analysis import mip_dims
+
+    assert mip_dims(4, 4, 10) == (1, 1)
+
+
+def test_copy_hop_is_safe_when_dims_match():
+    from renderdoc_mcp.analysis import copy_hop_is_safe
+
+    assert copy_hop_is_safe((1920, 1080), (1920, 1080)) is True
+
+
+def test_copy_hop_is_safe_false_on_width_mismatch():
+    from renderdoc_mcp.analysis import copy_hop_is_safe
+
+    assert copy_hop_is_safe((1920, 1080), (960, 1080)) is False
+
+
+def test_copy_hop_is_safe_false_on_height_mismatch():
+    from renderdoc_mcp.analysis import copy_hop_is_safe
+
+    assert copy_hop_is_safe((1920, 1080), (1920, 540)) is False

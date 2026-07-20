@@ -459,6 +459,22 @@ def select_provenance_producer(entries: list[dict[str, Any]]) -> dict[str, Any] 
     return None
 
 
+def mip_dims(base_width: int, base_height: int, mip: int) -> tuple[int, int]:
+    """Standard mip-chain size falloff: half per level, floored at 1 pixel."""
+    return (max(1, int(base_width) >> int(mip)), max(1, int(base_height) >> int(mip)))
+
+
+def copy_hop_is_safe(dest_dims: tuple[int, int], source_dims: tuple[int, int]) -> bool:
+    """Whether a Copy/Resolve hop's (x, y) can be safely reused on the source resource.
+
+    renderdoc::ActionDescription only exposes source/destination resource + subresource for a
+    copy, not a sub-rectangle offset -- so a partial-rect copy (source/dest dimensions differing
+    at their respective mips) can't be safely assumed aligned. Full-surface copies/resolves
+    (the common case for resolve targets and post-process ping-pong buffers) have matching dims.
+    """
+    return tuple(dest_dims) == tuple(source_dims)
+
+
 def _summarize_pixel_value_union(pv: Any) -> dict[str, Any]:
     """PixelValue is a C++ union exposed as floatValue / uintValue / intValue (not .value)."""
     if pv is None:
