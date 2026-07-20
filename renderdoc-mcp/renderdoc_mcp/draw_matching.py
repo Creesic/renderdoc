@@ -77,3 +77,39 @@ def bbox_ratio_similarity(
     ratio_b = normalize(extents_b)
     l1 = sum(abs(a - b) for a, b in zip(ratio_a, ratio_b))
     return 1.0 - min(1.0, l1 / 2.0)
+
+
+def texture_dimension_score(dims_a: tuple[int, int] | None, dims_b: tuple[int, int] | None) -> float:
+    """1.0 if both draws lack a color target (nothing to disagree on), 0.0 if only one has one,
+    1.0 if both have one with identical (width, height), else 0.5 (both present, differ)."""
+    if dims_a is None and dims_b is None:
+        return 1.0
+    if dims_a is None or dims_b is None:
+        return 0.0
+    return 1.0 if tuple(dims_a) == tuple(dims_b) else 0.5
+
+
+def texture_content_score(mean_a: list[float] | None, mean_b: list[float] | None) -> float | None:
+    """1 - mean-abs-difference across channels; None (skip) if either side has no content stat."""
+    if mean_a is None or mean_b is None:
+        return None
+    n = min(len(mean_a), len(mean_b))
+    if n == 0:
+        return None
+    avg_diff = sum(abs(float(mean_a[i]) - float(mean_b[i])) for i in range(n)) / n
+    return 1.0 - min(1.0, avg_diff)
+
+
+def texture_signal(
+    dims_a: tuple[int, int] | None,
+    dims_b: tuple[int, int] | None,
+    mean_a: list[float] | None,
+    mean_b: list[float] | None,
+) -> float:
+    """Combines dimension-match and content-stat halves. If the content stat is unavailable for
+    either side, dimension-match alone is used (not averaged with a fabricated 0)."""
+    dim_score = texture_dimension_score(dims_a, dims_b)
+    content_score = texture_content_score(mean_a, mean_b)
+    if content_score is None:
+        return dim_score
+    return (dim_score + content_score) / 2.0

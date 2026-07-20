@@ -105,3 +105,63 @@ def test_bbox_ratio_similarity_handles_degenerate_zero_extent():
 
     result = bbox_ratio_similarity((2.0, 4.0, 0.0), (2.0, 4.0, 0.0))
     assert result == 1.0
+
+
+def test_texture_dimension_score_both_absent_is_one():
+    from renderdoc_mcp.draw_matching import texture_dimension_score
+
+    assert texture_dimension_score(None, None) == 1.0
+
+
+def test_texture_dimension_score_one_absent_is_zero():
+    from renderdoc_mcp.draw_matching import texture_dimension_score
+
+    assert texture_dimension_score((256, 256), None) == 0.0
+    assert texture_dimension_score(None, (256, 256)) == 0.0
+
+
+def test_texture_dimension_score_matching_dims_is_one():
+    from renderdoc_mcp.draw_matching import texture_dimension_score
+
+    assert texture_dimension_score((256, 256), (256, 256)) == 1.0
+
+
+def test_texture_dimension_score_differing_dims_is_half():
+    from renderdoc_mcp.draw_matching import texture_dimension_score
+
+    assert texture_dimension_score((256, 256), (512, 512)) == 0.5
+
+
+def test_texture_content_score_none_when_either_missing():
+    from renderdoc_mcp.draw_matching import texture_content_score
+
+    assert texture_content_score(None, [0.1, 0.2, 0.3, 1.0]) is None
+    assert texture_content_score([0.1, 0.2, 0.3, 1.0], None) is None
+
+
+def test_texture_content_score_identical_means_is_one():
+    from renderdoc_mcp.draw_matching import texture_content_score
+
+    assert texture_content_score([0.1, 0.2, 0.3, 1.0], [0.1, 0.2, 0.3, 1.0]) == 1.0
+
+
+def test_texture_content_score_degrades_with_difference():
+    from renderdoc_mcp.draw_matching import texture_content_score
+
+    result = texture_content_score([0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0])
+    assert result == 0.25  # mean_abs_diff = (1+1+1+0)/4 = 0.75 -> 1 - 0.75
+
+
+def test_texture_signal_uses_dimension_score_alone_when_content_unavailable():
+    from renderdoc_mcp.draw_matching import texture_signal
+
+    assert texture_signal((256, 256), (256, 256), None, None) == 1.0
+    assert texture_signal((256, 256), (512, 512), None, None) == 0.5
+
+
+def test_texture_signal_averages_both_halves_when_available():
+    from renderdoc_mcp.draw_matching import texture_signal
+
+    result = texture_signal((256, 256), (256, 256), [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0])
+    # dimension half = 1.0, content half = 0.25 (per test above) -> average 0.625
+    assert result == 0.625
