@@ -121,6 +121,25 @@ def test_build_output_column_layout_pads_for_alignment():
     assert columns[2]["byte_offset"] == 32
 
 
+def test_build_output_column_layout_aligns_single_component_scalar():
+    """Matches util/test/rdtest/analyse.py:220-226's own alignment table: comp_count == 1 uses
+    `alignment = elem_size` (not just comp_count 2/3-4), so an 8-byte scalar (Double/ULong/SLong/
+    GPUPointer) following an odd-offset preceding field must still be padded up to an 8-byte
+    boundary on the aligned (Vulkan) path."""
+    from renderdoc_mcp.mesh_decode import build_output_column_layout
+
+    sigs = [
+        _sig("f0", semantic_name="FLOAT0", var_type="Float", comp_count=1),
+        _sig("d0", semantic_name="DOUBLE0", var_type="Double", comp_count=1),
+    ]
+
+    columns = build_output_column_layout(sigs, aligned=True)
+
+    assert columns[0]["byte_offset"] == 0
+    # f0 ends at byte 4 (odd relative to the 8-byte alignment d0 needs); d0 must be padded to 8.
+    assert columns[1]["byte_offset"] == 8
+
+
 def test_build_output_column_layout_moves_position_to_front():
     from renderdoc_mcp.mesh_decode import build_output_column_layout
 
@@ -235,3 +254,66 @@ def test_decode_semantic_bytes_none_for_typeless():
 
     data = struct.pack("=4f", 1.0, 2.0, 3.0, 4.0)
     assert decode_semantic_bytes(data, 0, "Typeless", 4, 4) is None
+
+
+class _RdFakeForIndices:
+    class ResourceId:
+        @staticmethod
+        def Null():
+            return "NULL"
+
+
+class _MeshFmtForIndices:
+    def __init__(self, index_resource_id, index_byte_stride, index_byte_offset=0):
+        self.indexResourceId = index_resource_id
+        self.indexByteStride = index_byte_stride
+        self.indexByteOffset = index_byte_offset
+
+
+def test_fetch_postvs_indices_non_indexed_is_plain_range(monkeypatch):
+    """No rebased index buffer (non-indexed draw) -> primitive order already equals vertex-buffer
+    order, so the sequential range must pass through unchanged."""
+    import renderdoc_mcp.mesh_decode as md
+
+    monkeypatch.setattr(md, "get_renderdoc", lambda: _RdFakeForIndices())
+
+    mesh_fmt = _MeshFmtForIndices(index_resource_id="NULL", index_byte_stride=0)
+    assert md._fetch_postvs_indices(controller=None, mesh_fmt=mesh_fmt, fetch_count=4) == [0, 1, 2, 3]
+
+
+def test_fetch_postvs_indices_indexed_resolves_out_of_order_and_restart(monkeypatch):
+    """This is the exact bug the Critical finding covers: for an indexed draw, GetPostVSData
+    stream-outs only unique vertices and provides a rebased index buffer mapping primitive order
+    to that compact vertex buffer. A quad's rebased indices (2 triangles sharing 4 unique verts)
+    read out of the storage order (2, 0, 1, 3, ...) -- a linear vi walk would silently read the
+    wrong vertex for every row after the first. Also confirms a restart marker resolves to None."""
+    import renderdoc_mcp.mesh_decode as md
+
+    # 16-bit rebased index buffer: 2, 0, 1, 3, restart(0xFFFF)
+    ib = struct.pack("<5H", 2, 0, 1, 3, 0xFFFF)
+
+    monkeypatch.setattr(md, "get_renderdoc", lambda: _RdFakeForIndices())
+    monkeypatch.setattr(md, "controller_get_buffer_data",
+                         lambda controller, rid, offset, size: ib[offset:offset + size])
+
+    mesh_fmt = _MeshFmtForIndices(index_resource_id="IB", index_byte_stride=2)
+    resolved = md._fetch_postvs_indices(controller=None, mesh_fmt=mesh_fmt, fetch_count=5)
+
+    assert resolved == [2, 0, 1, 3, None]
+
+
+def test_fetch_postvs_indices_pads_with_none_past_available_data(monkeypatch):
+    """fetch_count beyond what the index buffer actually contains must not raise or fabricate
+    vertex slots -- matches fetch_indices' own short-read handling for input-side indices."""
+    import renderdoc_mcp.mesh_decode as md
+
+    ib = struct.pack("<2H", 5, 6)
+
+    monkeypatch.setattr(md, "get_renderdoc", lambda: _RdFakeForIndices())
+    monkeypatch.setattr(md, "controller_get_buffer_data",
+                         lambda controller, rid, offset, size: ib[offset:offset + size])
+
+    mesh_fmt = _MeshFmtForIndices(index_resource_id="IB", index_byte_stride=2)
+    resolved = md._fetch_postvs_indices(controller=None, mesh_fmt=mesh_fmt, fetch_count=4)
+
+    assert resolved == [5, 6, None, None]

@@ -65,9 +65,9 @@ def build_output_column_layout(
     Replicates qrenderdoc/Windows/BufferViewer.cpp:1665-1759's ConfigureColumnsForShader: filter
     to one output stream, skip the OutputIndices system value, move the POSITION-tagged parameter
     to the front (keeping the rest in original order), then pack fields tightly -- except when
-    `aligned` is True (Vulkan VSOut only, via PipeState.HasAlignedPostVSData), where 2-component
-    fields align to a 2x-element boundary and 3-/4-component fields align to a 4x-element
-    boundary.
+    `aligned` is True (Vulkan VSOut only, via PipeState.HasAlignedPostVSData), where 1-component
+    fields align to their own element size, 2-component fields align to a 2x-element boundary,
+    and 3-/4-component fields align to a 4x-element boundary.
     """
     columns: list[dict[str, Any]] = []
     for sig in sig_params:
@@ -98,7 +98,9 @@ def build_output_column_layout(
         num_comps = col["comp_count"]
         elem_size = col["elem_byte_width"]
         if aligned:
-            if num_comps == 2:
+            if num_comps == 1:
+                offset = _align_up(offset, elem_size)
+            elif num_comps == 2:
                 offset = _align_up(offset, 2 * elem_size)
             elif num_comps > 2:
                 offset = _align_up(offset, 4 * elem_size)
@@ -178,6 +180,39 @@ def _write_post_vs_csv(path: str, columns: list[dict[str, Any]], rows: list[dict
                     vals += [""] * (comp_count - len(vals))
                     csv_row.extend(vals[:comp_count])
             writer.writerow(csv_row)
+
+
+def _fetch_postvs_indices(controller: Any, mesh_fmt: Any, fetch_count: int) -> list[int | None]:
+    """Resolve up to fetch_count post-VS/GS vertex-buffer slots in primitive order.
+
+    GetPostVSData streams out only the unique vertices referenced by an indexed draw and
+    provides a rebased index buffer (mesh_fmt.indexResourceId) mapping primitive order to that
+    compact vertex buffer -- baseVertex/indexByteOffset are always 0 for post-VS's own rebased
+    buffer (confirmed in GetPostVSBuffers' D3D11/Vulkan implementations), so raw index values are
+    used as-is. Non-indexed draws have no separate index buffer; primitive order already equals
+    vertex-buffer order directly, so a plain sequential range is returned unchanged.
+    A resolved value of None means this row is a primitive-restart marker preserved verbatim in
+    the rebased index buffer, not a real vertex -- skip it rather than decoding garbage.
+    """
+    rd = get_renderdoc()
+    if mesh_fmt.indexResourceId == rd.ResourceId.Null():
+        return list(range(fetch_count))
+
+    stride = int(mesh_fmt.indexByteStride)
+    if stride not in (2, 4):
+        return list(range(fetch_count))
+
+    raw = controller_get_buffer_data(
+        controller, mesh_fmt.indexResourceId, int(mesh_fmt.indexByteOffset), stride * fetch_count
+    )
+    fmt_char = "H" if stride == 2 else "I"
+    restart = 0xFFFF if stride == 2 else 0xFFFFFFFF
+    avail = len(raw) // stride
+    n = min(avail, fetch_count)
+    values = struct.unpack_from("=" + str(n) + fmt_char, raw, 0) if n else ()
+    resolved: list[int | None] = [None if v == restart else int(v) for v in values]
+    resolved += [None] * (fetch_count - len(resolved))
+    return resolved
 
 
 def decode_post_vs_outputs(
@@ -265,13 +300,19 @@ def decode_post_vs_outputs(
 
     fetch_count = min(int(mesh_fmt.numIndices), max(0, int(preview_vertices)), MAX_PREVIEW_VERTICES)
 
+    resolved_indices = _fetch_postvs_indices(controller, mesh_fmt, fetch_count)
+
     decoded_rows: list[dict[str, Any]] = []
-    for vi in range(fetch_count):
-        offset = int(mesh_fmt.vertexByteOffset) + vertex_stride * vi
+    for vi, idx in enumerate(resolved_indices):
+        if idx is None:
+            decoded_rows.append({"vertex_index": vi, "index": None, "values": {}, "restart": True})
+            continue
+
+        offset = int(mesh_fmt.vertexByteOffset) + vertex_stride * idx
         try:
             raw = controller_get_buffer_data(controller, mesh_fmt.vertexResourceId, offset, vertex_stride)
         except Exception as ex:
-            decoded_rows.append({"vertex_index": vi, "values": {}, "error": str(ex)})
+            decoded_rows.append({"vertex_index": vi, "index": idx, "values": {}, "error": str(ex)})
             continue
 
         values: dict[str, Any] = {}
@@ -292,7 +333,7 @@ def decode_post_vs_outputs(
             else:
                 values[col["name"]] = list(decoded)
 
-        decoded_rows.append({"vertex_index": vi, "values": values})
+        decoded_rows.append({"vertex_index": vi, "index": idx, "values": values})
 
     out: dict[str, Any] = {
         "event_id": event_id,
