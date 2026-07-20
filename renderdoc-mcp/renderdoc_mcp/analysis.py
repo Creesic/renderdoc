@@ -416,6 +416,26 @@ def normalize_pixel_history(hist: Any) -> dict[str, Any]:
     return {"entries": entries, "hypotheses": hypotheses, "count": len(entries)}
 
 
+def classify_producer_action(flags_names: list[str]) -> str:
+    """Classify a PixelHistory producer event's ActionFlags for provenance-hop routing.
+
+    Checked in this priority order because a single action can carry multiple flags (e.g. a
+    clear-via-draw carries both Clear and Drawcall) -- Clear must win so the chain stops at the
+    clear instead of treating it as a shaded draw. renderdoc::ActionFlags has no separate "blit"
+    flag; blit-like copies are flagged Copy, same as same-format copies.
+    """
+    names = set(flags_names or [])
+    if "Clear" in names:
+        return "clear"
+    if "Resolve" in names:
+        return "resolve"
+    if "Copy" in names:
+        return "copy"
+    if "Drawcall" in names:
+        return "draw"
+    return "unsupported"
+
+
 def _summarize_pixel_value_union(pv: Any) -> dict[str, Any]:
     """PixelValue is a C++ union exposed as floatValue / uintValue / intValue (not .value)."""
     if pv is None:
