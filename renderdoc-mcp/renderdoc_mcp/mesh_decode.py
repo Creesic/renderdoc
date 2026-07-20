@@ -53,6 +53,61 @@ def select_gsout_reflection_stage(has_geometry: bool, has_domain: bool) -> str |
     return None
 
 
+def _align_up(value: int, alignment: int) -> int:
+    return (value + alignment - 1) // alignment * alignment
+
+
+def build_output_column_layout(
+    sig_params: list[dict[str, Any]], aligned: bool, stream: int = 0
+) -> list[dict[str, Any]]:
+    """Compute each output semantic's byte offset within one post-VS/GS vertex.
+
+    Replicates qrenderdoc/Windows/BufferViewer.cpp:1665-1759's ConfigureColumnsForShader: filter
+    to one output stream, skip the OutputIndices system value, move the POSITION-tagged parameter
+    to the front (keeping the rest in original order), then pack fields tightly -- except when
+    `aligned` is True (Vulkan VSOut only, via PipeState.HasAlignedPostVSData), where 2-component
+    fields align to a 2x-element boundary and 3-/4-component fields align to a 4x-element
+    boundary.
+    """
+    columns: list[dict[str, Any]] = []
+    for sig in sig_params:
+        if int(sig.get("stream", 0)) != stream:
+            continue
+        if sig.get("system_value") == "OutputIndices":
+            continue
+
+        var_type = sig.get("var_type", "Float")
+        elem_byte_width = 8 if var_type_byte_size(var_type) > 4 else 4
+        columns.append({
+            "name": sig.get("name", ""),
+            "semantic_name": sig.get("semantic_name", ""),
+            "semantic_index": int(sig.get("semantic_index", 0)),
+            "system_value": sig.get("system_value", "Undefined"),
+            "comp_type": var_type_comp_type(var_type),
+            "comp_count": int(sig.get("comp_count", 1)),
+            "elem_byte_width": elem_byte_width,
+            "byte_offset": 0,
+        })
+
+    posidx = next((i for i, c in enumerate(columns) if c["system_value"] == "Position"), -1)
+    if posidx > 0:
+        columns.insert(0, columns.pop(posidx))
+
+    offset = 0
+    for col in columns:
+        num_comps = col["comp_count"]
+        elem_size = col["elem_byte_width"]
+        if aligned:
+            if num_comps == 2:
+                offset = _align_up(offset, 2 * elem_size)
+            elif num_comps > 2:
+                offset = _align_up(offset, 4 * elem_size)
+        col["byte_offset"] = offset
+        offset += num_comps * elem_size
+
+    return columns
+
+
 from renderdoc_mcp.rdutil import (
     controller_get_buffer_data,
     enum_name,

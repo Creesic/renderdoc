@@ -69,3 +69,107 @@ def test_select_gsout_reflection_stage_none_when_neither_bound():
     from renderdoc_mcp.mesh_decode import select_gsout_reflection_stage
 
     assert select_gsout_reflection_stage(has_geometry=False, has_domain=False) is None
+
+
+def _sig(name, semantic_name="", semantic_index=0, system_value="Undefined",
+         var_type="Float", comp_count=4, stream=0):
+    return {
+        "name": name,
+        "semantic_name": semantic_name,
+        "semantic_index": semantic_index,
+        "system_value": system_value,
+        "var_type": var_type,
+        "comp_count": comp_count,
+        "stream": stream,
+    }
+
+
+def test_build_output_column_layout_packs_tightly_when_not_aligned():
+    from renderdoc_mcp.mesh_decode import build_output_column_layout
+
+    sigs = [
+        _sig("pos", system_value="Position", comp_count=4),
+        _sig("col2", semantic_name="COLOR", semantic_index=0, comp_count=2),
+        _sig("col", semantic_name="COLOR", semantic_index=1, comp_count=4),
+    ]
+
+    columns = build_output_column_layout(sigs, aligned=False)
+
+    assert [c["name"] for c in columns] == ["pos", "col2", "col"]
+    assert columns[0]["byte_offset"] == 0
+    assert columns[1]["byte_offset"] == 16
+    assert columns[2]["byte_offset"] == 24
+
+
+def test_build_output_column_layout_pads_for_alignment():
+    """Matches util/test/rdtest/shared/Mesh_Zoo.py's own manual offset math exactly: after a
+    float2 (8 bytes) at offset 16, a following float4 needs +8 padding when aligned (24 -> 32)."""
+    from renderdoc_mcp.mesh_decode import build_output_column_layout
+
+    sigs = [
+        _sig("pos", system_value="Position", comp_count=4),
+        _sig("col2", semantic_name="COLOR", semantic_index=0, comp_count=2),
+        _sig("col", semantic_name="COLOR", semantic_index=1, comp_count=4),
+    ]
+
+    columns = build_output_column_layout(sigs, aligned=True)
+
+    assert columns[0]["byte_offset"] == 0
+    assert columns[1]["byte_offset"] == 16
+    assert columns[2]["byte_offset"] == 32
+
+
+def test_build_output_column_layout_moves_position_to_front():
+    from renderdoc_mcp.mesh_decode import build_output_column_layout
+
+    sigs = [
+        _sig("col", semantic_name="COLOR", comp_count=4),
+        _sig("pos", system_value="Position", comp_count=4),
+    ]
+
+    columns = build_output_column_layout(sigs, aligned=False)
+
+    assert [c["name"] for c in columns] == ["pos", "col"]
+    assert columns[0]["byte_offset"] == 0
+    assert columns[1]["byte_offset"] == 16
+
+
+def test_build_output_column_layout_skips_output_indices_and_other_streams():
+    from renderdoc_mcp.mesh_decode import build_output_column_layout
+
+    sigs = [
+        _sig("pos", system_value="Position", comp_count=4),
+        _sig("indices", system_value="OutputIndices", comp_count=1),
+        _sig("other_stream_col", semantic_name="COLOR", comp_count=4, stream=1),
+    ]
+
+    columns = build_output_column_layout(sigs, aligned=False, stream=0)
+
+    assert [c["name"] for c in columns] == ["pos"]
+
+
+def test_build_output_column_layout_uses_eight_byte_elements_for_wide_types():
+    from renderdoc_mcp.mesh_decode import build_output_column_layout
+
+    sigs = [
+        _sig("d", semantic_name="DOUBLE0", var_type="Double", comp_count=1),
+        _sig("f", semantic_name="FLOAT0", var_type="Float", comp_count=1),
+    ]
+
+    columns = build_output_column_layout(sigs, aligned=False)
+
+    assert columns[0]["elem_byte_width"] == 8
+    assert columns[0]["byte_offset"] == 0
+    assert columns[1]["byte_offset"] == 8
+    assert columns[1]["comp_type"] == "Float"
+
+
+def test_build_output_column_layout_reports_comp_type_and_counts():
+    from renderdoc_mcp.mesh_decode import build_output_column_layout
+
+    sigs = [_sig("id", semantic_name="ID0", var_type="UInt", comp_count=1)]
+
+    columns = build_output_column_layout(sigs, aligned=False)
+
+    assert columns[0]["comp_type"] == "UInt"
+    assert columns[0]["comp_count"] == 1
