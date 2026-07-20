@@ -10,7 +10,7 @@
 
 An agent comparing an emulator capture against a recompilation capture finds a pixel with the wrong final color. `pixel_history` shows what touched that pixel on its final render target, but real frames chain render targets together through blits, MSAA resolves, and copies (e.g. EDRAM resolve, post-process ping-pong buffers) before reaching the backbuffer. Today, walking that chain requires the agent to manually: call `pixel_history`, notice the last entry is a resolve/copy, call `get_resource_usages`/`trace_resource` to find the source resource, recompute the pixel coordinates, and call `pixel_history` again — repeating per hop, per capture.
 
-`trace_pixel_provenance` collapses that manual loop into one call: given a final pixel and event, it walks backward through draws, copies, resolves, and blits, reporting the shader output, blend result, and (optionally) sampled source textures at each hop, stopping when it reaches an unwritten/cleared resource or a hop it cannot safely resolve.
+`trace_pixel_provenance` collapses that manual loop into one call: given a final pixel and event, it walks backward through draws, copies, and resolves, reporting the shader output, blend result, and (optionally) sampled source textures at each hop, stopping when it reaches an unwritten/cleared resource or a hop it cannot safely resolve.
 
 This is a **single-capture, single-point-in-time** tool, matching the existing `pixel_history` / `trace_resource` shape. Cross-capture comparison remains the agent's job — call it once per capture (same pattern as `debug_pixel` → `diff_shader_invocations`), then diff the two chains.
 
@@ -27,8 +27,8 @@ One new tool in `renderdoc-mcp/`:
 No new Python dependencies. Reuses existing primitives:
 - `analysis.normalize_pixel_history` (already used by `pixel_history`)
 - `shader_debug.summarize_debug_trace` (already used by `debug_pixel`/`debug_vertex`) for the optional sampled-resource detail on draw producers
-- `session.find_action()` + `ActionDescription.copySource`/`copySourceSubresource` (public replay API) for jumping across Copy/Resolve/Blit actions
-- `events_by_id[eid].flags_names` (precomputed at `open_capture`) to classify a producer event as Drawcall vs. Copy/Resolve/Blit/Clear without an extra replay call
+- `session.find_action()` + `ActionDescription.copySource`/`copySourceSubresource` (public replay API) for jumping across Copy/Resolve actions
+- `events_by_id[eid].flags_names` (precomputed at `open_capture`) to classify a producer event as Drawcall vs. Copy/Resolve/Clear without an extra replay call. Note: `renderdoc::ActionFlags` has no separate "blit" flag — blit-like copies (format-converting, scaling) are flagged `Copy`, same as same-format copies, so they're handled by the same "copy" branch below.
 
 ---
 
@@ -46,7 +46,7 @@ Per hop, starting from `(resource_id, x, y, event_id)`:
 2. Select the **last entry that was not culled/clipped/depth-or-stencil-failed/predicate-failed** as this hop's producer — the fragment that established the currently-visible value. Earlier entries are still returned in `entries` for context but are not recursed into (a hop only has one producer to chain backward from).
 3. Classify the producer event via its precomputed `flags_names`:
    - **Drawcall** → attach `shader_output` and `post_mod`/`pre_mod` (already available from step 1, no extra replay cost). If `include_interpolants` or `include_resource_accesses` is set, run a debug trace (reusing the same machinery as `debug_pixel`) to attach pixel-shader inputs and/or the full resolved list of sampled SRVs/samplers with their resulting register values. The chain **stops here** — sampled source texels are reported as data, not recursed into as a further hop (a pixel shader may sample several textures per invocation; recursing into each would be combinatorial and is out of scope).
-   - **Copy / Resolve / Blit** → look up the `ActionDescription` via `find_action()`, read `copySource` and `copySourceSubresource` (`.mip`/`.slice`/`.sample`), and continue to the next hop at `(copySource, x, y, mip=copySourceSubresource.mip, slice_index=copySourceSubresource.slice, sample_index=copySourceSubresource.sample, event_id=producer_event_id)`. Source and destination coordinates are assumed aligned (see Limitations).
+   - **Copy / Resolve** → look up the `ActionDescription` via `find_action()`, read `copySource` and `copySourceSubresource` (`.mip`/`.slice`/`.sample`), and continue to the next hop at `(copySource, x, y, mip=copySourceSubresource.mip, slice_index=copySourceSubresource.slice, sample_index=copySourceSubresource.sample, event_id=producer_event_id)`. Source and destination coordinates are assumed aligned (see Limitations).
    - **Clear / no entries** → stop; `stopped_reason` is `"cleared"` or `"initial_state"`.
 4. Stop when: `max_depth` is reached, a hop can't be resolved (see Limitations), or there is no further history.
 
