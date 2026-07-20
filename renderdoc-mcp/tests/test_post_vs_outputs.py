@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import struct
+
 
 def test_var_type_byte_size_matches_replay_enums_table():
     from renderdoc_mcp.mesh_decode import var_type_byte_size
@@ -173,3 +175,63 @@ def test_build_output_column_layout_reports_comp_type_and_counts():
 
     assert columns[0]["comp_type"] == "UInt"
     assert columns[0]["comp_count"] == 1
+
+
+def test_perspective_divide_position_divides_by_w():
+    from renderdoc_mcp.mesh_decode import perspective_divide_position
+
+    assert perspective_divide_position([2.0, 4.0, 6.0, 2.0]) == [1.0, 2.0, 3.0]
+
+
+def test_perspective_divide_position_none_when_w_is_zero():
+    from renderdoc_mcp.mesh_decode import perspective_divide_position
+
+    assert perspective_divide_position([1.0, 2.0, 3.0, 0.0]) is None
+
+
+def test_perspective_divide_position_none_when_too_short():
+    from renderdoc_mcp.mesh_decode import perspective_divide_position
+
+    assert perspective_divide_position([1.0, 2.0, 3.0]) is None
+
+
+def test_decode_semantic_bytes_float4():
+    from renderdoc_mcp.mesh_decode import decode_semantic_bytes
+
+    data = struct.pack("=4f", 1.5, 2.5, 3.5, 4.5)
+    result = decode_semantic_bytes(data, 0, "Float", 4, 4)
+
+    assert result == (1.5, 2.5, 3.5, 4.5)
+
+
+def test_decode_semantic_bytes_respects_offset():
+    from renderdoc_mcp.mesh_decode import decode_semantic_bytes
+
+    data = struct.pack("=2f2I", 1.5, 2.5, 10, 20)
+    result = decode_semantic_bytes(data, 8, "UInt", 2, 4)
+
+    assert result == (10, 20)
+
+
+def test_decode_semantic_bytes_sint_and_double_width():
+    from renderdoc_mcp.mesh_decode import decode_semantic_bytes
+
+    data = struct.pack("=2i", -5, 7)
+    assert decode_semantic_bytes(data, 0, "SInt", 2, 4) == (-5, 7)
+
+    data8 = struct.pack("=d", 3.25)
+    assert decode_semantic_bytes(data8, 0, "Float", 1, 8) == (3.25,)
+
+
+def test_decode_semantic_bytes_none_when_out_of_range():
+    from renderdoc_mcp.mesh_decode import decode_semantic_bytes
+
+    data = struct.pack("=2f", 1.0, 2.0)
+    assert decode_semantic_bytes(data, 4, "Float", 4, 4) is None
+
+
+def test_decode_semantic_bytes_none_for_typeless():
+    from renderdoc_mcp.mesh_decode import decode_semantic_bytes
+
+    data = struct.pack("=4f", 1.0, 2.0, 3.0, 4.0)
+    assert decode_semantic_bytes(data, 0, "Typeless", 4, 4) is None

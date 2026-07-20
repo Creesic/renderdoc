@@ -108,6 +108,42 @@ def build_output_column_layout(
     return columns
 
 
+def perspective_divide_position(clip_xyzw: list[float]) -> list[float] | None:
+    """NDC position via perspective divide -- matches renderdoc/data/hlsl/mesh.hlsl's own
+    unprojection (wpos.xyz /= wpos.www) exactly; not a camera/view-matrix reconstruction.
+    Returns None if w is zero or fewer than 4 components were given (nothing meaningful to divide).
+    """
+    if len(clip_xyzw) < 4 or clip_xyzw[3] == 0:
+        return None
+    w = clip_xyzw[3]
+    return [clip_xyzw[0] / w, clip_xyzw[1] / w, clip_xyzw[2] / w]
+
+
+_SEMANTIC_STRUCT_CHARS = {
+    ("Float", 4): "f", ("Float", 8): "d",
+    ("UInt", 4): "I", ("UInt", 8): "Q",
+    ("SInt", 4): "i", ("SInt", 8): "q",
+}
+
+
+def decode_semantic_bytes(
+    data: bytes, offset: int, comp_type: str, comp_count: int, elem_byte_width: int
+) -> tuple[Any, ...] | None:
+    """Unpack comp_count tightly-packed elem_byte_width-byte values of comp_type starting at
+    offset. Post-VS/GS output registers are always plain typed values (never packed/normalized
+    vertex-input formats), so no UNorm/SNorm/BGRA handling is needed here -- contrast this
+    module's unpack_data(), which does need that for vertex *inputs*.
+    """
+    char = _SEMANTIC_STRUCT_CHARS.get((comp_type, elem_byte_width))
+    if char is None or comp_count <= 0:
+        return None
+    end = offset + comp_count * elem_byte_width
+    if end > len(data):
+        return None
+    fmt = "=" + str(comp_count) + char
+    return struct.unpack_from(fmt, data, offset)
+
+
 from renderdoc_mcp.rdutil import (
     controller_get_buffer_data,
     enum_name,
