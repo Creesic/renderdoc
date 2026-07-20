@@ -123,6 +123,7 @@ http://127.0.0.1:8765/mcp
 | `diff_pipeline_state` | Deep diff of normalized pipeline snapshots |
 | `list_draws_with_state` | Compact per-draw state table for scanning many draws |
 | `diff_draw_sequences` | Align and diff compact draw-state rows between captures |
+| `find_corresponding_draws` | Rank the most likely corresponding draw(s) in another capture by content-fingerprint similarity |
 | `diff_texture_stats` | Compare `analyze_texture`-style stats good vs bad |
 | `decode_mesh_inputs` | Vertex layout + indexbuffer summary + vertex previews |
 | `decode_post_vs_outputs` | Decode a draw's post-VS/GS output into typed semantics (POSITION, COLORn, texcoords) for selected vertices |
@@ -175,6 +176,12 @@ python scripts/smoke_import.py
   stages (`MeshOut`/`TaskOut`) aren't exposed by this tool. POSITION's reported NDC value is a
   perspective divide only (`xyz/w`), not a full camera/view-matrix reconstruction into screen
   pixel coordinates -- use `pixel_history`/`trace_pixel_provenance` for that.
+- **`find_corresponding_draws`** never compares shader bytecode or disassembly (meaningless across
+  different graphics APIs) -- it ranks by post-VS position bounding-box shape, primary
+  render-target dimensions/content, constant-buffer values, and shader reflection name sets only.
+  It only inspects the primary color target (`color_targets[0]`), never arbitrary bound input
+  textures, and signal weights are fixed, not caller-tunable. This is a heuristic ranking to
+  narrow a search, not a guaranteed-correct match.
 
 ## License
 
