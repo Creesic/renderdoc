@@ -35,7 +35,10 @@ from renderdoc_mcp.imaging import (
     describe_texture,
     save_texture_as_png_bytes,
 )
-from renderdoc_mcp.mesh_decode import decode_mesh_inputs as decode_mesh_inputs_core
+from renderdoc_mcp.mesh_decode import (
+    decode_mesh_inputs as decode_mesh_inputs_core,
+    decode_post_vs_outputs as decode_post_vs_outputs_core,
+)
 from renderdoc_mcp.serialize import (
     build_draw_state_row,
     normalize_bound_resources,
@@ -1587,6 +1590,51 @@ def build_mcp() -> FastMCP:
                         return R.err(str(data.get("error")), str(data.get("message", data)))
                     if data.get("ok") is False:
                         return R.err("decode_mesh_failed", str(data.get("error", "")))
+                return R.ok(data)
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
+    async def decode_post_vs_outputs(
+        capture_id: str,
+        event_id: int,
+        stage: str = "vsout",
+        instance: int = 0,
+        view: int = 0,
+        preview_vertices: int = 8,
+        out_file: str | None = None,
+    ) -> dict[str, Any]:
+        """Decode a draw's post-vertex-shader (or post-geometry/tessellation) output into typed
+        semantics (POSITION, COLOR0, COLOR1, texture coordinates, etc.) for selected vertices.
+
+        stage is "vsout" (default) or "gsout" -- "gsout" requires a Geometry or Domain
+        (tessellation) shader to be active for this draw and returns
+        no_geometry_or_tessellation_stage otherwise, rather than silently falling back to VS data.
+        POSITION additionally reports a perspective-divided NDC value (xyz/w) alongside the raw
+        clip-space value when the underlying MeshFormat says this data is unprojectable -- the
+        same perspective divide RenderDoc's own mesh-view shader uses, not a full camera/
+        view-matrix reconstruction. preview_vertices controls how many vertices are decoded (up
+        to 8192); pass out_file to write every decoded vertex to a CSV instead of inlining them.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                try:
+                    sessions.set_frame_event(sess, int(event_id))
+                    data = decode_post_vs_outputs_core(
+                        sess.controller, sess.structured_file, int(event_id), stage, instance,
+                        view, preview_vertices, out_file,
+                    )
+                except Exception as ex:
+                    return R.err("decode_post_vs_failed", str(ex))
+                if isinstance(data, dict):
+                    if data.get("error"):
+                        return R.err(str(data.get("error")), str(data.get("message", data)))
+                    if data.get("ok") is False:
+                        return R.err("decode_post_vs_failed", str(data.get("error", "")))
                 return R.ok(data)
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
