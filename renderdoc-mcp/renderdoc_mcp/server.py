@@ -6,8 +6,6 @@ import asyncio
 import base64
 import concurrent.futures
 import difflib
-import os
-import tempfile
 from contextlib import asynccontextmanager
 from typing import Any, Literal, cast
 
@@ -51,6 +49,13 @@ from renderdoc_mcp.serialize import (
 from renderdoc_mcp.cbuffer import decode_cb_bytes, detect_variable_anomalies
 from renderdoc_mcp.session import CaptureSessionManager, filter_events, find_action
 from renderdoc_mcp import shader_debug
+from renderdoc_mcp.isolated_replay import (
+    DEFAULT_SHADER_DEBUG_TIMEOUT_SECONDS,
+    IsolatedReplayError,
+    IsolatedReplayTimeout,
+    clamp_shader_debug_timeout,
+    run_shader_debug_worker,
+)
 from renderdoc_mcp.structured import serialize_chunk
 
 import logging
@@ -1875,6 +1880,7 @@ def build_mcp() -> FastMCP:
         view: int = 0,
         full_trace: bool = False,
         full_trace_path: str | None = None,
+        timeout_seconds: float = DEFAULT_SHADER_DEBUG_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Debug the fragment invocation that wrote pixel (x, y) and summarize the trace.
 
@@ -1884,79 +1890,48 @@ def build_mcp() -> FastMCP:
         constant buffer values, and the final output register values (answers "bad sample, bad
         constant, or no sample at all?" in one call). Pass full_trace=true to additionally dump
         the complete instruction-by-instruction trace to a JSON file and return its path.
+        Native shader debugging runs in a disposable one-capture worker. If it exceeds
+        timeout_seconds, that worker is terminated and the MCP server remains usable.
         """
         async with replay_execution():
-
-            def _go() -> dict[str, Any]:
-                rd = rdutil.get_renderdoc()
-                sess = sessions.get(capture_id)
-                if sess is None:
-                    return R.err("unknown_capture", capture_id)
-                try:
-                    sessions.set_frame_event(sess, int(event_id))
-                    pipe = sess.controller.GetPipelineState()
-                    stage = rd.ShaderStage.Pixel
-                    refl = pipe.GetShaderReflection(stage)
-                    if refl is None:
-                        return R.err("no_pixel_shader", "No pixel/fragment shader bound at this event")
-
-                    inputs = rd.DebugPixelInputs()
-                    inputs.sample = shader_debug.NO_PREFERENCE if sample is None else int(sample)
-                    inputs.primitive = shader_debug.NO_PREFERENCE if primitive is None else int(primitive)
-                    inputs.view = shader_debug.NO_PREFERENCE if view is None else int(view)
-
-                    trace = sess.controller.DebugPixel(int(x), int(y), inputs)
-                except Exception as ex:
-                    return R.err("debug_pixel_failed", str(ex))
-                if trace is None or trace.debugger is None:
-                    if trace is not None:
-                        sess.controller.FreeTrace(trace)
-                    return R.err(
-                        "debug_failed",
-                        "No fragment writes pixel ({}, {}) at this event, or debugging is unsupported here".format(
-                            x, y
-                        ),
-                    )
-                try:
-                    states, truncated = shader_debug.run_debug_trace(sess.controller, trace)
-                    disasm_lines: list[str] = []
-                    try:
-                        pipe_obj = pipe.GetGraphicsPipelineObject()
-                        disasm_text = shader_debug.best_disassembly(sess.controller, pipe_obj, refl)
-                        disasm_lines = disasm_text.split("\n") if disasm_text else []
-                    except Exception:
-                        disasm_lines = []
-                    out = shader_debug.summarize_debug_trace(
-                        rd, sess.controller, pipe, stage, refl, trace, states, disasm_lines
-                    )
-                    if full_trace:
-                        path = full_trace_path
-                        if not path:
-                            fd, path = tempfile.mkstemp(suffix=".json", prefix="renderdoc_mcp_trace_")
-                            os.close(fd)
-                        shader_debug.dump_full_trace(rd, trace, states, disasm_lines, path)
-                        out["full_trace_path"] = path
-                    if truncated:
-                        out["truncated"] = True
-                        out["truncated_reason"] = (
-                            "Trace exceeded {} steps (likely a long-running or infinite shader "
-                            "loop); stopped early to avoid hanging the server. Results reflect "
-                            "only the first {} steps.".format(
-                                shader_debug.MAX_DEBUG_STEPS, shader_debug.MAX_DEBUG_STEPS
-                            )
-                        )
-                except Exception as ex:
-                    return R.err("debug_pixel_failed", str(ex))
-                finally:
-                    sess.controller.FreeTrace(trace)
-
-                out["capture_id"] = capture_id
-                out["event_id"] = int(event_id)
-                out["coordinates"] = {"x": int(x), "y": int(y)}
-                out["stage"] = rdutil.enum_name(stage)
-                return R.ok(out)
-
-            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+            sess = sessions.get(capture_id)
+            if sess is None:
+                return R.err("unknown_capture", capture_id)
+            timeout = clamp_shader_debug_timeout(timeout_seconds)
+            request = {
+                "operation": "debug_pixel",
+                "capture_id": capture_id,
+                "capture_path": sess.path,
+                "event_id": int(event_id),
+                "x": int(x),
+                "y": int(y),
+                "sample": shader_debug.NO_PREFERENCE if sample is None else int(sample),
+                "primitive": primitive,
+                "view": view,
+                "full_trace": bool(full_trace),
+                "full_trace_path": full_trace_path,
+            }
+            _log.info(
+                "debug_pixel: isolated worker start capture_id=%s event=%d pixel=(%d,%d) timeout=%.1fs",
+                capture_id, int(event_id), int(x), int(y), timeout,
+            )
+            try:
+                result = await run_shader_debug_worker(request, timeout)
+            except IsolatedReplayTimeout as ex:
+                _log.warning("debug_pixel: %s", ex)
+                return R.err("debug_pixel_timeout", str(ex))
+            except IsolatedReplayError as ex:
+                _log.exception("debug_pixel: isolated worker failed")
+                return R.err("debug_pixel_failed", str(ex))
+            except Exception as ex:
+                _log.exception("debug_pixel: could not start isolated worker")
+                return R.err("debug_pixel_failed", str(ex))
+            _log.info(
+                "debug_pixel: isolated worker complete capture_id=%s event=%d",
+                capture_id,
+                int(event_id),
+            )
+            return result
 
     @mcp.tool()
     async def debug_vertex(
@@ -1968,6 +1943,7 @@ def build_mcp() -> FastMCP:
         view: int = 0,
         full_trace: bool = False,
         full_trace_path: str | None = None,
+        timeout_seconds: float = DEFAULT_SHADER_DEBUG_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Debug the vertex shader invocation for a given vertex and summarize the trace.
 
@@ -1975,78 +1951,47 @@ def build_mcp() -> FastMCP:
         to look up vertex inputs (from an index buffer, with all drawcall offsets applied) — if
         omitted it defaults to ``vertex_id``, which is only correct for non-indexed draws with no
         base vertex offset. Same summary shape as debug_pixel: inputs, resource accesses,
-        constant buffer values, and final output register values.
+        constant buffer values, and final output register values. Native shader debugging runs
+        in a disposable worker so a replay hang can be terminated without wedging the MCP server.
         """
         async with replay_execution():
-
-            def _go() -> dict[str, Any]:
-                rd = rdutil.get_renderdoc()
-                sess = sessions.get(capture_id)
-                if sess is None:
-                    return R.err("unknown_capture", capture_id)
-                try:
-                    sessions.set_frame_event(sess, int(event_id))
-                    pipe = sess.controller.GetPipelineState()
-                    stage = rd.ShaderStage.Vertex
-                    refl = pipe.GetShaderReflection(stage)
-                    if refl is None:
-                        return R.err("no_vertex_shader", "No vertex shader bound at this event")
-
-                    idx = int(vertex_id) if index is None else int(index)
-                    trace = sess.controller.DebugVertex(int(vertex_id), int(instance_id), idx, int(view))
-                except Exception as ex:
-                    return R.err("debug_vertex_failed", str(ex))
-                if trace is None or trace.debugger is None:
-                    if trace is not None:
-                        sess.controller.FreeTrace(trace)
-                    return R.err(
-                        "debug_failed",
-                        "Could not debug vertex {} (instance {}, index {})".format(
-                            vertex_id, instance_id, idx
-                        ),
-                    )
-                try:
-                    states, truncated = shader_debug.run_debug_trace(sess.controller, trace)
-                    disasm_lines: list[str] = []
-                    try:
-                        pipe_obj = pipe.GetGraphicsPipelineObject()
-                        disasm_text = shader_debug.best_disassembly(sess.controller, pipe_obj, refl)
-                        disasm_lines = disasm_text.split("\n") if disasm_text else []
-                    except Exception:
-                        disasm_lines = []
-                    out = shader_debug.summarize_debug_trace(
-                        rd, sess.controller, pipe, stage, refl, trace, states, disasm_lines
-                    )
-                    if full_trace:
-                        path = full_trace_path
-                        if not path:
-                            fd, path = tempfile.mkstemp(suffix=".json", prefix="renderdoc_mcp_trace_")
-                            os.close(fd)
-                        shader_debug.dump_full_trace(rd, trace, states, disasm_lines, path)
-                        out["full_trace_path"] = path
-                    if truncated:
-                        out["truncated"] = True
-                        out["truncated_reason"] = (
-                            "Trace exceeded {} steps (likely a long-running or infinite shader "
-                            "loop); stopped early to avoid hanging the server. Results reflect "
-                            "only the first {} steps.".format(
-                                shader_debug.MAX_DEBUG_STEPS, shader_debug.MAX_DEBUG_STEPS
-                            )
-                        )
-                except Exception as ex:
-                    return R.err("debug_vertex_failed", str(ex))
-                finally:
-                    sess.controller.FreeTrace(trace)
-
-                out["capture_id"] = capture_id
-                out["event_id"] = int(event_id)
-                out["vertex_id"] = int(vertex_id)
-                out["instance_id"] = int(instance_id)
-                out["index"] = idx
-                out["stage"] = rdutil.enum_name(stage)
-                return R.ok(out)
-
-            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+            sess = sessions.get(capture_id)
+            if sess is None:
+                return R.err("unknown_capture", capture_id)
+            timeout = clamp_shader_debug_timeout(timeout_seconds)
+            request = {
+                "operation": "debug_vertex",
+                "capture_id": capture_id,
+                "capture_path": sess.path,
+                "event_id": int(event_id),
+                "vertex_id": int(vertex_id),
+                "instance_id": int(instance_id),
+                "index": index,
+                "view": int(view),
+                "full_trace": bool(full_trace),
+                "full_trace_path": full_trace_path,
+            }
+            _log.info(
+                "debug_vertex: isolated worker start capture_id=%s event=%d vertex=%d timeout=%.1fs",
+                capture_id, int(event_id), int(vertex_id), timeout,
+            )
+            try:
+                result = await run_shader_debug_worker(request, timeout)
+            except IsolatedReplayTimeout as ex:
+                _log.warning("debug_vertex: %s", ex)
+                return R.err("debug_vertex_timeout", str(ex))
+            except IsolatedReplayError as ex:
+                _log.exception("debug_vertex: isolated worker failed")
+                return R.err("debug_vertex_failed", str(ex))
+            except Exception as ex:
+                _log.exception("debug_vertex: could not start isolated worker")
+                return R.err("debug_vertex_failed", str(ex))
+            _log.info(
+                "debug_vertex: isolated worker complete capture_id=%s event=%d",
+                capture_id,
+                int(event_id),
+            )
+            return result
 
     @mcp.tool()
     async def read_constant_buffer(

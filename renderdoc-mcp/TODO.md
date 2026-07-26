@@ -74,6 +74,17 @@ without waiting for a full rebuild — **the currently-running server process st
 unbounded code loaded in memory and needs a restart** (Settings → MCP toggle off/on, or relaunch
 qrenderdoc) to pick up the fix.
 
+**Post-ship bug fix (3)**: the step ceiling above still could not recover if a native
+`DebugPixel()`/`ContinueDebug()` call itself stopped returning, and it did not address replay
+device accumulation. Reproduced on `mm3roam4.rdc`, event 6100, pixel `(300, 90)`: a fresh
+single-capture process completed the 54-state trace in milliseconds, while the long-lived MCP
+process with several open captures dispatched the request and never responded until it was killed.
+`debug_pixel` and `debug_vertex` now run in a disposable one-capture subprocess with a configurable
+30-second default timeout (clamped to 1–300 seconds). A native stall kills only that worker and
+returns `debug_pixel_timeout`/`debug_vertex_timeout`; the main MCP replay thread and lock remain
+usable. The existing 20,000-state ceiling remains as the cheaper first line of defense inside the
+worker.
+
 ## 2. Shader disassembly that works for DXIL
 
 `get_shader(include_disassembly=true)` returns `"; Invalid Shader Specified"` for DXIL shaders in
