@@ -20,9 +20,12 @@ def draw_shape_key(draw_row: dict[str, Any]) -> tuple[Any, ...]:
     closure in server.py) -- reimplemented here as a standalone, unit-testable function rather
     than reaching into that closure, which isn't importable without refactoring the existing tool.
     """
+    vertex_buffer_count = int(
+        draw_row.get("vertex_buffer_count", len(draw_row.get("vertex_buffers") or []))
+    )
     return (
         draw_row.get("topology"),
-        len(draw_row.get("vertex_buffers") or []),
+        vertex_buffer_count,
         draw_row.get("index_buffer") is not None,
         len(draw_row.get("color_targets") or []),
         draw_row.get("depth_target") is not None,

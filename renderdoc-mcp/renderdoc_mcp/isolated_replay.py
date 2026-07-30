@@ -17,6 +17,7 @@ from typing import Any
 
 
 DEFAULT_SHADER_DEBUG_TIMEOUT_SECONDS = 30.0
+DEFAULT_DRAW_MATCHING_TIMEOUT_SECONDS = 60.0
 MAX_SHADER_DEBUG_TIMEOUT_SECONDS = 300.0
 _WORKER_RESULT_PREFIX = "RENDERDOC_MCP_WORKER_RESULT="
 _MAX_DIAGNOSTIC_CHARS = 4000
@@ -77,6 +78,34 @@ async def run_shader_debug_worker(
 ) -> dict[str, Any]:
     """Run one shader debug request in a killable, single-capture process."""
 
+    return await _run_worker(
+        request,
+        timeout_seconds,
+        timeout_message="shader debugging exceeded {:.1f}s; "
+        "the isolated replay worker was terminated",
+    )
+
+
+async def run_draw_matching_worker(
+    request: dict[str, Any],
+    timeout_seconds: float = DEFAULT_DRAW_MATCHING_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Run cross-capture draw matching outside the parent MCP process."""
+
+    return await _run_worker(
+        request,
+        timeout_seconds,
+        timeout_message="draw matching exceeded {:.1f}s; "
+        "the isolated replay worker was terminated",
+    )
+
+
+async def _run_worker(
+    request: dict[str, Any],
+    timeout_seconds: float,
+    *,
+    timeout_message: str,
+) -> dict[str, Any]:
     timeout = clamp_shader_debug_timeout(timeout_seconds)
     payload = json.dumps(request, separators=(",", ":")).encode("utf-8")
     env = os.environ.copy()
@@ -100,11 +129,7 @@ async def run_shader_debug_worker(
             await process.communicate()
         except Exception:
             pass
-        raise IsolatedReplayTimeout(
-            "shader debugging exceeded {:.1f}s; the isolated replay worker was terminated".format(
-                timeout
-            )
-        ) from ex
+        raise IsolatedReplayTimeout(timeout_message.format(timeout)) from ex
     except asyncio.CancelledError:
         # Client disconnects/cancellation must not orphan a native replay worker.
         process.kill()

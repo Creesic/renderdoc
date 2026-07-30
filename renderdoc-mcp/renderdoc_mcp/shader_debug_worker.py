@@ -11,6 +11,7 @@ from typing import Any
 from renderdoc_mcp import rdutil
 from renderdoc_mcp import responses as R
 from renderdoc_mcp import shader_debug
+from renderdoc_mcp.draw_matching import find_corresponding_draws
 from renderdoc_mcp.isolated_replay import _WORKER_RESULT_PREFIX
 
 
@@ -79,15 +80,40 @@ def _trace_summary(
 def run_request(request: dict[str, Any]) -> dict[str, Any]:
     rd = rdutil.get_renderdoc()
     rd.InitialiseReplay(rd.GlobalEnvironment(), [])
-    controller = None
+    controllers: list[Any] = []
     trace = None
     try:
+        operation = str(request.get("operation", ""))
+        if operation == "find_corresponding_draws":
+            controller_a = _open_controller(rd, str(request["capture_path_a"]))
+            controllers.append(controller_a)
+            if request["capture_path_b"] == request["capture_path_a"]:
+                controller_b = controller_a
+            else:
+                controller_b = _open_controller(rd, str(request["capture_path_b"]))
+                controllers.append(controller_b)
+            result = find_corresponding_draws(
+                controller_a,
+                controller_a.GetStructuredFile(),
+                int(request["event_id_a"]),
+                controller_b,
+                controller_b.GetStructuredFile(),
+                request.get("event_ids_b"),
+                int(request.get("limit", 200)),
+                int(request.get("top_k", 5)),
+            )
+            if result.get("ok") is False:
+                return R.err(
+                    str(result.get("error", "find_corresponding_draws_failed")),
+                    str(result),
+                )
+            return R.ok(result)
+
         controller = _open_controller(rd, str(request["capture_path"]))
+        controllers.append(controller)
         event_id = int(request["event_id"])
         controller.SetFrameEvent(event_id, False)
         pipe = controller.GetPipelineState()
-        operation = str(request.get("operation", ""))
-
         if operation == "debug_pixel":
             stage = rd.ShaderStage.Pixel
             reflection = pipe.GetShaderReflection(stage)
@@ -156,15 +182,16 @@ def run_request(request: dict[str, Any]) -> dict[str, Any]:
             out["index"] = vertex_id if index is None else int(index)
         return R.ok(out)
     except Exception as ex:
-        operation = str(request.get("operation", "shader_debug"))
+        operation = str(request.get("operation", "replay"))
         return R.err("{}_failed".format(operation), str(ex))
     finally:
-        if trace is not None and controller is not None:
+        trace_controller = controllers[0] if controllers else None
+        if trace is not None and trace_controller is not None:
             try:
-                controller.FreeTrace(trace)
+                trace_controller.FreeTrace(trace)
             except Exception:
                 pass
-        if controller is not None:
+        for controller in reversed(controllers):
             try:
                 controller.Shutdown()
             except Exception:
@@ -182,7 +209,7 @@ def main() -> None:
             raise ValueError("worker request must be a JSON object")
         result = run_request(request)
     except Exception as ex:
-        result = R.err("shader_debug_worker_failed", str(ex))
+        result = R.err("isolated_replay_worker_failed", str(ex))
     print(
         _WORKER_RESULT_PREFIX + json.dumps(result, separators=(",", ":"), ensure_ascii=False),
         flush=True,

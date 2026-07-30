@@ -3,52 +3,51 @@
 from __future__ import annotations
 
 import argparse
-import faulthandler
 import logging
 import os
 import sys
 
+from renderdoc_mcp.logging_config import LoggingState, configure_logging
+
+
+_logging_state: LoggingState | None = None
+
 
 def _setup_crash_logging() -> None:
-    """Write Python tracebacks and native crash info to a persistent log file.
+    """Write bounded service logs and native fault traces next to the application.
 
     MCPServerManager caps captured stdout/stderr at 220 chars, so normal
-    tracebacks are silently truncated. This bypasses that limit by writing
-    directly to a file.
+    tracebacks are silently truncated. Native faults use a dedicated stable file
+    while normal logs rotate and exclude verbose dependency payloads.
     """
+    global _logging_state
     app_dir = os.environ.get("RENDERDOC_MCP_APPDIR") or os.getcwd()
-    log_path = os.path.join(app_dir, "renderdoc_mcp_crash.log")
 
     try:
-        log_fd = open(log_path, "a", buffering=1)  # line-buffered so partial writes survive crashes
+        _logging_state = configure_logging(app_dir)
     except OSError:
         return  # can't open log — silent fallback
-
-    # Native crash handler: writes a C-level traceback to the file even on
-    # segfaults and stack overflows that bypass Python's exception machinery.
-    faulthandler.enable(file=log_fd, all_threads=True)
-
-    # Python-level logging: captures structured log records from server.py.
-    logging.basicConfig(
-        stream=log_fd,
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        force=True,
-    )
 
     # Unhandled Python exceptions: write full traceback before exit.
     _orig_excepthook = sys.excepthook
 
     def _excepthook(exc_type, exc_value, exc_tb):
         import traceback
-        print("UNHANDLED EXCEPTION:", file=log_fd)
-        traceback.print_exception(exc_type, exc_value, exc_tb, file=log_fd)
-        log_fd.flush()
+        assert _logging_state is not None
+        print("UNHANDLED EXCEPTION:", file=_logging_state.fault_file)
+        traceback.print_exception(
+            exc_type, exc_value, exc_tb, file=_logging_state.fault_file
+        )
+        _logging_state.fault_file.flush()
         _orig_excepthook(exc_type, exc_value, exc_tb)
 
     sys.excepthook = _excepthook
 
-    logging.getLogger("renderdoc_mcp").info("MCP server starting — log: %s", log_path)
+    logging.getLogger("renderdoc_mcp").info(
+        "MCP server starting — service log: %s — native faults: %s",
+        _logging_state.service_path,
+        _logging_state.fault_path,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -20,6 +20,17 @@ def test_draw_shape_key_handles_missing_fields():
     assert draw_shape_key({}) == (None, 0, False, 0, False)
 
 
+def test_draw_shape_key_uses_slot_count_when_bindings_are_grouped():
+    from renderdoc_mcp.draw_matching import draw_shape_key
+
+    row = {
+        "topology": "TriangleList",
+        "vertex_buffer_count": 4,
+        "vertex_buffers": [{"slots": [0, 1, 2, 3]}],
+    }
+    assert draw_shape_key(row) == ("TriangleList", 4, False, 0, False)
+
+
 def test_count_closeness_equal_counts_is_one():
     from renderdoc_mcp.draw_matching import count_closeness
 

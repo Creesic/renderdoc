@@ -539,6 +539,68 @@ def build_draw_state_row(controller: Any, structured_file: Any, event_id: int) -
     targets = serialize_graphics_targets(pipe, controller)
     topo = _try(lambda: pipe.GetPrimitiveTopology())
 
+    def compact_binding(binding: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not binding or binding.get("resource_id") in (None, "", "Null"):
+            return None
+        compact: dict[str, Any] = {}
+        for key in ("slot", "resource_id", "resource_name"):
+            if key in binding:
+                compact[key] = binding[key]
+        byte_offset = int(binding.get("byte_offset", 0) or 0)
+        byte_stride = int(binding.get("byte_stride", 0) or 0)
+        byte_size = int(binding.get("byte_size", 0) or 0)
+        if byte_offset:
+            compact["byte_offset"] = byte_offset
+        if byte_stride:
+            compact["byte_stride"] = byte_stride
+        # UINT64_MAX means "unbounded/unknown" in BoundVBuffer and adds no
+        # actionable information to a compact cross-draw response.
+        if byte_size and byte_size != 0xFFFFFFFFFFFFFFFF:
+            compact["byte_size"] = byte_size
+        for key in ("slice", "mipslice"):
+            value = int(binding.get(key, 0) or 0)
+            if value:
+                compact[key] = value
+        return compact
+
+    active_vertex_buffers = [
+        compact
+        for binding in vi.get("vertex_buffers", [])
+        if (compact := compact_binding(binding)) is not None
+    ]
+    grouped_vertex_buffers: list[dict[str, Any]] = []
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for binding in active_vertex_buffers:
+        key = (
+            binding.get("resource_id"),
+            binding.get("resource_name"),
+            binding.get("byte_stride", 0),
+            binding.get("byte_size", 0),
+        )
+        groups.setdefault(key, []).append(binding)
+    for bindings in groups.values():
+        if len(bindings) == 1:
+            grouped_vertex_buffers.append(bindings[0])
+            continue
+        grouped: dict[str, Any] = {
+            key: value
+            for key, value in bindings[0].items()
+            if key not in ("slot", "byte_offset")
+        }
+        grouped["slots"] = [int(binding["slot"]) for binding in bindings]
+        offsets = [int(binding.get("byte_offset", 0) or 0) for binding in bindings]
+        if any(offsets):
+            grouped["byte_offsets"] = offsets
+        grouped_vertex_buffers.append(grouped)
+
+    index_buffer = compact_binding(vi.get("index_buffer"))
+    color_targets = [
+        compact
+        for binding in targets.get("color_targets", [])
+        if (compact := compact_binding(binding)) is not None
+    ]
+    depth_target = compact_binding(targets.get("depth_target"))
+
     shaders: dict[str, Any] = {}
     for st in collect_shader_stages(rd):
         refl = _try(lambda s=st: pipe.GetShaderReflection(s))
@@ -546,19 +608,22 @@ def build_draw_state_row(controller: Any, structured_file: Any, event_id: int) -
             continue
         entry: dict[str, Any] = {}
         enrich_resource_dict(controller, entry, getattr(refl, "resourceId", rd.ResourceId.Null()))
-        entry["constant_blocks"] = [
+        constant_blocks = [
             str(getattr(cb, "name", "") or "") for cb in (getattr(refl, "constantBlocks", None) or [])
         ]
+        if constant_blocks:
+            entry["constant_blocks"] = constant_blocks
         shaders[enum_name(st).lower()] = entry
 
     return {
         "event_id": int(event_id),
         "name": name,
         "topology": enum_name(topo) if topo is not None else None,
-        "vertex_buffers": vi.get("vertex_buffers", []),
-        "index_buffer": vi.get("index_buffer"),
-        "color_targets": targets.get("color_targets", []),
-        "depth_target": targets.get("depth_target"),
+        "vertex_buffer_count": len(active_vertex_buffers),
+        "vertex_buffers": grouped_vertex_buffers,
+        "index_buffer": index_buffer,
+        "color_targets": color_targets,
+        "depth_target": depth_target,
         "shaders": shaders,
     }
 

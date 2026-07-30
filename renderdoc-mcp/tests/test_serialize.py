@@ -1,6 +1,92 @@
 from __future__ import annotations
 
 
+def test_compact_draw_row_omits_null_slots_defaults_and_unbounded_sizes(monkeypatch):
+    from renderdoc_mcp import serialize
+
+    class _Action:
+        def GetName(self, structured_file):
+            return "Draw"
+
+    class _Pipe:
+        def GetPipelineState(self):
+            return self
+
+        def GetPrimitiveTopology(self):
+            return "TriangleList"
+
+    class _Controller:
+        def GetPipelineState(self):
+            return _Pipe()
+
+    monkeypatch.setattr(serialize, "get_renderdoc", lambda: object())
+    monkeypatch.setattr(serialize, "find_action", lambda controller, event_id: _Action())
+    monkeypatch.setattr(serialize, "collect_shader_stages", lambda rd: [])
+    monkeypatch.setattr(
+        serialize,
+        "serialize_vertex_inputs",
+        lambda pipe, controller: {
+            "vertex_buffers": [
+                {
+                    "slot": 0,
+                    "resource_id": "ResourceId::1",
+                    "resource_name": "positions",
+                    "byte_offset": 0,
+                    "byte_stride": 16,
+                    "byte_size": 0xFFFFFFFFFFFFFFFF,
+                },
+                {
+                    "slot": 1,
+                    "resource_id": "ResourceId::1",
+                    "resource_name": "positions",
+                    "byte_offset": 16,
+                    "byte_stride": 16,
+                    "byte_size": 0xFFFFFFFFFFFFFFFF,
+                },
+                {
+                    "slot": 2,
+                    "resource_id": "Null",
+                    "byte_offset": 0,
+                    "byte_stride": 16,
+                    "byte_size": 0xFFFFFFFFFFFFFFFF,
+                },
+            ],
+            "index_buffer": None,
+        },
+    )
+    monkeypatch.setattr(
+        serialize,
+        "serialize_graphics_targets",
+        lambda pipe, controller: {
+            "color_targets": [
+                {
+                    "slot": 0,
+                    "resource_id": "ResourceId::2",
+                    "slice": 0,
+                    "mipslice": 0,
+                },
+                {"slot": 1, "resource_id": "Null", "slice": 0, "mipslice": 0},
+            ],
+            "depth_target": {"resource_id": "Null", "slice": 0, "mipslice": 0},
+        },
+    )
+
+    row = serialize.build_draw_state_row(_Controller(), object(), 7)
+
+    assert row["vertex_buffers"] == [
+        {
+            "resource_id": "ResourceId::1",
+            "resource_name": "positions",
+            "byte_stride": 16,
+            "slots": [0, 1],
+            "byte_offsets": [0, 16],
+        }
+    ]
+    assert row["vertex_buffer_count"] == 2
+    assert row["color_targets"] == [{"slot": 0, "resource_id": "ResourceId::2"}]
+    assert row["depth_target"] is None
+
+
 class _FakeAttr:
     def __init__(self, location, vertex_buffer, byte_offset=0, per_instance=False):
         self.location = location
