@@ -37,7 +37,7 @@ from renderdoc_mcp.mesh_decode import (
     decode_mesh_inputs as decode_mesh_inputs_core,
     decode_post_vs_outputs as decode_post_vs_outputs_core,
 )
-from renderdoc_mcp.draw_matching import find_corresponding_draws as find_corresponding_draws_core
+from renderdoc_mcp.draw_matching import draw_shape_key
 from renderdoc_mcp.serialize import (
     build_draw_state_row,
     normalize_bound_resources,
@@ -50,10 +50,12 @@ from renderdoc_mcp.cbuffer import decode_cb_bytes, detect_variable_anomalies
 from renderdoc_mcp.session import CaptureSessionManager, filter_events, find_action
 from renderdoc_mcp import shader_debug
 from renderdoc_mcp.isolated_replay import (
+    DEFAULT_DRAW_MATCHING_TIMEOUT_SECONDS,
     DEFAULT_SHADER_DEBUG_TIMEOUT_SECONDS,
     IsolatedReplayError,
     IsolatedReplayTimeout,
     clamp_shader_debug_timeout,
+    run_draw_matching_worker,
     run_shader_debug_worker,
 )
 from renderdoc_mcp.structured import serialize_chunk
@@ -2272,13 +2274,7 @@ def build_mcp() -> FastMCP:
                 rows_b, _ = _draw_rows(sess_b, event_ids_b, None, limit)
 
                 def shape_key(row: dict[str, Any]) -> tuple[Any, ...]:
-                    return (
-                        row.get("topology"),
-                        len(row.get("vertex_buffers") or []),
-                        row.get("index_buffer") is not None,
-                        len(row.get("color_targets") or []),
-                        row.get("depth_target") is not None,
-                    )
+                    return draw_shape_key(row)
 
                 def strip_noise(obj: Any) -> Any:
                     # event_id/resource_id are never comparable across captures; name is the raw
@@ -2353,6 +2349,7 @@ def build_mcp() -> FastMCP:
         event_ids_b: list[int] | None = None,
         limit: int = 200,
         top_k: int = 5,
+        timeout_seconds: float = DEFAULT_DRAW_MATCHING_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Rank the most likely corresponding draw(s) in capture_b for one draw in capture_a.
 
@@ -2366,27 +2363,32 @@ def build_mcp() -> FastMCP:
         judged rather than trusted blindly -- this is a heuristic ranking, not a guaranteed match.
         """
         async with replay_execution():
-
-            def _go() -> dict[str, Any]:
+            def _request() -> dict[str, Any]:
                 sess_a = sessions.get(capture_a)
                 sess_b = sessions.get(capture_b)
                 if sess_a is None or sess_b is None:
                     return R.err("unknown_capture", "capture_a or capture_b invalid")
-                try:
-                    result = find_corresponding_draws_core(
-                        sess_a.controller, sess_a.structured_file, int(event_id_a),
-                        sess_b.controller, sess_b.structured_file, event_ids_b, limit, top_k,
-                    )
-                except Exception as ex:
-                    return R.err("find_corresponding_draws_failed", str(ex))
-                if isinstance(result, dict):
-                    if result.get("error"):
-                        return R.err(str(result.get("error")), str(result.get("message", result)))
-                    if result.get("ok") is False:
-                        return R.err("find_corresponding_draws_failed", str(result.get("error", "")))
-                return R.ok(result)
+                return {
+                    "operation": "find_corresponding_draws",
+                    "capture_path_a": sess_a.path,
+                    "event_id_a": int(event_id_a),
+                    "capture_path_b": sess_b.path,
+                    "event_ids_b": event_ids_b,
+                    "limit": max(1, min(int(limit), 1000)),
+                    "top_k": max(1, min(int(top_k), 50)),
+                }
 
-            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+            request = await asyncio.get_running_loop().run_in_executor(
+                _replay_executor, _request
+            )
+            if request.get("ok") is False:
+                return request
+            try:
+                return await run_draw_matching_worker(request, timeout_seconds)
+            except IsolatedReplayTimeout as ex:
+                return R.err("find_corresponding_draws_timeout", str(ex))
+            except IsolatedReplayError as ex:
+                return R.err("find_corresponding_draws_worker_failed", str(ex))
 
     return mcp
 

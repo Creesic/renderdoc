@@ -45,6 +45,31 @@ def test_worker_result_round_trips(monkeypatch):
     assert process.killed is False
 
 
+def test_draw_matching_uses_the_same_killable_worker_boundary(monkeypatch):
+    expected = {"ok": True, "data": {"candidates": [{"event_id": 7}]}}
+    stdout = (
+        isolated_replay._WORKER_RESULT_PREFIX + json.dumps(expected) + "\n"
+    ).encode()
+    process = _FakeProcess(stdout=stdout)
+    command = []
+
+    async def create(*args, **kwargs):
+        command.extend(args)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+
+    result = asyncio.run(
+        isolated_replay.run_draw_matching_worker(
+            {"operation": "find_corresponding_draws"}, 2.0
+        )
+    )
+
+    assert result == expected
+    assert "renderdoc_mcp.shader_debug_worker" in command
+    assert process.killed is False
+
+
 def test_timeout_kills_worker_and_returns_control(monkeypatch):
     class HangingProcess(_FakeProcess):
         async def communicate(self, payload=None):

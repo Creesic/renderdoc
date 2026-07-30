@@ -3896,9 +3896,23 @@ void D3D12ResourceManager::SerialiseResourceStates(
     {
       processed.insert(Resource);
 
-      for(size_t m = 0; m < States.size(); m++)
+      auto stateIt = states.find(Resource);
+      if(stateIt == states.end())
       {
-        D3D12ResourceLayout srcState = states[Resource][m];
+        RDCWARN("No tracked D3D12 state for %s while restoring %zu serialised subresources",
+                ToStr(Resource).c_str(), States.size());
+        continue;
+      }
+
+      SubresourceStateVector &currentStates = stateIt->second;
+      if(currentStates.size() != States.size())
+        RDCWARN("D3D12 state count mismatch for %s: tracked %zu, serialised %zu",
+                ToStr(Resource).c_str(), currentStates.size(), States.size());
+
+      const size_t stateCount = RDCMIN(currentStates.size(), States.size());
+      for(size_t m = 0; m < stateCount; m++)
+      {
+        D3D12ResourceLayout srcState = currentStates[m];
         D3D12ResourceLayout dstState = States[m];
 
         // because of some extreme ugliness on the D3D12 side, resources can be created in new
@@ -3917,10 +3931,8 @@ void D3D12ResourceManager::SerialiseResourceStates(
         }
 
         if(srcState != dstState)
-        {
           AddStateResetBarrier(srcState, dstState, (ID3D12Resource *)GetResource(Resource), (UINT)m,
                                barriers);
-        }
       }
     }
 
@@ -3940,9 +3952,23 @@ void D3D12ResourceManager::SerialiseResourceStates(
 
       if(processed.find(it->first) == processed.end())
       {
-        for(size_t m = 0; m < it->second.size(); m++)
+        auto stateIt = states.find(it->first);
+        if(!HasResource(it->first) || stateIt == states.end())
         {
-          const D3D12ResourceLayout srcState = states[it->first][m];
+          RDCWARN("Skipping initial D3D12 state restore for unavailable resource %s",
+                  ToStr(it->first).c_str());
+          continue;
+        }
+
+        SubresourceStateVector &currentStates = stateIt->second;
+        if(currentStates.size() != it->second.size())
+          RDCWARN("Initial D3D12 state count mismatch for %s: tracked %zu, initial %zu",
+                  ToStr(it->first).c_str(), currentStates.size(), it->second.size());
+
+        const size_t stateCount = RDCMIN(currentStates.size(), it->second.size());
+        for(size_t m = 0; m < stateCount; m++)
+        {
+          const D3D12ResourceLayout srcState = currentStates[m];
           const D3D12ResourceLayout dstState = it->second[m];
           if(srcState != dstState)
             AddStateResetBarrier(srcState, dstState, (ID3D12Resource *)GetResource(it->first),
