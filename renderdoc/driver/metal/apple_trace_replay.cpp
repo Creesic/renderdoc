@@ -23,7 +23,10 @@
  ******************************************************************************/
 
 #include "apple_trace_replay.h"
+#include <algorithm>
+#include <cerrno>
 #include <climits>
+#include <cstdlib>
 #include <functional>
 #include "api/replay/resourceid.h"
 #include "common/formatting.h"
@@ -31,6 +34,7 @@
 #include "os/os_specific.h"
 #include "serialise/rdcfile.h"
 #include "stb/stb_image.h"
+#include "strings/string_utils.h"
 
 namespace
 {
@@ -42,9 +46,32 @@ static bool IsActionNode(MetalTrace::NodeKind kind)
          kind == MetalTrace::NodeKind::Draw || kind == MetalTrace::NodeKind::Dispatch;
 }
 
-static ResourceType ResourceTypeForNode(MetalTrace::NodeKind kind)
+static bool IsSnapshotTextureNode(const MetalTrace::Node &node)
 {
-  switch(kind)
+  if(node.kind != MetalTrace::NodeKind::Binding || !node.path.beginsWith("/commands/"))
+    return false;
+  unsigned int slot = 0;
+  return node.name == "depth" || node.name == "stencil" ||
+         sscanf(node.name.c_str(), "color%u", &slot) == 1 ||
+         sscanf(node.name.c_str(), "tex[%u]", &slot) == 1;
+}
+
+static bool IsSnapshotBufferNode(const MetalTrace::Node &node)
+{
+  if(node.kind != MetalTrace::NodeKind::Binding || !node.path.beginsWith("/commands/"))
+    return false;
+  unsigned int slot = 0;
+  return node.name == "indexBuffer" || sscanf(node.name.c_str(), "buf[%u]", &slot) == 1;
+}
+
+static ResourceType ResourceTypeForNode(const MetalTrace::Node &node)
+{
+  if(IsSnapshotTextureNode(node))
+    return ResourceType::Texture;
+  if(IsSnapshotBufferNode(node))
+    return ResourceType::Buffer;
+
+  switch(node.kind)
   {
     case MetalTrace::NodeKind::Buffer: return ResourceType::Buffer;
     case MetalTrace::NodeKind::Texture: return ResourceType::Texture;
@@ -59,6 +86,208 @@ static ResourceType ResourceTypeForNode(MetalTrace::NodeKind kind)
     default: break;
   }
   return ResourceType::Unknown;
+}
+
+static const MetalTrace::NodeInfo *FindNodeInfo(const MetalTrace::Index &index, const rdcstr &path)
+{
+  for(const MetalTrace::NodeInfo &info : index.nodeInfos)
+    if(info.path == path)
+      return &info;
+  return NULL;
+}
+
+static rdcstr InfoProperty(const MetalTrace::NodeInfo *info, const rdcstr &key)
+{
+  if(info == NULL)
+    return {};
+  for(size_t i = 0; i < info->keys.size() && i < info->values.size(); i++)
+    if(info->keys[i] == key)
+      return info->values[i];
+  return {};
+}
+
+static bool ParseUInt64(const rdcstr &text, uint64_t &value)
+{
+  if(text.empty())
+    return false;
+  char *end = NULL;
+  errno = 0;
+  unsigned long long parsed = strtoull(text.c_str(), &end, 0);
+  if(errno != 0 || end == text.c_str() || *end != 0)
+    return false;
+  value = (uint64_t)parsed;
+  return true;
+}
+
+static bool ParseInt32(const rdcstr &text, int32_t &value)
+{
+  if(text.empty())
+    return false;
+  char *end = NULL;
+  errno = 0;
+  long long parsed = strtoll(text.c_str(), &end, 0);
+  if(errno != 0 || end == text.c_str() || *end != 0 || parsed < INT32_MIN || parsed > INT32_MAX)
+    return false;
+  value = (int32_t)parsed;
+  return true;
+}
+
+static Topology ParsePrimitiveTopology(const rdcstr &name)
+{
+  if(name == "Point")
+    return Topology::PointList;
+  if(name == "Line")
+    return Topology::LineList;
+  if(name == "LineStrip")
+    return Topology::LineStrip;
+  if(name == "Triangle")
+    return Topology::TriangleList;
+  if(name == "TriangleStrip")
+    return Topology::TriangleStrip;
+  return Topology::Unknown;
+}
+
+static ResourceFormat ParseVertexFormat(const rdcstr &name)
+{
+  ResourceFormat ret;
+  ret.type = ResourceFormatType::Regular;
+  ret.compCount = 1;
+
+  if(name == "Int1010102Normalized" || name == "UInt1010102Normalized")
+  {
+    ret.type = ResourceFormatType::R10G10B10A2;
+    ret.compCount = 4;
+    ret.compByteWidth = 1;
+    ret.compType = name[0] == 'U' ? CompType::UNorm : CompType::SNorm;
+    return ret;
+  }
+  if(name == "FloatRG11B10")
+  {
+    ret.type = ResourceFormatType::R11G11B10;
+    ret.compCount = 3;
+    ret.compByteWidth = 1;
+    ret.compType = CompType::Float;
+    return ret;
+  }
+  if(name == "FloatRGB9E5")
+  {
+    ret.type = ResourceFormatType::R9G9B9E5;
+    ret.compCount = 3;
+    ret.compByteWidth = 1;
+    ret.compType = CompType::Float;
+    return ret;
+  }
+
+  rdcstr base = name;
+  const bool bgra = base.endsWith("_BGRA");
+  if(bgra)
+    base.resize(base.size() - 5);
+  const bool normalized = base.contains("Normalized");
+  if(normalized)
+    base = base.substr(0, base.find("Normalized"));
+  if(!base.empty() && base.back() >= '2' && base.back() <= '4')
+  {
+    ret.compCount = (uint8_t)(base.back() - '0');
+    base.pop_back();
+  }
+
+  if(base == "UChar")
+  {
+    ret.compByteWidth = 1;
+    ret.compType = normalized ? CompType::UNorm : CompType::UInt;
+  }
+  else if(base == "Char")
+  {
+    ret.compByteWidth = 1;
+    ret.compType = normalized ? CompType::SNorm : CompType::SInt;
+  }
+  else if(base == "UShort")
+  {
+    ret.compByteWidth = 2;
+    ret.compType = normalized ? CompType::UNorm : CompType::UInt;
+  }
+  else if(base == "Short")
+  {
+    ret.compByteWidth = 2;
+    ret.compType = normalized ? CompType::SNorm : CompType::SInt;
+  }
+  else if(base == "Half")
+  {
+    ret.compByteWidth = 2;
+    ret.compType = CompType::Float;
+  }
+  else if(base == "Float")
+  {
+    ret.compByteWidth = 4;
+    ret.compType = CompType::Float;
+  }
+  else if(base == "Int")
+  {
+    ret.compByteWidth = 4;
+    ret.compType = CompType::SInt;
+  }
+  else if(base == "UInt")
+  {
+    ret.compByteWidth = 4;
+    ret.compType = CompType::UInt;
+  }
+  else
+  {
+    ret.type = ResourceFormatType::Undefined;
+    ret.compCount = 0;
+    ret.compByteWidth = 0;
+    ret.compType = CompType::Typeless;
+  }
+
+  if(bgra)
+    ret.SetBGRAOrder(true);
+  return ret;
+}
+
+static void ParseVertexLayout(const rdcstr &description, MetalPipe::VertexInput &vertexInput)
+{
+  rdcarray<rdcstr> lines;
+  split(description, lines, '\n');
+  int32_t currentLayout = -1;
+  for(rdcstr line : lines)
+  {
+    line = line.trimmed();
+    unsigned int slot = 0, stride = 0;
+    char step[128] = {};
+    if(sscanf(line.c_str(), "buffer %u (stride=%u, %127[^)])", &slot, &stride, step) == 3)
+    {
+      MetalPipe::VertexBufferLayout layout;
+      layout.slot = slot;
+      layout.byteStride = stride;
+      rdcstr stepText(step);
+      layout.stepFunction = stepText.contains("perInstance") ? MetalPipe::StepFunction::PerInstance
+                                                             : MetalPipe::StepFunction::PerVertex;
+      int32_t ratePos = stepText.find("stepRate=");
+      if(ratePos >= 0)
+      {
+        uint64_t rate = 0;
+        if(ParseUInt64(stepText.substr(ratePos + 9), rate) && rate <= UINT32_MAX)
+          layout.stepRate = (uint32_t)rate;
+      }
+      vertexInput.layouts.push_back(layout);
+      currentLayout = (int32_t)vertexInput.layouts.size() - 1;
+      continue;
+    }
+
+    unsigned int attribute = 0, offset = 0;
+    char formatName[128] = {};
+    if(currentLayout >= 0 &&
+       sscanf(line.c_str(), "attr%u %127s @%u", &attribute, formatName, &offset) == 3)
+    {
+      MetalPipe::VertexAttribute attr;
+      attr.attributeIndex = attribute;
+      attr.vertexBufferSlot = vertexInput.layouts[(size_t)currentLayout].slot;
+      attr.byteOffset = offset;
+      attr.format = ParseVertexFormat(formatName);
+      if(attr.format.type != ResourceFormatType::Undefined)
+        vertexInput.attributes.push_back(attr);
+    }
+  }
 }
 
 static ActionFlags ActionFlagsForNode(MetalTrace::NodeKind kind)
@@ -127,8 +356,7 @@ static ActionDescription *FindActionByEvent(rdcarray<ActionDescription> &actions
   return NULL;
 }
 
-static const ActionDescription *FindFirstActionWithOutput(
-    const rdcarray<ActionDescription> &actions)
+static const ActionDescription *FindFirstActionWithOutput(const rdcarray<ActionDescription> &actions)
 {
   for(const ActionDescription &action : actions)
   {
@@ -212,6 +440,7 @@ AppleTraceReplayDriver::~AppleTraceReplayDriver()
 {
   CancelReplayWork();
   ClearTexturePreviews();
+  ClearBufferProxies();
   if(m_TextureRenderer)
   {
     m_TextureRenderer->Shutdown();
@@ -248,8 +477,8 @@ APIProperties AppleTraceReplayDriver::GetAPIProperties()
   bool hasFetchableTexture = false;
   for(const auto &textureNode : m_TextureNodes)
     hasFetchableTexture |= m_Index.nodes[textureNode.second].canFetch;
-  const bool textureFetch = hasFetchableTexture && sourceAvailable && m_Session != NULL &&
-                            m_TextureRenderer != NULL;
+  const bool textureFetch =
+      hasFetchableTexture && sourceAvailable && m_Session != NULL && m_TextureRenderer != NULL;
 
   rdcstr textureFetchReason;
   if(!textureFetch)
@@ -257,9 +486,10 @@ APIProperties AppleTraceReplayDriver::GetAPIProperties()
     if(!sourceAvailable)
       textureFetchReason = "The source .gputrace is unavailable for lazy texture fetch";
     else if(!hasFetchableTexture)
-      textureFetchReason = !m_Index.bufferFetchUnavailableReason.empty()
-                               ? m_Index.bufferFetchUnavailableReason
-                               : rdcstr("The normalized trace contains no fetchable texture previews");
+      textureFetchReason =
+          !m_Index.bufferFetchUnavailableReason.empty()
+              ? m_Index.bufferFetchUnavailableReason
+              : rdcstr("The normalized trace contains no fetchable texture previews");
     else if(m_Session == NULL)
       textureFetchReason = "The Apple GPU Trace inspection session is unavailable";
     else if(!m_TextureFetchUnavailableReason.empty())
@@ -276,10 +506,11 @@ APIProperties AppleTraceReplayDriver::GetAPIProperties()
   props.features = {
       {ReplayFeature::ExecutableReplay, false,
        "Apple GPU Trace inspection has no executable Metal command stream"},
-      {ReplayFeature::PipelineState, false,
-       "Apple GPU Trace pipeline-state normalization is not implemented"},
-      {ReplayFeature::TextureFetch, textureFetch,
-       textureFetch ? rdcstr() : textureFetchReason},
+      {ReplayFeature::PipelineState, !m_EventVertexInputs.empty(),
+       m_EventVertexInputs.empty()
+           ? rdcstr("The trace contains no normalized Metal vertex-input state")
+           : rdcstr()},
+      {ReplayFeature::TextureFetch, textureFetch, textureFetch ? rdcstr() : textureFetchReason},
       {ReplayFeature::BufferFetch, bufferFetch,
        bufferFetch           ? rdcstr()
        : manifestBufferFetch ? rdcstr("The source .gputrace is unavailable for lazy buffer fetch")
@@ -344,6 +575,13 @@ TextureDescription AppleTraceReplayDriver::GetTexture(ResourceId id)
     if(texture.resourceId == id)
       return texture;
   return {};
+}
+
+rdcarray<DebugMessage> AppleTraceReplayDriver::GetDebugMessages()
+{
+  rdcarray<DebugMessage> ret;
+  ret.swap(m_DebugMessages);
+  return ret;
 }
 
 bool AppleTraceReplayDriver::InitialiseTextureRenderer()
@@ -502,6 +740,14 @@ void AppleTraceReplayDriver::ClearTexturePreviews()
   m_TexturePreviewErrors.clear();
 }
 
+void AppleTraceReplayDriver::ClearBufferProxies()
+{
+  if(m_TextureRenderer)
+    for(const auto &proxy : m_ProxyBuffers)
+      m_TextureRenderer->FreeTargetResource(proxy.second);
+  m_ProxyBuffers.clear();
+}
+
 RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBuffers)
 {
   (void)storeStructuredBuffers;
@@ -524,8 +770,10 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
   m_BufferNodes.clear();
   m_TextureNodes.clear();
   m_EventDescriptors.clear();
+  m_EventVertexInputs.clear();
   m_DebugMessages.clear();
   ClearTexturePreviews();
+  ClearBufferProxies();
   m_TextureFetchUnavailableReason.clear();
   m_FrameRecord = {};
 
@@ -544,9 +792,8 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
     message.category = MessageCategory::Execution;
     message.severity = MessageSeverity::Medium;
     message.source = MessageSource::RuntimeWarning;
-    message.description =
-        "Apple GPU Trace argument-buffer inputs are unavailable: " +
-        m_Index.argumentBufferUnavailableReason;
+    message.description = "Apple GPU Trace argument-buffer inputs are unavailable: " +
+                          m_Index.argumentBufferUnavailableReason;
     m_DebugMessages.push_back(message);
   }
 
@@ -555,8 +802,9 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
     for(size_t nodeIndex = 0; nodeIndex < m_Index.nodes.size(); nodeIndex++)
     {
       const MetalTrace::Node &node = m_Index.nodes[nodeIndex];
-      ResourceType type = ResourceTypeForNode(node.kind);
-      if(type == ResourceType::Unknown || node.objectName.empty())
+      ResourceType type = ResourceTypeForNode(node);
+      const bool snapshot = IsSnapshotTextureNode(node) || IsSnapshotBufferNode(node);
+      if(type == ResourceType::Unknown || (node.objectName.empty() && !snapshot))
         continue;
       if(m_StableResources.find(node.stableId) != m_StableResources.end())
         continue;
@@ -570,7 +818,7 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
       resource.SetCustomName(DisplayName(node));
       m_Resources.push_back(resource);
 
-      if(node.kind == MetalTrace::NodeKind::Buffer)
+      if(type == ResourceType::Buffer)
       {
         BufferDescription buffer;
         buffer.resourceId = id;
@@ -578,7 +826,7 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
         m_BufferNodes[id] = nodeIndex;
         m_Buffers.push_back(buffer);
       }
-      else if(node.kind == MetalTrace::NodeKind::Texture)
+      else if(type == ResourceType::Texture)
       {
         TextureDescription texture = {};
         texture.resourceId = id;
@@ -618,6 +866,9 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
 
       if(node.kind == MetalTrace::NodeKind::Draw || node.kind == MetalTrace::NodeKind::Dispatch)
       {
+        if(node.kind == MetalTrace::NodeKind::Draw)
+          PopulateDrawState(node, action, nextEventID);
+
         rdcstr descendant = node.path + "/";
         // Some normalized bindings (notably resources decoded from argument buffers) are appended
         // after the public gpudebug tree has been walked, so locate descendants by path instead of
@@ -702,6 +953,43 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
       nextEventID++;
     }
 
+    // Synthetic argument-buffer bindings are appended after the public tree walk. Canonicalise
+    // every event's descriptors by stage/type/slot so the pipeline and Texture Viewer don't expose
+    // normalisation order as if it were Metal binding order.
+    for(auto &event : m_EventDescriptors)
+    {
+      EventDescriptors &descriptors = event.second;
+      rdcarray<size_t> order;
+      order.resize(descriptors.accesses.size());
+      for(size_t i = 0; i < order.size(); i++)
+        order[i] = i;
+      std::stable_sort(order.begin(), order.end(), [&descriptors](size_t a, size_t b) {
+        const DescriptorAccess &left = descriptors.accesses[a];
+        const DescriptorAccess &right = descriptors.accesses[b];
+        if(left.stage != right.stage)
+          return left.stage < right.stage;
+        if(left.type != right.type)
+          return left.type < right.type;
+        if(left.index != right.index)
+          return left.index < right.index;
+        return left.arrayElement < right.arrayElement;
+      });
+
+      rdcarray<DescriptorAccess> sortedAccesses;
+      rdcarray<Descriptor> sortedDescriptors;
+      sortedAccesses.reserve(order.size());
+      sortedDescriptors.reserve(order.size());
+      for(size_t source : order)
+      {
+        DescriptorAccess access = descriptors.accesses[source];
+        access.byteOffset = (uint32_t)sortedDescriptors.size();
+        sortedAccesses.push_back(access);
+        sortedDescriptors.push_back(descriptors.descriptors[source]);
+      }
+      descriptors.accesses = std::move(sortedAccesses);
+      descriptors.descriptors = std::move(sortedDescriptors);
+    }
+
     // Classify normalized attachment textures so they also appear under Render Targets in the
     // resource browser. Shader inputs already carry ShaderRead from FillTextureDimensions().
     std::function<void(const rdcarray<ActionDescription> &)> markAttachments =
@@ -765,6 +1053,118 @@ void AppleTraceReplayDriver::ReplayLog(uint32_t endEventID, ReplayLogType replay
   (void)replayType;
 }
 
+void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
+                                               ActionDescription &action, uint32_t eventId)
+{
+  const MetalTrace::NodeInfo *drawInfo = FindNodeInfo(m_Index, node.path);
+  MetalPipe::VertexInput vertexInput;
+  vertexInput.topology = ParsePrimitiveTopology(InfoProperty(drawInfo, "primitiveType"));
+
+  uint64_t parsed = 0;
+  if(ParseUInt64(InfoProperty(drawInfo, "indexCount"), parsed) && parsed <= UINT32_MAX)
+  {
+    action.numIndices = (uint32_t)parsed;
+    action.flags |= ActionFlags::Indexed;
+  }
+  else if(ParseUInt64(InfoProperty(drawInfo, "vertexCount"), parsed) && parsed <= UINT32_MAX)
+  {
+    action.numIndices = (uint32_t)parsed;
+  }
+
+  action.numInstances = 1;
+  if(ParseUInt64(InfoProperty(drawInfo, "instanceCount"), parsed) && parsed <= UINT32_MAX)
+    action.numInstances = (uint32_t)parsed;
+  if(action.numInstances > 1)
+    action.flags |= ActionFlags::Instanced;
+
+  ParseInt32(InfoProperty(drawInfo, "baseVertex"), action.baseVertex);
+  if(ParseUInt64(InfoProperty(drawInfo, "baseInstance"), parsed) && parsed <= UINT32_MAX)
+    action.instanceOffset = (uint32_t)parsed;
+  if(ParseUInt64(InfoProperty(drawInfo, "vertexStart"), parsed) && parsed <= UINT32_MAX)
+    action.vertexOffset = (uint32_t)parsed;
+
+  const rdcstr indexType = InfoProperty(drawInfo, "indexType");
+  if(indexType == "UInt16")
+    vertexInput.indexBuffer.byteStride = 2;
+  else if(indexType == "UInt32")
+    vertexInput.indexBuffer.byteStride = 4;
+  else if(indexType == "UInt8")
+    vertexInput.indexBuffer.byteStride = 1;
+
+  uint64_t indexByteOffset = 0;
+  ParseUInt64(InfoProperty(drawInfo, "indexBufferOffset"), indexByteOffset);
+  if(vertexInput.indexBuffer.byteStride > 0 &&
+     indexByteOffset / vertexInput.indexBuffer.byteStride <= UINT32_MAX)
+    action.indexOffset = (uint32_t)(indexByteOffset / vertexInput.indexBuffer.byteStride);
+
+  rdcstr pipelineObject;
+  const rdcstr prefix = node.path + "/";
+  for(const MetalTrace::Node &binding : m_Index.nodes)
+  {
+    if(!binding.path.beginsWith(prefix))
+      continue;
+    const rdcstr relative = binding.path.substr(prefix.size());
+
+    if(relative == "pipeline")
+    {
+      pipelineObject = binding.objectName;
+      continue;
+    }
+    if(relative == "indexBuffer")
+    {
+      auto resource = m_StableResources.find(binding.stableId);
+      if(resource != m_StableResources.end())
+      {
+        vertexInput.indexBuffer.resourceId = resource->second;
+        vertexInput.indexBuffer.byteSize = GetBuffer(resource->second).length;
+      }
+      continue;
+    }
+
+    unsigned int slot = 0;
+    if(sscanf(relative.c_str(), "vertex/buf[%u]", &slot) != 1 || relative.contains("]/"))
+      continue;
+    auto resource = m_StableResources.find(binding.stableId);
+    if(resource == m_StableResources.end())
+      continue;
+    if(vertexInput.vertexBuffers.size() <= slot)
+      vertexInput.vertexBuffers.resize(slot + 1);
+    MetalPipe::VertexBuffer &buffer = vertexInput.vertexBuffers[slot];
+    buffer.slot = slot;
+    buffer.resourceId = resource->second;
+    uint64_t vertexByteOffset = 0;
+    ParseUInt64(InfoProperty(drawInfo, StringFormat::Fmt("vertexBufferOffset[%u]", slot)),
+                vertexByteOffset);
+    buffer.byteOffset = vertexByteOffset;
+    const uint64_t bufferLength = GetBuffer(resource->second).length;
+    buffer.byteSize = vertexByteOffset < bufferLength ? bufferLength - vertexByteOffset : 0;
+  }
+
+  if(!pipelineObject.empty())
+  {
+    for(const MetalTrace::Node &pipeline : m_Index.nodes)
+    {
+      if(pipeline.kind != MetalTrace::NodeKind::RenderPipeline ||
+         pipeline.objectName != pipelineObject)
+        continue;
+      const MetalTrace::NodeInfo *pipelineInfo = FindNodeInfo(m_Index, pipeline.path);
+      ParseVertexLayout(InfoProperty(pipelineInfo, "vertexLayout"), vertexInput);
+      break;
+    }
+  }
+
+  for(const MetalPipe::VertexBufferLayout &layout : vertexInput.layouts)
+  {
+    if(vertexInput.vertexBuffers.size() <= layout.slot)
+      vertexInput.vertexBuffers.resize(layout.slot + 1);
+    MetalPipe::VertexBuffer &buffer = vertexInput.vertexBuffers[layout.slot];
+    buffer.slot = layout.slot;
+    buffer.byteStride = layout.byteStride;
+  }
+
+  m_EventVertexInputs[eventId] = vertexInput;
+}
+
 void AppleTraceReplayDriver::SavePipelineState(uint32_t eventId)
 {
   if(m_MetalPipelineState == NULL)
@@ -776,6 +1176,10 @@ void AppleTraceReplayDriver::SavePipelineState(uint32_t eventId)
   m_MetalPipelineState->vertexShader.stage = ShaderStage::Vertex;
   m_MetalPipelineState->fragmentShader.stage = ShaderStage::Fragment;
   m_MetalPipelineState->computeShader.stage = ShaderStage::Compute;
+
+  auto vertexInput = m_EventVertexInputs.find(eventId);
+  if(vertexInput != m_EventVertexInputs.end())
+    m_MetalPipelineState->vertexInput = vertexInput->second;
 
   ActionDescription *action = FindActionByEvent(m_FrameRecord.actionList, eventId);
   if(action != NULL)
@@ -834,8 +1238,8 @@ rdcarray<DescriptorAccess> AppleTraceReplayDriver::GetDescriptorAccess(uint32_t 
   return event == m_EventDescriptors.end() ? rdcarray<DescriptorAccess>() : event->second.accesses;
 }
 
-rdcarray<Descriptor> AppleTraceReplayDriver::GetDescriptors(
-    ResourceId descriptorStore, const rdcarray<DescriptorRange> &ranges)
+rdcarray<Descriptor> AppleTraceReplayDriver::GetDescriptors(ResourceId descriptorStore,
+                                                            const rdcarray<DescriptorRange> &ranges)
 {
   const EventDescriptors *event = NULL;
   for(const auto &candidate : m_EventDescriptors)
@@ -929,12 +1333,104 @@ void AppleTraceReplayDriver::GetTextureData(ResourceId tex, const Subresource &s
   if(preview != m_TexturePreviewData.end())
     data = preview->second;
   else
-    RecordTexturePreviewError(tex, "The decoded texture preview was not retained in the replay cache");
+    RecordTexturePreviewError(tex,
+                              "The decoded texture preview was not retained in the replay cache");
+}
+
+bool AppleTraceReplayDriver::EnsureBufferProxy(ResourceId buffer, ResourceId &proxyBuffer)
+{
+  proxyBuffer = ResourceId();
+  if(buffer == ResourceId())
+    return true;
+
+  auto existing = m_ProxyBuffers.find(buffer);
+  if(existing != m_ProxyBuffers.end())
+  {
+    proxyBuffer = existing->second;
+    return true;
+  }
+  if(m_TextureRenderer == NULL)
+    return false;
+
+  BufferDescription description = GetBuffer(buffer);
+  if(description.resourceId == ResourceId())
+    return false;
+
+  bytebuf data;
+  GetBufferData(buffer, 0, 0, data);
+  if(description.length > 0 && data.empty())
+    return false;
+  description.resourceId = ResourceId();
+  description.length = data.size();
+  proxyBuffer = m_TextureRenderer->CreateProxyBuffer(description);
+  if(proxyBuffer == ResourceId())
+    return false;
+  if(!data.empty())
+    m_TextureRenderer->SetProxyBufferData(proxyBuffer, data.data(), data.size());
+  m_ProxyBuffers[buffer] = proxyBuffer;
+  return true;
+}
+
+bool AppleTraceReplayDriver::TranslateMeshFormat(MeshFormat &format)
+{
+  ResourceId proxy;
+  if(format.vertexResourceId != ResourceId())
+  {
+    if(!EnsureBufferProxy(format.vertexResourceId, proxy))
+      return false;
+    format.vertexResourceId = proxy;
+  }
+  if(format.indexResourceId != ResourceId())
+  {
+    if(!EnsureBufferProxy(format.indexResourceId, proxy))
+      return false;
+    format.indexResourceId = proxy;
+  }
+  return true;
+}
+
+ResourceId AppleTraceReplayDriver::CreateProxyBuffer(const BufferDescription &templateBuf)
+{
+  return m_TextureRenderer ? m_TextureRenderer->CreateProxyBuffer(templateBuf) : ResourceId();
+}
+
+void AppleTraceReplayDriver::SetProxyBufferData(ResourceId bufid, byte *data, size_t dataSize)
+{
+  if(m_TextureRenderer)
+    m_TextureRenderer->SetProxyBufferData(bufid, data, dataSize);
+}
+
+void AppleTraceReplayDriver::RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &secondaryDraws,
+                                        const MeshDisplay &cfg)
+{
+  if(m_TextureRenderer == NULL)
+    return;
+
+  MeshDisplay translated = cfg;
+  if(!TranslateMeshFormat(translated.position) || !TranslateMeshFormat(translated.second))
+    return;
+  rdcarray<MeshFormat> translatedSecondary = secondaryDraws;
+  for(MeshFormat &secondary : translatedSecondary)
+    if(!TranslateMeshFormat(secondary))
+      return;
+  m_TextureRenderer->RenderMesh(eventId, translatedSecondary, translated);
+}
+
+uint32_t AppleTraceReplayDriver::PickVertex(uint32_t eventId, int32_t width, int32_t height,
+                                            const MeshDisplay &cfg, uint32_t x, uint32_t y)
+{
+  if(m_TextureRenderer == NULL)
+    return ~0U;
+  MeshDisplay translated = cfg;
+  if(!TranslateMeshFormat(translated.position) || !TranslateMeshFormat(translated.second))
+    return ~0U;
+  return m_TextureRenderer->PickVertex(eventId, width, height, translated, x, y);
 }
 
 void AppleTraceReplayDriver::ClearReplayCache()
 {
   ClearTexturePreviews();
+  ClearBufferProxies();
   if(m_TextureRenderer)
     m_TextureRenderer->ClearReplayCache();
 }
@@ -1105,8 +1601,7 @@ static void AppendPreviewPNG(void *context, void *data, int size)
 TEST_CASE("Apple GPU Trace texture previews decode to displayable RGBA8", "[metal][apple-trace]")
 {
   const byte source[] = {
-      255, 0, 0, 255,
-      0, 255, 0, 128,
+      255, 0, 0, 255, 0, 255, 0, 128,
   };
   bytebuf encoded;
   REQUIRE(stbi_write_png_to_func(AppendPreviewPNG, &encoded, 2, 1, 4, source, 2 * 4) != 0);
@@ -1125,6 +1620,59 @@ TEST_CASE("Apple GPU Trace texture previews decode to displayable RGBA8", "[meta
   CHECK(malformed.code == ResultCode::APIDataCorrupted);
   CHECK(rdcstr(malformed.message).contains("PNG"));
   CHECK(decoded.empty());
+}
+
+TEST_CASE("Apple GPU Trace parses Metal vertex layouts", "[metal][apple-trace]")
+{
+  MetalPipe::VertexInput input;
+  ParseVertexLayout(
+      "  buffer 12 (stride=24, perVertex):\n"
+      "    attr0   Int                    @0\n"
+      "    attr3   UChar4Normalized_BGRA  @12",
+      input);
+
+  REQUIRE(input.layouts.size() == 1);
+  CHECK(input.layouts[0].slot == 12);
+  CHECK(input.layouts[0].byteStride == 24);
+  CHECK(input.layouts[0].stepFunction == MetalPipe::StepFunction::PerVertex);
+  REQUIRE(input.attributes.size() == 2);
+  CHECK(input.attributes[0].attributeIndex == 0);
+  CHECK(input.attributes[0].vertexBufferSlot == 12);
+  CHECK(input.attributes[0].format.compType == CompType::SInt);
+  CHECK(input.attributes[0].format.compCount == 1);
+  CHECK(input.attributes[0].format.compByteWidth == 4);
+  CHECK(input.attributes[1].attributeIndex == 3);
+  CHECK(input.attributes[1].format.compType == CompType::UNorm);
+  CHECK(input.attributes[1].format.compCount == 4);
+  CHECK(input.attributes[1].format.compByteWidth == 1);
+  CHECK(input.attributes[1].format.BGRAOrder());
+  CHECK(ParsePrimitiveTopology("TriangleStrip") == Topology::TriangleStrip);
+}
+
+TEST_CASE("Apple GPU Trace debug messages are consumed when read", "[metal][apple-trace]")
+{
+  struct ScopedReplay
+  {
+    ~ScopedReplay()
+    {
+      if(driver)
+        driver->Shutdown();
+    }
+
+    AppleTraceReplayDriver *driver = NULL;
+  } replay;
+
+  replay.driver = new AppleTraceReplayDriver(MetalTrace::Manifest());
+
+  Subresource unsupported;
+  unsupported.mip = 1;
+  bytebuf data;
+  replay.driver->GetTextureData(ResourceId(), unsupported, GetTextureDataParams(), data);
+
+  rdcarray<DebugMessage> messages = replay.driver->GetDebugMessages();
+  REQUIRE(messages.size() == 1);
+  CHECK(messages[0].description.contains("base texture preview subresource"));
+  CHECK(replay.driver->GetDebugMessages().empty());
 }
 
 TEST_CASE("Apple GPU Trace live texture preview is fetchable through replay",
@@ -1182,7 +1730,12 @@ TEST_CASE("Apple GPU Trace live texture preview is fetchable through replay",
 
   bool foundStageBinding = false;
   bool foundTextureInput = false;
+  bool foundVertexMesh = false;
+  bool foundNonZeroVertexOffset = false;
+  bool foundDistinctOutput = false;
+  bytebuf referenceOutput;
   rdcarray<ResourceId> textureInputs;
+  rdcarray<ResourceId> testedOutputs;
   std::function<void(const rdcarray<ActionDescription> &)> findStageBinding =
       [&](const rdcarray<ActionDescription> &actions) {
         for(const ActionDescription &action : actions)
@@ -1190,8 +1743,48 @@ TEST_CASE("Apple GPU Trace live texture preview is fetchable through replay",
           if(action.flags & (ActionFlags::Drawcall | ActionFlags::Dispatch))
           {
             controller->SetFrameEvent(action.eventId, true);
-            for(ShaderStage stage : {ShaderStage::Vertex, ShaderStage::Fragment,
-                                     ShaderStage::Compute})
+            if(action.flags & ActionFlags::Drawcall)
+            {
+              for(ResourceId output : action.outputs)
+              {
+                if(output == ResourceId() || testedOutputs.contains(output) ||
+                   testedOutputs.size() >= 20)
+                  continue;
+                testedOutputs.push_back(output);
+                bytebuf preview = controller->GetTextureData(output, Subresource());
+                if(referenceOutput.empty())
+                  referenceOutput = preview;
+                else if(!preview.empty() && preview != referenceOutput)
+                  foundDistinctOutput = true;
+              }
+
+              if(action.numIndices > 0)
+              {
+                const PipeState &pipe = controller->GetPipelineState();
+                rdcarray<VertexInputAttribute> attributes = pipe.GetVertexInputs();
+                rdcarray<BoundVBuffer> vertexBuffers = pipe.GetVBuffers();
+                for(const BoundVBuffer &buffer : vertexBuffers)
+                  foundNonZeroVertexOffset |=
+                      buffer.resourceId != ResourceId() && buffer.byteOffset > 0;
+                for(const VertexInputAttribute &attribute : attributes)
+                {
+                  if(foundVertexMesh)
+                    break;
+                  if(attribute.vertexBuffer < 0 ||
+                     (size_t)attribute.vertexBuffer >= vertexBuffers.size())
+                    continue;
+                  const BoundVBuffer &buffer = vertexBuffers[(size_t)attribute.vertexBuffer];
+                  if(buffer.resourceId == ResourceId())
+                    continue;
+                  foundVertexMesh =
+                      !controller->GetBufferData(buffer.resourceId, buffer.byteOffset, 64).empty();
+                  if(foundVertexMesh)
+                    break;
+                }
+              }
+            }
+            for(ShaderStage stage :
+                {ShaderStage::Vertex, ShaderStage::Fragment, ShaderStage::Compute})
             {
               for(const UsedDescriptor &input :
                   controller->GetPipelineState().GetReadOnlyResources(stage, true))
@@ -1214,6 +1807,9 @@ TEST_CASE("Apple GPU Trace live texture preview is fetchable through replay",
   findStageBinding(controller->GetRootActions());
   REQUIRE(foundStageBinding);
   REQUIRE(foundTextureInput);
+  REQUIRE(foundDistinctOutput);
+  REQUIRE(foundVertexMesh);
+  REQUIRE(foundNonZeroVertexOffset);
   REQUIRE(textureInputs.size() > 1);
   REQUIRE_FALSE(controller->GetTextureData(textureInputs[0], Subresource()).empty());
 
@@ -1264,8 +1860,8 @@ TEST_CASE("Apple GPU Trace live texture preview is fetchable through replay",
   live.output =
       controller->CreateOutput(CreateHeadlessWindowingData(64, 64), ReplayOutputType::Texture);
   REQUIRE(live.output != NULL);
-  bytebuf thumbnail = live.output->DrawThumbnail(64, 64, selected->resourceId, Subresource(),
-                                                 CompType::Typeless);
+  bytebuf thumbnail =
+      live.output->DrawThumbnail(64, 64, selected->resourceId, Subresource(), CompType::Typeless);
   REQUIRE_FALSE(thumbnail.empty());
 
   TextureDisplay display;
@@ -1287,8 +1883,10 @@ TEST_CASE("Apple GPU Trace live texture preview is fetchable through replay",
   byte renderedMax = 0;
   for(size_t i = 0; i < rendered.size(); i += outputComponents)
   {
-    renderedMin = RDCMIN(renderedMin, RDCMIN(rendered[i + 0], RDCMIN(rendered[i + 1], rendered[i + 2])));
-    renderedMax = RDCMAX(renderedMax, RDCMAX(rendered[i + 0], RDCMAX(rendered[i + 1], rendered[i + 2])));
+    renderedMin =
+        RDCMIN(renderedMin, RDCMIN(rendered[i + 0], RDCMIN(rendered[i + 1], rendered[i + 2])));
+    renderedMax =
+        RDCMAX(renderedMax, RDCMAX(rendered[i + 0], RDCMAX(rendered[i + 1], rendered[i + 2])));
   }
   CHECK(renderedMax > 128);
   CHECK(renderedMax - renderedMin > 64);

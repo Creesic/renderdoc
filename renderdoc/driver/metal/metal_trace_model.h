@@ -42,7 +42,7 @@ static constexpr uint32_t IndexMagic = FourCC('M', 'T', 'I', 'X');
 static constexpr uint32_t ContainerVersion = 1;
 static constexpr uint32_t ManifestVersion = 1;
 static constexpr uint32_t MinimumIndexVersion = 1;
-static constexpr uint32_t IndexVersion = 4;
+static constexpr uint32_t IndexVersion = 5;
 
 static constexpr const char *ManifestSectionName = "AppleGPUTrace.Manifest";
 static constexpr const char *IndexSectionName = "AppleGPUTrace.Index";
@@ -147,6 +147,15 @@ struct RawListing
   rdcstr json;
 };
 
+// Curated `gpudebug info --all` properties retained for nodes whose listing summary isn't enough
+// to reconstruct RenderDoc state (notably draw arguments and render-pipeline vertex layouts).
+struct NodeInfo
+{
+  rdcstr path;
+  rdcarray<rdcstr> keys;
+  rdcarray<rdcstr> values;
+};
+
 struct Index
 {
   rdcstr actionName;
@@ -158,6 +167,7 @@ struct Index
   rdcstr argumentBufferUnavailableReason;
   rdcarray<Node> nodes;
   rdcarray<RawListing> rawListings;
+  rdcarray<NodeInfo> nodeInfos;
 };
 
 RDResult WriteThinRDC(RDCFile *rdc, const Manifest &manifest, const Index &index);

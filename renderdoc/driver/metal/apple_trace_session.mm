@@ -30,11 +30,13 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
-#include <sys/sysctl.h>
 #include <string.h>
+#include <sys/sysctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <climits>
 #include <map>
@@ -344,6 +346,81 @@ static NSDictionary *ParseJSONObject(const rdcstr &json, rdcstr &error)
   return (NSDictionary *)object;
 }
 
+static rdcarray<rdcstr> SplitJSONObjectStream(const rdcstr &stream)
+{
+  rdcarray<rdcstr> objects;
+  size_t begin = 0;
+  while(begin < stream.size())
+  {
+    while(begin < stream.size() && isspace((unsigned char)stream[begin]))
+      begin++;
+    if(begin == stream.size())
+      break;
+    if(stream[begin] != '{')
+      return {};
+
+    uint32_t depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    size_t end = begin;
+    for(; end < stream.size(); end++)
+    {
+      const char c = stream[end];
+      if(inString)
+      {
+        if(escaped)
+          escaped = false;
+        else if(c == '\\')
+          escaped = true;
+        else if(c == '"')
+          inString = false;
+        continue;
+      }
+      if(c == '"')
+        inString = true;
+      else if(c == '{')
+        depth++;
+      else if(c == '}' && --depth == 0)
+      {
+        end++;
+        break;
+      }
+    }
+    if(depth != 0 || inString)
+      return {};
+    objects.push_back(stream.substr(begin, end - begin));
+    begin = end;
+  }
+  return objects;
+}
+
+static bool ParseAPICallPath(const rdcstr &path, uint32_t &apiCall)
+{
+  unsigned int parsed = 0;
+  if(sscanf(path.c_str(), "api_calls/api%u", &parsed) != 1 &&
+     sscanf(path.c_str(), "/api_calls/api%u", &parsed) != 1)
+    return false;
+  apiCall = parsed;
+  return true;
+}
+
+static bool ParseVertexBufferSetCall(const rdcstr &summary, rdcstr &objectName, uint64_t &offset,
+                                     uint32_t &slot)
+{
+  char parsedObject[128] = {};
+  unsigned long long parsedOffset = 0;
+  unsigned int parsedSlot = 0;
+  if(sscanf(summary.c_str(),
+            "[MTLRenderCommandEncoder setVertexBuffer:@%127s offset:%llu atIndex:%u]", parsedObject,
+            &parsedOffset, &parsedSlot) != 3)
+    return false;
+
+  objectName = parsedObject;
+  offset = (uint64_t)parsedOffset;
+  slot = parsedSlot;
+  return true;
+}
+
 static RDResult ToolFailure(const AppleTraceToolResult &result, const rdcstr &operation)
 {
   if(result.cancelled)
@@ -491,6 +568,18 @@ static MetalTrace::NodeKind ClassifyNode(const rdcstr &path, const rdcstr &name)
   return MetalTrace::NodeKind::Binding;
 }
 
+static bool IsCommandSnapshotBinding(const MetalTrace::Node &node)
+{
+  if(node.kind != MetalTrace::NodeKind::Binding || !node.path.beginsWith("/commands/"))
+    return false;
+
+  unsigned int slot = 0;
+  return node.name == "depth" || node.name == "stencil" || node.name == "indexBuffer" ||
+         sscanf(node.name.c_str(), "color%u", &slot) == 1 ||
+         sscanf(node.name.c_str(), "tex[%u]", &slot) == 1 ||
+         sscanf(node.name.c_str(), "buf[%u]", &slot) == 1;
+}
+
 static bool ShouldWalkChildren(const MetalTrace::Node &node)
 {
   if(!node.canGo)
@@ -589,8 +678,7 @@ struct TraceTextureInfo
 
 static bool IsIdentifierCharacter(char c)
 {
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-         (c >= '0' && c <= '9') || c == '_';
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
 static bool ParseDecimalAt(const rdcstr &text, int32_t begin, uint32_t &value)
@@ -640,8 +728,7 @@ static rdcarray<ArgumentTextureMember> ParseArgumentTextureMembers(const rdcstr 
   while((structPos = source.find("struct ", structPos)) >= 0)
   {
     int32_t nameBegin = structPos + 7;
-    while((size_t)nameBegin < source.size() &&
-          (source[nameBegin] == ' ' || source[nameBegin] == '\t'))
+    while((size_t)nameBegin < source.size() && (source[nameBegin] == ' ' || source[nameBegin] == '\t'))
       nameBegin++;
     int32_t nameEnd = nameBegin;
     while((size_t)nameEnd < source.size() && IsIdentifierCharacter(source[nameEnd]))
@@ -714,8 +801,7 @@ static rdcarray<ArgumentTextureMember> ParseArgumentTextureMembers(const rdcstr 
     }
 
     int32_t parameterBegin = bufferPos;
-    while(parameterBegin > 0 && source[parameterBegin - 1] != ',' &&
-          source[parameterBegin - 1] != '(')
+    while(parameterBegin > 0 && source[parameterBegin - 1] != ',' && source[parameterBegin - 1] != '(')
       parameterBegin--;
     int32_t ampersand = bufferPos;
     while(ampersand > parameterBegin && source[ampersand] != '&')
@@ -727,8 +813,7 @@ static rdcarray<ArgumentTextureMember> ParseArgumentTextureMembers(const rdcstr 
     }
 
     int32_t nameEnd = ampersand;
-    while(nameEnd > parameterBegin &&
-          (source[nameEnd - 1] == ' ' || source[nameEnd - 1] == '\t'))
+    while(nameEnd > parameterBegin && (source[nameEnd - 1] == ' ' || source[nameEnd - 1] == '\t'))
       nameEnd--;
     int32_t nameBegin = nameEnd;
     while(nameBegin > parameterBegin && IsIdentifierCharacter(source[nameBegin - 1]))
@@ -881,6 +966,7 @@ public:
     index = {};
     index.toolVersion = m_ToolVersion;
     m_IDKeys.clear();
+    m_APICallByPath.clear();
     m_RawListingBytes = 0;
 
     result = Walk("/commands", 0, index);
@@ -888,6 +974,9 @@ public:
       result = Walk("/resources", 0, index);
     if(result != ResultCode::Succeeded)
       return result;
+
+    NormaliseNodeInfos(index);
+    NormaliseAPIVertexBufferOffsets(index);
 
     // Static browsing remains valid when gpudebug cannot replay the trace on this device. Probe
     // replay readiness only after the command/resource trees have been captured, and downgrade
@@ -949,6 +1038,200 @@ public:
   }
 
 private:
+  MetalTrace::NodeInfo *FindOrCreateNodeInfo(MetalTrace::Index &index, const rdcstr &path)
+  {
+    for(MetalTrace::NodeInfo &info : index.nodeInfos)
+      if(info.path == path)
+        return &info;
+    index.nodeInfos.push_back({path});
+    return &index.nodeInfos.back();
+  }
+
+  void NormaliseAPIVertexBufferOffsets(MetalTrace::Index &index)
+  {
+    if(m_APICallByPath.empty())
+      return;
+
+    AppleTraceToolResult tool = m_Runner->Run(
+        {"--json", "-q", "-s", ToStr(m_SessionID), "-c", "go /api_calls", "-c", "list --all"},
+        30000, m_Cancelled);
+    if(ToolFailure(tool, "API call listing") != ResultCode::Succeeded)
+      return;
+
+    rdcarray<rdcstr> objects = SplitJSONObjectStream(tool.standardOutput);
+    if(objects.empty())
+      return;
+
+    rdcarray<rdcstr> summaries;
+    @autoreleasepool
+    {
+      rdcstr parseError;
+      NSDictionary *listing = ParseJSONObject(objects.back(), parseError);
+      NSArray *children = [listing objectForKey:@"children"];
+      NSNumber *totalCount = [listing objectForKey:@"totalCount"];
+      if(listing == nil || ![children isKindOfClass:[NSArray class]] ||
+         ![totalCount isKindOfClass:[NSNumber class]] ||
+         [totalCount unsignedLongLongValue] > MaxNodes)
+        return;
+      summaries.resize((size_t)[totalCount unsignedLongLongValue]);
+      for(id childObject in children)
+      {
+        if(![childObject isKindOfClass:[NSDictionary class]])
+          continue;
+        NSDictionary *child = (NSDictionary *)childObject;
+        rdcstr name = StringFromObject([child objectForKey:@"name"]);
+        unsigned int apiCall = 0;
+        if(sscanf(name.c_str(), "api%u", &apiCall) != 1 || apiCall >= summaries.size())
+          continue;
+        NSArray *values = [child objectForKey:@"values"];
+        if(![values isKindOfClass:[NSArray class]])
+          continue;
+        for(id valueObject in values)
+        {
+          if(![valueObject isKindOfClass:[NSDictionary class]])
+            continue;
+          rdcstr value = StringFromObject([(NSDictionary *)valueObject objectForKey:@"value"]);
+          if(value.beginsWith("["))
+            summaries[apiCall] = value;
+        }
+      }
+    }
+
+    for(const auto &linked : m_APICallByPath)
+    {
+      if(linked.second == 0 || linked.second > summaries.size())
+        continue;
+      const rdcstr vertexPrefix = linked.first + "/vertex/";
+      for(const MetalTrace::Node &binding : index.nodes)
+      {
+        if(!binding.path.beginsWith(vertexPrefix))
+          continue;
+        rdcstr relative = binding.path.substr(vertexPrefix.size());
+        unsigned int wantedSlot = 0;
+        if(relative.contains("/") || sscanf(binding.name.c_str(), "buf[%u]", &wantedSlot) != 1 ||
+           binding.objectName.empty())
+          continue;
+
+        for(uint32_t apiCall = linked.second; apiCall > 0; apiCall--)
+        {
+          const rdcstr &summary = summaries[apiCall - 1];
+          if(summary.contains("renderCommandEncoderWithDescriptor"))
+            break;
+
+          rdcstr objectName;
+          uint64_t offset = 0;
+          uint32_t slot = 0;
+          if(!ParseVertexBufferSetCall(summary, objectName, offset, slot) || slot != wantedSlot)
+            continue;
+          if(objectName != binding.objectName)
+            break;
+
+          MetalTrace::NodeInfo *info = FindOrCreateNodeInfo(index, linked.first);
+          info->keys.push_back(StringFormat::Fmt("vertexBufferOffset[%u]", wantedSlot));
+          info->values.push_back(ToStr(offset));
+          break;
+        }
+      }
+    }
+  }
+
+  void AppendNodeInfo(const MetalTrace::Node &node, const rdcstr &json, MetalTrace::Index &index)
+  {
+    @autoreleasepool
+    {
+      rdcstr parseError;
+      NSDictionary *properties = ParseJSONObject(json, parseError);
+      if(properties == nil)
+        return;
+
+      MetalTrace::NodeInfo info;
+      info.path = node.path;
+      NSArray *keys = [[properties allKeys] sortedArrayUsingSelector:@selector(compare:)];
+      for(id keyObject in keys)
+      {
+        rdcstr key = StringFromObject(keyObject);
+        rdcstr value = StringFromObject([properties objectForKey:keyObject]);
+        if(key.empty() || value.empty())
+          continue;
+        info.keys.push_back(key);
+        info.values.push_back(value);
+      }
+      if(!info.keys.empty())
+        index.nodeInfos.push_back(info);
+    }
+  }
+
+  void NormaliseNodeInfos(MetalTrace::Index &index)
+  {
+    struct PendingInfo
+    {
+      size_t nodeIndex = 0;
+      rdcstr command;
+    };
+    rdcarray<PendingInfo> pending;
+
+    for(size_t nodeIndex = 0; nodeIndex < index.nodes.size(); nodeIndex++)
+    {
+      const MetalTrace::Node &node = index.nodes[nodeIndex];
+      rdcstr command;
+      if((node.kind == MetalTrace::NodeKind::Draw || node.kind == MetalTrace::NodeKind::Dispatch) &&
+         node.canInfo)
+      {
+        command = "info " + node.path + " --all";
+      }
+      else if(node.kind == MetalTrace::NodeKind::RenderPipeline && node.canInfo &&
+              !node.objectName.empty())
+      {
+        command = "info @" + node.objectName + " --all";
+      }
+      else
+      {
+        continue;
+      }
+      pending.push_back({nodeIndex, command});
+    }
+
+    static constexpr size_t InfoBatchSize = 64;
+    for(size_t batchBegin = 0; batchBegin < pending.size(); batchBegin += InfoBatchSize)
+    {
+      const size_t batchEnd = std::min(pending.size(), batchBegin + InfoBatchSize);
+      if(batchEnd == batchBegin + 1)
+      {
+        rdcstr json;
+        if(RunCommand(pending[batchBegin].command, 5000, json) == ResultCode::Succeeded)
+          AppendNodeInfo(index.nodes[pending[batchBegin].nodeIndex], json, index);
+        continue;
+      }
+
+      rdcarray<rdcstr> arguments = {"--json", "-q", "-s", ToStr(m_SessionID)};
+      for(size_t i = batchBegin; i < batchEnd; i++)
+      {
+        arguments.push_back("-c");
+        arguments.push_back(pending[i].command);
+      }
+      AppleTraceToolResult tool = m_Runner->Run(arguments, 30000, m_Cancelled);
+      rdcarray<rdcstr> objects;
+      if(ToolFailure(tool, "batched node inspection") == ResultCode::Succeeded)
+        objects = SplitJSONObjectStream(tool.standardOutput);
+
+      if(objects.size() == batchEnd - batchBegin)
+      {
+        for(size_t i = batchBegin; i < batchEnd; i++)
+          AppendNodeInfo(index.nodes[pending[i].nodeIndex], objects[i - batchBegin], index);
+      }
+      else
+      {
+        // Keep compatibility with gpudebug builds that don't support repeated -c commands.
+        for(size_t i = batchBegin; i < batchEnd; i++)
+        {
+          rdcstr json;
+          if(RunCommand(pending[i].command, 5000, json) == ResultCode::Succeeded)
+            AppendNodeInfo(index.nodes[pending[i].nodeIndex], json, index);
+        }
+      }
+    }
+  }
+
   RDResult FetchLocked(uint64_t stableId, const rdcstr &path, bytebuf &data)
   {
     data.clear();
@@ -1399,6 +1682,13 @@ private:
       rdcstr parseError;
       NSDictionary *listing = ParseJSONObject(json, parseError);
       NSArray *children = [listing objectForKey:@"children"];
+      NSDictionary *links = [listing objectForKey:@"links"];
+      rdcstr apiCallPath = [links isKindOfClass:[NSDictionary class]]
+                               ? StringFromObject([links objectForKey:@"a"])
+                               : rdcstr();
+      uint32_t apiCall = 0;
+      if(ParseAPICallPath(apiCallPath, apiCall))
+        m_APICallByPath[path] = apiCall;
       if(listing == nil || ![children isKindOfClass:[NSArray class]])
         return RDResult(ResultCode::APIDataCorrupted,
                         StringFormat::Fmt("gpudebug listing '%s' is malformed: %s", path.c_str(),
@@ -1454,8 +1744,12 @@ private:
           node.objectName = node.name;
         node.byteSize = FindByteSize(node.values);
 
-        rdcstr stableKey =
-            node.objectName.empty() ? "path:" + node.path : "object:" + node.objectName;
+        // A resource object can be reused and overwritten across many draws. gpudebug's binding
+        // path is a fetchable snapshot at that command, so keep it distinct from the final object
+        // in the resource catalog and from every other draw using that object.
+        rdcstr stableKey = IsCommandSnapshotBinding(node) ? "snapshot:" + node.path
+                           : node.objectName.empty()      ? "path:" + node.path
+                                                          : "object:" + node.objectName;
         node.stableId = StableHash(stableKey);
         auto existing = m_IDKeys.find(node.stableId);
         if(existing != m_IDKeys.end() && existing->second != stableKey)
@@ -1490,6 +1784,7 @@ private:
   size_t m_RawListingBytes = 0;
   std::map<uint64_t, rdcstr> m_IDKeys;
   std::map<uint64_t, bytebuf> m_Cache;
+  std::map<rdcstr, uint32_t> m_APICallByPath;
 };
 };    // namespace
 
@@ -1569,6 +1864,12 @@ public:
             "{\"children\":[{\"actions\":\"info, fetch\",\"name\":\"tex[2]\","
             "\"values\":[{\"value\":\"\\\"Synthetic Input\\\"\"},"
             "{\"value\":\"@tex1 2x2 RGBA8Unorm\"}]}]}";
+      }
+      else if(command == "info /commands/cb0/draw0 --all")
+      {
+        result.standardOutput =
+            "{\"primitiveType\":\"Triangle\",\"vertexCount\":\"3\","
+            "\"vertexStart\":\"0\"}";
       }
       else if(command == "go /resources")
       {
@@ -1692,8 +1993,7 @@ public:
 class TransientReplayerErrorFakeRunner final : public NormalisingFakeRunner
 {
 public:
-  explicit TransientReplayerErrorFakeRunner(FakeRunnerState &state)
-      : NormalisingFakeRunner(state)
+  explicit TransientReplayerErrorFakeRunner(FakeRunnerState &state) : NormalisingFakeRunner(state)
   {
   }
   AppleTraceToolResult Run(const rdcarray<rdcstr> &arguments, uint32_t timeoutMS,
@@ -1776,6 +2076,26 @@ fragment float4 main1(constant EncodedLayout& set [[buffer(0)]]) { return {}; }
   CHECK(ParseArgumentTextureMembers(nonLinear).empty());
 }
 
+TEST_CASE("Apple GPU Trace splits batched gpudebug JSON", "[metal][apple-trace]")
+{
+  rdcarray<rdcstr> objects =
+      SplitJSONObjectStream("{\n  \"text\": \"brace } and \\\"quote\\\"\"\n}\n{\"count\": 3}\n");
+  REQUIRE(objects.size() == 2);
+  CHECK(objects[0].contains("brace }"));
+  CHECK(objects[1] == "{\"count\": 3}");
+  CHECK(SplitJSONObjectStream("{\"broken\": true").empty());
+
+  rdcstr objectName;
+  uint64_t offset = 0;
+  uint32_t slot = 0;
+  REQUIRE(ParseVertexBufferSetCall(
+      "[MTLRenderCommandEncoder setVertexBuffer:@buf9 offset:8176 atIndex:12]", objectName, offset,
+      slot));
+  CHECK(objectName == "buf9");
+  CHECK(offset == 8176);
+  CHECK(slot == 12);
+}
+
 TEST_CASE("Apple GPU Trace resolves opaque argument-buffer texture IDs without choosing views",
           "[metal][apple-trace]")
 {
@@ -1786,14 +2106,10 @@ TEST_CASE("Apple GPU Trace resolves opaque argument-buffer texture IDs without c
       {"/commands/cb0/re1/draw0/fragment", 1, 286, ArgumentTextureKind::TextureCube},
   };
   rdcarray<TraceTextureInfo> textures = {
-      {0, 31, "2D", 1, false, true, true},
-      {1, 32, "2D", 1, true, false, true},
-      {2, 51, "2D", 1, false, true, true},
-      {3, 52, "2D", 1, true, false, true},
-      {4, 299, "2D", 1, false, true, true},
-      {5, 300, "2D", 1, true, false, true},
-      {6, 303, "2DArray", 6, false, true, true},
-      {7, 304, "2DArray", 6, true, false, true},
+      {0, 31, "2D", 1, false, true, true},       {1, 32, "2D", 1, true, false, true},
+      {2, 51, "2D", 1, false, true, true},       {3, 52, "2D", 1, true, false, true},
+      {4, 299, "2D", 1, false, true, true},      {5, 300, "2D", 1, true, false, true},
+      {6, 303, "2DArray", 6, false, true, true}, {7, 304, "2DArray", 6, true, false, true},
   };
 
   int64_t delta = 0;
@@ -1830,10 +2146,13 @@ TEST_CASE("Apple GPU Trace session normalizes, caches, and shuts down", "[metal]
   CHECK(index.nodes[3].objectName == "tex1");
   CHECK(index.nodes[4].name == "color0");
   CHECK(index.nodes[4].objectName == "tex0");
+  CHECK(index.nodes[4].stableId != index.nodes[8].stableId);
   CHECK((uint32_t)index.nodes[6].kind == (uint32_t)MetalTrace::NodeKind::Buffer);
   CHECK(index.nodes[6].label == "Synthetic Buffer");
   CHECK(index.nodes[6].byteSize == 4);
   CHECK(index.rawListings.size() == 7);
+  REQUIRE(index.nodeInfos.size() == 1);
+  CHECK(index.nodeInfos[0].path == "/commands/cb0/draw0");
 
   bytebuf first, second;
   REQUIRE(session->Fetch(index.nodes[6].stableId, index.nodes[6].path, first).code ==

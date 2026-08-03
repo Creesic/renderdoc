@@ -144,7 +144,7 @@ TEST_CASE("Metal trace thin RDC opens through ReplayController", "[metal][replay
   CHECK_FALSE(props.HasFeature(ReplayFeature::ExecutableReplay));
   CHECK_FALSE(props.HasFeature(ReplayFeature::PipelineState));
   CHECK(props.FeatureUnavailableReason(ReplayFeature::ExecutableReplay).contains("no executable"));
-  CHECK(props.FeatureUnavailableReason(ReplayFeature::PipelineState).contains("not implemented"));
+  CHECK(props.FeatureUnavailableReason(ReplayFeature::PipelineState).contains("no normalized"));
   REQUIRE(controller->GetRootActions().size() == 1);
   CHECK(controller->GetRootActions()[0].eventId == 1);
   REQUIRE(controller->GetRootActions()[0].events.size() == 1);
@@ -183,15 +183,75 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
       {1, MetalTrace::NodeKind::CommandBuffer, "/commands/cb0", "cb0"},
       {2, MetalTrace::NodeKind::RenderEncoder, "/commands/cb0/re0", "re0"},
       {3, MetalTrace::NodeKind::Draw, "/commands/cb0/re0/draw0", "draw0", "Synthetic Draw"},
+      {300,
+       MetalTrace::NodeKind::Binding,
+       "/commands/cb0/re0/draw0/pipeline",
+       "pipeline",
+       {},
+       "rps0"},
       {4, MetalTrace::NodeKind::Binding, "/commands/cb0/re0/draw0/vertex", "vertex"},
+      {400,
+       MetalTrace::NodeKind::Binding,
+       "/commands/cb0/re0/draw0/vertex/buf[12]",
+       "buf[12]",
+       "Synthetic Vertex Buffer",
+       "buf0",
+       {"96 bytes"},
+       false,
+       true,
+       false,
+       96},
       {200, MetalTrace::NodeKind::Binding, "/commands/cb0/re0/draw0/vertex/tex[2]", "tex[2]",
        "Synthetic Input", "texInput"},
+      {401,
+       MetalTrace::NodeKind::Binding,
+       "/commands/cb0/re0/draw0/indexBuffer",
+       "indexBuffer",
+       "Synthetic Index Buffer",
+       "buf1",
+       {"12 bytes"},
+       false,
+       true,
+       false,
+       12},
       {100, MetalTrace::NodeKind::Binding, "/commands/cb0/re0/draw0/color0", "color0",
        "Synthetic Target", "texTarget"},
-      {100, MetalTrace::NodeKind::Texture, "/resources/textures/texTarget", "texTarget",
-       "Synthetic Target", "texTarget", {"640x480 BGRA8Unorm"}, false, true, true},
-      {200, MetalTrace::NodeKind::Texture, "/resources/textures/texInput", "texInput",
-       "Synthetic Input", "texInput", {"256x256 RGBA8Unorm"}, false, true, true},
+      {300,
+       MetalTrace::NodeKind::RenderPipeline,
+       "/resources/render_pipelines/rps0",
+       "rps0",
+       {},
+       "rps0"},
+      {100,
+       MetalTrace::NodeKind::Texture,
+       "/resources/textures/texTarget",
+       "texTarget",
+       "Synthetic Target",
+       "texTarget",
+       {"640x480 BGRA8Unorm"},
+       false,
+       true,
+       true},
+      {200,
+       MetalTrace::NodeKind::Texture,
+       "/resources/textures/texInput",
+       "texInput",
+       "Synthetic Input",
+       "texInput",
+       {"256x256 RGBA8Unorm"},
+       false,
+       true,
+       true},
+  };
+  index.nodeInfos = {
+      {"/commands/cb0/re0/draw0",
+       {"baseInstance", "baseVertex", "indexBufferOffset", "indexCount", "indexType",
+        "instanceCount", "primitiveType", "vertexBufferOffset[12]"},
+       {"0", "0", "0", "3", "UInt32", "1", "TriangleStrip", "24"}},
+      {"/resources/render_pipelines/rps0",
+       {"vertexLayout"},
+       {"  buffer 12 (stride=24, perVertex):\n    attr0   Int @0\n    attr3   "
+        "UChar4Normalized_BGRA @12"}},
   };
   REQUIRE(MetalTrace::WriteThinRDC(&rdc, manifest, index).code == ResultCode::Succeeded);
 
@@ -202,11 +262,21 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
   REQUIRE(controller->GetRootActions()[0].children[0].children.size() == 1);
   const ActionDescription &draw = controller->GetRootActions()[0].children[0].children[0];
   REQUIRE(draw.outputs[0] != ResourceId());
+  CHECK(draw.numIndices == 3);
+  CHECK(draw.flags & ActionFlags::Indexed);
 
   controller->SetFrameEvent(draw.eventId, true);
   REQUIRE(controller->GetMetalPipelineState() != NULL);
   REQUIRE(controller->GetMetalPipelineState()->colorAttachments.size() == 1);
   CHECK(controller->GetMetalPipelineState()->colorAttachments[0].resourceId == draw.outputs[0]);
+  CHECK(controller->GetPipelineState().GetPrimitiveTopology() == Topology::TriangleStrip);
+  REQUIRE(controller->GetPipelineState().GetVertexInputs().size() == 2);
+  REQUIRE(controller->GetPipelineState().GetVBuffers().size() == 13);
+  CHECK(controller->GetPipelineState().GetVBuffers()[12].byteOffset == 24);
+  CHECK(controller->GetPipelineState().GetVBuffers()[12].byteStride == 24);
+  CHECK(controller->GetPipelineState().GetVBuffers()[12].byteSize == 72);
+  CHECK(controller->GetPipelineState().GetIBuffer().byteStride == 4);
+  CHECK(controller->GetPipelineState().GetIBuffer().byteSize == 12);
 
   rdcarray<Descriptor> outputs = controller->GetPipelineState().GetOutputTargets();
   REQUIRE(outputs.size() == 1);
@@ -214,10 +284,18 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
 
   rdcarray<UsedDescriptor> inputs =
       controller->GetPipelineState().GetReadOnlyResources(ShaderStage::Vertex, true);
-  REQUIRE(inputs.size() == 1);
-  CHECK(inputs[0].access.index == 2);
-  CHECK(inputs[0].descriptor.resource != ResourceId());
-  CHECK(inputs[0].descriptor.resource != outputs[0].resource);
+  REQUIRE(inputs.size() == 2);
+  bool foundTextureInput = false;
+  for(const UsedDescriptor &input : inputs)
+  {
+    if(input.descriptor.type != DescriptorType::Image)
+      continue;
+    foundTextureInput = true;
+    CHECK(input.access.index == 2);
+    CHECK(input.descriptor.resource != ResourceId());
+    CHECK(input.descriptor.resource != outputs[0].resource);
+  }
+  CHECK(foundTextureInput);
 
   controller->Shutdown();
 }

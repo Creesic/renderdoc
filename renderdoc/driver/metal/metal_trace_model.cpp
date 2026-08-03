@@ -189,6 +189,37 @@ static bool ReadIndexV4(StreamReader &reader, Index &index)
          ReadString(reader, index.argumentBufferUnavailableReason);
 }
 
+static bool WriteIndexV5(StreamWriter &writer, const Index &index)
+{
+  if(!WriteIndexV4(writer, index))
+    return false;
+
+  uint64_t infoCount = index.nodeInfos.size();
+  if(!writer.Write(infoCount))
+    return false;
+  for(const NodeInfo &info : index.nodeInfos)
+    if(!WriteString(writer, info.path) || !WriteStringArray(writer, info.keys) ||
+       !WriteStringArray(writer, info.values))
+      return false;
+  return true;
+}
+
+static bool ReadIndexV5(StreamReader &reader, Index &index)
+{
+  if(!ReadIndexV4(reader, index))
+    return false;
+
+  uint64_t infoCount = 0;
+  if(!reader.Read(infoCount) || infoCount > 1024ULL * 1024ULL)
+    return false;
+  index.nodeInfos.resize((size_t)infoCount);
+  for(NodeInfo &info : index.nodeInfos)
+    if(!ReadString(reader, info.path) || !ReadStringArray(reader, info.keys) ||
+       !ReadStringArray(reader, info.values) || info.keys.size() != info.values.size())
+      return false;
+  return true;
+}
+
 static RDResult FinishSection(StreamWriter *writer)
 {
   writer->Finish();
@@ -244,7 +275,9 @@ RDResult WriteThinRDC(RDCFile *rdc, const Manifest &manifest, const Index &index
   WriteString(*writer, index.actionName);
   WriteString(*writer, index.resourceName);
   WriteBytes(*writer, index.resourceData.data(), index.resourceData.size());
-  if(manifest.header.indexVersion >= 4)
+  if(manifest.header.indexVersion >= 5)
+    WriteIndexV5(*writer, index);
+  else if(manifest.header.indexVersion >= 4)
     WriteIndexV4(*writer, index);
   else if(manifest.header.indexVersion >= 3)
     WriteIndexV3(*writer, index);
@@ -312,7 +345,9 @@ RDResult ReadIndex(RDCFile *rdc, Index &index)
   bool success = reader->Read(magic) && reader->Read(version) &&
                  ReadString(*reader, index.actionName) && ReadString(*reader, index.resourceName) &&
                  ReadBytes(*reader, index.resourceData);
-  if(success && version >= 4)
+  if(success && version >= 5)
+    success = ReadIndexV5(*reader, index);
+  else if(success && version >= 4)
     success = ReadIndexV4(*reader, index);
   else if(success && version >= 3)
     success = ReadIndexV3(*reader, index);

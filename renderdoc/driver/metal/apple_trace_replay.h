@@ -45,7 +45,7 @@ public:
   BufferDescription GetBuffer(ResourceId id) override;
   rdcarray<TextureDescription> GetTextures() override { return m_Textures; }
   TextureDescription GetTexture(ResourceId id) override;
-  rdcarray<DebugMessage> GetDebugMessages() override { return m_DebugMessages; }
+  rdcarray<DebugMessage> GetDebugMessages() override;
   rdcarray<ShaderEntryPoint> GetShaderEntryPoints(ResourceId shader) override { return {}; }
   const ShaderReflection *GetShader(ResourceId pipeline, ResourceId shader,
                                     ShaderEntryPoint entry) override
@@ -67,8 +67,8 @@ public:
   void SavePipelineState(uint32_t eventId) override;
   rdcarray<Descriptor> GetDescriptors(ResourceId descriptorStore,
                                       const rdcarray<DescriptorRange> &ranges) override;
-  rdcarray<SamplerDescriptor> GetSamplerDescriptors(
-      ResourceId descriptorStore, const rdcarray<DescriptorRange> &ranges) override;
+  rdcarray<SamplerDescriptor> GetSamplerDescriptors(ResourceId descriptorStore,
+                                                    const rdcarray<DescriptorRange> &ranges) override;
   rdcarray<DescriptorAccess> GetDescriptorAccess(uint32_t eventId) override;
   rdcarray<DescriptorLogicalLocation> GetDescriptorLocations(
       ResourceId descriptorStore, const rdcarray<DescriptorRange> &ranges) override
@@ -85,7 +85,9 @@ public:
   MeshFormat GetPostVSBuffers(uint32_t eventId, uint32_t instID, uint32_t viewID,
                               MeshDataStage stage) override
   {
-    return {};
+    MeshFormat ret;
+    ret.status = "Post-VS data is unavailable for read-only Apple GPU Trace inspection";
+    return ret;
   }
   void GetBufferData(ResourceId buff, uint64_t offset, uint64_t len, bytebuf &retData) override;
   void GetTextureData(ResourceId tex, const Subresource &sub, const GetTextureDataParams &params,
@@ -181,15 +183,10 @@ public:
   {
   }
   bool IsTextureSupported(const TextureDescription &tex) override { return false; }
-  ResourceId CreateProxyBuffer(const BufferDescription &templateBuf) override
-  {
-    return ResourceId();
-  }
-  void SetProxyBufferData(ResourceId bufid, byte *data, size_t dataSize) override {}
+  ResourceId CreateProxyBuffer(const BufferDescription &templateBuf) override;
+  void SetProxyBufferData(ResourceId bufid, byte *data, size_t dataSize) override;
   void RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &secondaryDraws,
-                  const MeshDisplay &cfg) override
-  {
-  }
+                  const MeshDisplay &cfg) override;
   bool RenderTexture(TextureDisplay cfg) override;
   void SetCustomShaderIncludes(const rdcarray<rdcstr> &directories) override {}
   void BuildCustomShader(ShaderEncoding sourceEncoding, const bytebuf &source, const rdcstr &entry,
@@ -202,18 +199,19 @@ public:
   void RenderCheckerboard(FloatVector dark, FloatVector light) override;
   void RenderHighlightBox(float w, float h, float scale) override;
   uint32_t PickVertex(uint32_t eventId, int32_t width, int32_t height, const MeshDisplay &cfg,
-                      uint32_t x, uint32_t y) override
-  {
-    return ~0U;
-  }
+                      uint32_t x, uint32_t y) override;
 
 private:
   ~AppleTraceReplayDriver();
 
   bool InitialiseTextureRenderer();
   bool EnsureTexturePreview(ResourceId texture, ResourceId &proxyTexture);
+  bool EnsureBufferProxy(ResourceId buffer, ResourceId &proxyBuffer);
+  bool TranslateMeshFormat(MeshFormat &format);
+  void PopulateDrawState(const MetalTrace::Node &node, ActionDescription &action, uint32_t eventId);
   void RecordTexturePreviewError(ResourceId texture, const rdcstr &message);
   void ClearTexturePreviews();
+  void ClearBufferProxies();
 
   MetalTrace::Manifest m_Manifest;
   MetalTrace::Index m_Index;
@@ -232,9 +230,11 @@ private:
   };
   std::map<uint32_t, EventDescriptors> m_EventDescriptors;
   std::map<ResourceId, ResourceId> m_ProxyTextures;
+  std::map<ResourceId, ResourceId> m_ProxyBuffers;
   std::map<ResourceId, bytebuf> m_TexturePreviewData;
   std::map<ResourceId, rdcstr> m_TexturePreviewErrors;
   rdcarray<DebugMessage> m_DebugMessages;
+  std::map<uint32_t, MetalPipe::VertexInput> m_EventVertexInputs;
   FrameRecord m_FrameRecord;
   SDFile *m_StructuredFile = NULL;
   AppleTraceSession *m_Session = NULL;
