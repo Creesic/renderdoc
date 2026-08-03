@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
+import shutil
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -92,14 +95,19 @@ class CaptureSession:
     controller: Any
     structured_file: Any
     driver_name: str = ""
+    api_name: str = "Unknown"
+    degraded: bool = False
+    capabilities: list[dict[str, Any]] = field(default_factory=list)
+    owned_temp_dir: str | None = None
     events_by_id: dict[int, IndexedEvent] = field(default_factory=dict)
     events_ordered: list[int] = field(default_factory=list)
     chunk_index_by_event: dict[int, int] = field(default_factory=dict)
 
     def shutdown(self, rd: Any) -> bool:
+        shutdown_ok = False
         try:
             self.controller.Shutdown()
-            return True
+            shutdown_ok = True
         except Exception:
             # Previously swallowed silently -- a failure here can mean the replay device (and its
             # GPU memory) never actually got released, which is exactly what would make opening
@@ -107,7 +115,18 @@ class CaptureSession:
             # it doesn't fix anything by itself, but a silent failure here was actively hiding the
             # evidence needed to diagnose that. See renderdoc-mcp/TODO.md #10.
             _log.exception("shutdown: controller.Shutdown() failed for capture_id=%s", self.capture_id)
-            return False
+        finally:
+            if self.owned_temp_dir:
+                shutil.rmtree(self.owned_temp_dir, ignore_errors=True)
+                self.owned_temp_dir = None
+        return shutdown_ok
+
+    def capability(self, feature_name: str) -> dict[str, Any] | None:
+        wanted = feature_name.lower()
+        for capability in self.capabilities:
+            if str(capability.get("feature", "")).lower() == wanted:
+                return capability
+        return None
 
 
 class CaptureSessionManager:
@@ -130,16 +149,47 @@ class CaptureSessionManager:
         _log.info("open_capture: OpenCaptureFile path=%s", path)
         rd = rdutil.get_renderdoc()
         cap = rd.OpenCaptureFile()
-        result = cap.OpenFile(path, "", None)
+        owned_temp_dir: str | None = None
+        input_type = "gputrace" if path.lower().endswith(".gputrace") else ""
+        result = cap.OpenFile(path, input_type, None)
         if result != rd.ResultCode.Succeeded:
             cap.Shutdown()
             raise RuntimeError("OpenFile failed: {} ({})".format(path, result))
+
+        if input_type == "gputrace":
+            owned_temp_dir = tempfile.mkdtemp(prefix="renderdoc-metal-import-")
+            converted_path = os.path.join(owned_temp_dir, "capture.rdc")
+            try:
+                try:
+                    result = cap.Convert(converted_path, "rdc", None, None)
+                except TypeError:
+                    try:
+                        result = cap.Convert(converted_path, "rdc", None)
+                    except TypeError:
+                        result = cap.Convert(converted_path, "rdc")
+            except Exception:
+                shutil.rmtree(owned_temp_dir, ignore_errors=True)
+                raise
+            finally:
+                cap.Shutdown()
+            if result != rd.ResultCode.Succeeded:
+                shutil.rmtree(owned_temp_dir, ignore_errors=True)
+                raise RuntimeError("gputrace conversion failed: {} ({})".format(path, result))
+
+            cap = rd.OpenCaptureFile()
+            result = cap.OpenFile(converted_path, "rdc", None)
+            if result != rd.ResultCode.Succeeded:
+                cap.Shutdown()
+                shutil.rmtree(owned_temp_dir, ignore_errors=True)
+                raise RuntimeError("Converted Metal capture could not be opened: {}".format(result))
 
         driver_name = rdutil.capture_driver_name(cap)
         _log.info("open_capture: driver=%s LocalReplaySupport=%s", driver_name, cap.LocalReplaySupport())
 
         if not cap.LocalReplaySupport():
             cap.Shutdown()
+            if owned_temp_dir:
+                shutil.rmtree(owned_temp_dir, ignore_errors=True)
             raise RuntimeError(
                 "Capture cannot be replayed locally ({})".format(driver_name or "unknown driver")
             )
@@ -154,10 +204,33 @@ class CaptureSessionManager:
                 controller.Shutdown()
             except Exception:
                 pass
+            if owned_temp_dir:
+                shutil.rmtree(owned_temp_dir, ignore_errors=True)
             raise RuntimeError("OpenCapture failed: {}".format(result))
 
         structured = controller.GetStructuredFile()
         capture_id = str(uuid.uuid4())
+
+        api_name = "Unknown"
+        degraded = False
+        capabilities: list[dict[str, Any]] = []
+        try:
+            props = controller.GetAPIProperties()
+            api_name = rdutil.enum_name(getattr(props, "pipelineType", "Unknown"))
+            api_name = api_name.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+            degraded = bool(getattr(props, "degraded", False))
+            for capability in getattr(props, "features", []) or []:
+                capabilities.append(
+                    {
+                        "feature": rdutil.enum_name(capability.feature)
+                        .rsplit("::", 1)[-1]
+                        .rsplit(".", 1)[-1],
+                        "available": bool(capability.available),
+                        "reason": str(capability.reason or ""),
+                    }
+                )
+        except Exception:
+            _log.exception("open_capture: could not read API feature capabilities")
 
         events_by_id: dict[int, IndexedEvent] = {}
         ordered: list[int] = []
@@ -193,6 +266,10 @@ class CaptureSessionManager:
             controller=controller,
             structured_file=structured,
             driver_name=driver_name,
+            api_name=api_name,
+            degraded=degraded,
+            capabilities=capabilities,
+            owned_temp_dir=owned_temp_dir,
             events_by_id=events_by_id,
             events_ordered=ordered,
             chunk_index_by_event=chunk_index_by_event,

@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "normalization": {
+    "description": "Stable gpudebug contract values with paths, addresses, allocation IDs, timings, and operation IDs removed.",
+    "fixture": "metal_trace_fixture",
+    "gpucapture_version": "2027.0.35",
+    "gpudebug_version": "1.0"
+  },
+  "root": {
+    "children": {
+      "commands": "1 command buffer",
+      "performance": "see 'profile ?'",
+      "api_calls": "59 API calls",
+      "resources": "14 objects"
+    },
+    "total_count": 4
+  },
+  "status": {
+    "device": "Apple M1 Max",
+    "replayer_state_after_fetch": "ready",
+    "summary": "1 command buffers, 2 encoders, 2 draw calls"
+  },
+  "commands": [
+    {
+      "name": "cb0",
+      "queue_label": "RenderDoc Metal Fixture Queue",
+      "debug_group": "RenderDoc Metal Fixture Frame"
+    }
+  ],
+  "encoders": [
+    {
+      "name": "re0",
+      "label": "Fixture Offscreen Encoder",
+      "draw_count": 1,
+      "color_attachment": "@tex1 256x256 RGBA8Unorm",
+      "depth_attachment": "@tex2 256x256 Depth32Float"
+    },
+    {
+      "name": "re1",
+      "label": "Fixture Present Encoder",
+      "draw_count": 1,
+      "color_attachment": "@tex3 640x360 BGRA8Unorm"
+    }
+  ],
+  "draws": [
+    {
+      "path": "commands/cb0/grp0/re0/grp0/grp0/draw0",
+      "selector": "-[MTLRenderCommandEncoder drawPrimitives:vertexStart:vertexCount:]",
+      "primitive_type": "Triangle",
+      "vertex_start": 0,
+      "vertex_count": 3,
+      "pipeline": "@rps0",
+      "depth_stencil": "@dss0"
+    },
+    {
+      "path": "commands/cb0/grp0/re1/grp0/grp0/draw0",
+      "selector": "-[MTLRenderCommandEncoder drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:]",
+      "primitive_type": "Triangle",
+      "index_count": 6,
+      "index_type": "UInt16",
+      "index_buffer": "@buf1",
+      "pipeline": "@rps1"
+    }
+  ],
+  "pipelines": [
+    {
+      "name": "rps0",
+      "label": "Fixture Offscreen Pipeline",
+      "vertex": "fixtureVertex",
+      "fragment": "fixtureFragment",
+      "color_format": "RGBA8Unorm",
+      "depth_format": "Depth32Float",
+      "sample_count": 1
+    },
+    {
+      "name": "rps1",
+      "label": "Fixture Present Pipeline",
+      "vertex": "presentVertex",
+      "fragment": "presentFragment",
+      "color_format": "BGRA8Unorm",
+      "sample_count": 1
+    }
+  ],
+  "shaders": {
+    "library": "@lib0",
+    "library_label": "RenderDoc Metal Fixture Library",
+    "source_name": "lib0-source",
+    "source_lines": 59,
+    "entry_points": [
+      {"name": "fixtureVertex", "stage": "vertex", "pipelines": ["@rps0"]},
+      {"name": "fixtureFragment", "stage": "fragment", "pipelines": ["@rps0"]},
+      {"name": "presentVertex", "stage": "vertex", "pipelines": ["@rps1"]},
+      {"name": "presentFragment", "stage": "fragment", "pipelines": ["@rps1"]}
+    ]
+  },
+  "resources": {
+    "category_counts": {
+      "buffers": 3,
+      "command_queues": 1,
+      "depth_stencil": 1,
+      "libraries": 1,
+      "render_pipelines": 2,
+      "residency_sets": 1,
+      "samplers": 1,
+      "textures": 4
+    },
+    "buffers": [
+      {"name": "buf0", "label": "Fixture Vertex Buffer", "size": 112},
+      {"name": "buf1", "label": "Fixture Index Buffer", "size": 12},
+      {"name": "buf2", "label": "Fixture Dynamic Uniform Buffer", "size": 16},
+      {"name": "buf[2]", "binding": "fragment", "inline": true, "size": 16}
+    ],
+    "textures": [
+      {"name": "tex0", "label": "Fixture Sampled Checkerboard", "size": "4x4", "format": "RGBA8Unorm"},
+      {"name": "tex1", "label": "Fixture Offscreen Color", "size": "256x256", "format": "RGBA8Unorm"},
+      {"name": "tex2", "label": "Fixture Offscreen Depth", "size": "256x256", "format": "Depth32Float"},
+      {"name": "tex3", "label": "CAMetalLayer Display Drawable", "size": "640x360", "format": "BGRA8Unorm"}
+    ]
+  },
+  "negative_contract": {
+    "errors": [
+      "error: 'compute_pipelines' not found in resources",
+      "error: 'timeline' not found in performance",
+      "error: resource '@does-not-exist' not found"
+    ],
+    "absent_capability": {
+      "command": "profile load",
+      "notification": "no profiling sessions in trace",
+      "success": false
+    }
+  }
+}

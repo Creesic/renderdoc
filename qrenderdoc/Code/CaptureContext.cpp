@@ -256,7 +256,11 @@ void CaptureContext::Begin(QString paramFilename, QString remoteHost, uint32_t r
   {
     QFileInfo checkFile(paramFilename);
 
-    if(checkFile.exists() && checkFile.isFile())
+    // Apple GPU Trace files are directory bundles. Accept them like ordinary files so a trace
+    // supplied on the command line follows MainWindow's registered-importer path.
+    const bool appleGPUTraceBundle =
+        checkFile.isDir() && checkFile.fileName().endsWith(lit(".gputrace"), Qt::CaseInsensitive);
+    if(checkFile.exists() && (checkFile.isFile() || appleGPUTraceBundle))
     {
       m_MainWindow->LoadFromFilename(paramFilename, temp);
       if(temp)
@@ -1103,7 +1107,14 @@ void CaptureContext::LoadCaptureThreaded(const QString &captureFile, const Repla
   QDateTime today = QDateTime::currentDateTimeUtc();
   QDateTime compare = today.addDays(-21);
 
-  if(compare > Config().DegradedCapture_LastUpdate && m_APIProps.degraded)
+  const bool readOnlyMetalTrace = m_APIProps.pipelineType == GraphicsAPI::Metal &&
+                                  !m_APIProps.features.empty() &&
+                                  !m_APIProps.HasFeature(ReplayFeature::ExecutableReplay);
+
+  // Read-only Apple GPU Trace inspection is an expected capability profile, not an unexpected
+  // degraded replay fallback. The title and Pipeline State capability list keep this visible
+  // without interrupting every imported trace with a modal dialog.
+  if(compare > Config().DegradedCapture_LastUpdate && m_APIProps.degraded && !readOnlyMetalTrace)
   {
     Config().DegradedCapture_LastUpdate = today;
 

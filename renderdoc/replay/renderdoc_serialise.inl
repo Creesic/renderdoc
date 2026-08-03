@@ -492,6 +492,16 @@ void DoSerialise(SerialiserType &ser, DescriptorStoreDescription &el)
 }
 
 template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, ReplayFeatureCapability &el)
+{
+  SERIALISE_MEMBER(feature);
+  SERIALISE_MEMBER(available);
+  SERIALISE_MEMBER(reason);
+
+  SIZE_CHECK(32);
+}
+
+template <typename SerialiserType>
 void DoSerialise(SerialiserType &ser, APIProperties &el)
 {
   SERIALISE_MEMBER(pipelineType);
@@ -502,6 +512,7 @@ void DoSerialise(SerialiserType &ser, APIProperties &el)
   SERIALISE_MEMBER(shaderDebugging);
   SERIALISE_MEMBER(pixelHistory);
   SERIALISE_MEMBER(rgpCapture);
+  SERIALISE_MEMBER(features);
 
   SERIALISE_MEMBER(ShaderLinkage);
   SERIALISE_MEMBER(YUVTextures);
@@ -510,7 +521,7 @@ void DoSerialise(SerialiserType &ser, APIProperties &el)
   SERIALISE_MEMBER(D3D12Bundle);
   SERIALISE_MEMBER(DXILShaders);
 
-  SIZE_CHECK(24);
+  SIZE_CHECK(56);
 }
 
 template <typename SerialiserType>
@@ -2334,6 +2345,195 @@ void DoSerialise(SerialiserType &ser, VKPipe::State &el)
 
 #pragma endregion Vulkan pipeline state
 
+#pragma region Metal pipeline state
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::VertexAttribute &el)
+{
+  SERIALISE_MEMBER(attributeIndex);
+  SERIALISE_MEMBER(vertexBufferSlot);
+  SERIALISE_MEMBER(byteOffset);
+  SERIALISE_MEMBER(format);
+
+  SIZE_CHECK(20);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::VertexBufferLayout &el)
+{
+  SERIALISE_MEMBER(slot);
+  SERIALISE_MEMBER(byteStride);
+  SERIALISE_MEMBER(stepFunction);
+  SERIALISE_MEMBER(stepRate);
+
+  SIZE_CHECK(16);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::VertexBuffer &el)
+{
+  SERIALISE_MEMBER(slot);
+  SERIALISE_MEMBER(resourceId);
+  SERIALISE_MEMBER(byteOffset);
+  SERIALISE_MEMBER(byteStride);
+  SERIALISE_MEMBER(byteSize);
+
+  SIZE_CHECK(40);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::IndexBuffer &el)
+{
+  SERIALISE_MEMBER(resourceId);
+  SERIALISE_MEMBER(byteOffset);
+  SERIALISE_MEMBER(byteStride);
+  SERIALISE_MEMBER(byteSize);
+
+  SIZE_CHECK(32);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::VertexInput &el)
+{
+  SERIALISE_MEMBER(topology);
+  SERIALISE_MEMBER(primitiveRestartEnable);
+  SERIALISE_MEMBER(restartIndex);
+  SERIALISE_MEMBER(attributes);
+  SERIALISE_MEMBER(layouts);
+  SERIALISE_MEMBER(vertexBuffers);
+  SERIALISE_MEMBER(indexBuffer);
+
+  SIZE_CHECK(120);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::BufferBinding &el)
+{
+  SERIALISE_MEMBER(bindIndex);
+  SERIALISE_MEMBER(arrayElement);
+  SERIALISE_MEMBER(resourceId);
+  SERIALISE_MEMBER(byteOffset);
+  SERIALISE_MEMBER(byteSize);
+  SERIALISE_MEMBER(writable);
+
+  SIZE_CHECK(40);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::TextureBinding &el)
+{
+  SERIALISE_MEMBER(bindIndex);
+  SERIALISE_MEMBER(arrayElement);
+  SERIALISE_MEMBER(resourceId);
+  SERIALISE_MEMBER(writable);
+
+  SIZE_CHECK(24);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::SamplerBinding &el)
+{
+  SERIALISE_MEMBER(bindIndex);
+  SERIALISE_MEMBER(arrayElement);
+  SERIALISE_MEMBER(resourceId);
+
+  SIZE_CHECK(16);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::Shader &el)
+{
+  SERIALISE_MEMBER(resourceId);
+  SERIALISE_MEMBER(entryPoint);
+  SERIALISE_MEMBER_OPT_EMPTY(reflection);
+  SERIALISE_MEMBER(stage);
+  SERIALISE_MEMBER(buffers);
+  SERIALISE_MEMBER(textures);
+  SERIALISE_MEMBER(samplers);
+
+  SIZE_CHECK(120);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::Attachment &el)
+{
+  SERIALISE_MEMBER(resourceId);
+  SERIALISE_MEMBER(resolveResourceId);
+  SERIALISE_MEMBER(mipLevel);
+  SERIALISE_MEMBER(slice);
+  SERIALISE_MEMBER(depthPlane);
+  SERIALISE_MEMBER(loadAction);
+  SERIALISE_MEMBER(storeAction);
+  SERIALISE_MEMBER(clearColor);
+  SERIALISE_MEMBER(clearDepth);
+  SERIALISE_MEMBER(clearStencil);
+
+  SIZE_CHECK(64);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::Rasterizer &el)
+{
+  SERIALISE_MEMBER(viewports);
+  SERIALISE_MEMBER(scissors);
+  SERIALISE_MEMBER(fillMode);
+  SERIALISE_MEMBER(cullMode);
+  SERIALISE_MEMBER(frontCCW);
+  SERIALISE_MEMBER(depthBias);
+  SERIALISE_MEMBER(slopeScaledDepthBias);
+  SERIALISE_MEMBER(depthBiasClamp);
+
+  SIZE_CHECK(72);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::DepthStencil &el)
+{
+  SERIALISE_MEMBER(resourceId);
+  SERIALISE_MEMBER(depthTestEnable);
+  SERIALISE_MEMBER(depthWriteEnable);
+  SERIALISE_MEMBER(depthFunction);
+  SERIALISE_MEMBER(stencilTestEnable);
+  SERIALISE_MEMBER(frontFace);
+  SERIALISE_MEMBER(backFace);
+
+  SIZE_CHECK(72);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::ColorBlendState &el)
+{
+  SERIALISE_MEMBER(blends);
+  SERIALISE_MEMBER(blendFactor);
+
+  SIZE_CHECK(40);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MetalPipe::State &el)
+{
+  SERIALISE_MEMBER(commandQueue);
+  SERIALISE_MEMBER(commandBuffer);
+  SERIALISE_MEMBER(commandEncoder);
+  SERIALISE_MEMBER(renderPipeline);
+  SERIALISE_MEMBER(computePipeline);
+  SERIALISE_MEMBER(vertexInput);
+  SERIALISE_MEMBER(vertexShader);
+  SERIALISE_MEMBER(fragmentShader);
+  SERIALISE_MEMBER(computeShader);
+  SERIALISE_MEMBER(rasterizer);
+  SERIALISE_MEMBER(depthStencil);
+  SERIALISE_MEMBER(colorBlend);
+  SERIALISE_MEMBER(colorAttachments);
+  SERIALISE_MEMBER(depthAttachment);
+  SERIALISE_MEMBER(stencilAttachment);
+  SERIALISE_MEMBER(shaderMessages);
+
+  SIZE_CHECK(880);
+}
+
+#pragma endregion Metal pipeline state
+
 INSTANTIATE_SERIALISE_TYPE(PathEntry)
 INSTANTIATE_SERIALISE_TYPE(SectionProperties)
 INSTANTIATE_SERIALISE_TYPE(EnvironmentModification)
@@ -2358,6 +2558,7 @@ INSTANTIATE_SERIALISE_TYPE(ResourceDescription)
 INSTANTIATE_SERIALISE_TYPE(TextureDescription)
 INSTANTIATE_SERIALISE_TYPE(BufferDescription)
 INSTANTIATE_SERIALISE_TYPE(DescriptorStoreDescription)
+INSTANTIATE_SERIALISE_TYPE(ReplayFeatureCapability)
 INSTANTIATE_SERIALISE_TYPE(APIProperties)
 INSTANTIATE_SERIALISE_TYPE(DriverInformation)
 INSTANTIATE_SERIALISE_TYPE(DebugMessage)
@@ -2435,3 +2636,17 @@ INSTANTIATE_SERIALISE_TYPE(VKPipe::ImageLayout)
 INSTANTIATE_SERIALISE_TYPE(VKPipe::ImageData)
 INSTANTIATE_SERIALISE_TYPE(VKPipe::ConditionalRendering)
 INSTANTIATE_SERIALISE_TYPE(VKPipe::State)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::VertexAttribute)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::VertexBufferLayout)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::VertexBuffer)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::IndexBuffer)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::VertexInput)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::BufferBinding)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::TextureBinding)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::SamplerBinding)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::Shader)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::Attachment)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::Rasterizer)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::DepthStencil)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::ColorBlendState)
+INSTANTIATE_SERIALISE_TYPE(MetalPipe::State)

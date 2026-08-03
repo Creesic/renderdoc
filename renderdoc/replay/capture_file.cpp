@@ -444,6 +444,19 @@ ResultDetails CaptureFile::Convert(const rdcstr &filename, const rdcstr &filetyp
 
   CaptureExporter exporter = RenderDoc::Inst().GetCaptureExporter(filetype);
 
+  if(exporter == NULL && filetype != "" && filetype != "rdc")
+  {
+    for(const CaptureFileFormat &format : RenderDoc::Inst().GetCaptureFileFormats())
+    {
+      if(format.extension == filetype && !format.convertSupported)
+      {
+        RETURN_ERROR_RESULT(ResultCode::APIUnsupported,
+                            "Capture format '%s' does not support conversion/export",
+                            filetype.c_str());
+      }
+    }
+  }
+
   if(exporter)
   {
     if(file)

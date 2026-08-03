@@ -71,6 +71,10 @@ inline PyObject *PyWeakref_GetObject_emu(PyObject *ref)
 %rename("%(regex:/^D3D12Pipe::(.*)/D3D12\\1/)s", regextarget=1, fullname=1, %$isclass) "D3D12Pipe::.*";
 %rename("%(regex:/^GLPipe::(.*)/GL\\1/)s", regextarget=1, fullname=1, %$isclass) "GLPipe::.*";
 %rename("%(regex:/^VKPipe::(.*)/VK\\1/)s", regextarget=1, fullname=1, %$isclass) "VKPipe::.*";
+%rename("%(regex:/^MetalPipe::(.*)/Metal\\1/)s", regextarget=1, fullname=1, %$isclass) "MetalPipe::.*";
+%rename("MetalLoadAction") MetalPipe::LoadAction;
+%rename("MetalStoreAction") MetalPipe::StoreAction;
+%rename("MetalStepFunction") MetalPipe::StepFunction;
 
 %rename("string") "SDObjectData::str";
 
@@ -291,6 +295,7 @@ TEMPLATE_FIXEDARRAY_DECLARE(rdcfixedarray);
 %include "d3d12_pipestate.h"
 %include "data_types.h"
 %include "gl_pipestate.h"
+%include "metal_pipestate.h"
 %include "replay_enums.h"
 %include "shader_types.h"
 %include "vk_pipestate.h"
@@ -449,6 +454,14 @@ TEMPLATE_ARRAY_INSTANTIATE(rdcarray, SamplerDescriptor)
 TEMPLATE_ARRAY_INSTANTIATE(rdcarray, DescriptorAccess)
 TEMPLATE_ARRAY_INSTANTIATE(rdcarray, DescriptorLogicalLocation)
 TEMPLATE_ARRAY_INSTANTIATE(rdcarray, UsedDescriptor)
+TEMPLATE_ARRAY_INSTANTIATE(rdcarray, ReplayFeatureCapability)
+TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, MetalPipe, Attachment)
+TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, MetalPipe, BufferBinding)
+TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, MetalPipe, SamplerBinding)
+TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, MetalPipe, TextureBinding)
+TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, MetalPipe, VertexAttribute)
+TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, MetalPipe, VertexBuffer)
+TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, MetalPipe, VertexBufferLayout)
 TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, VKPipe, DynamicOffset)
 TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, VKPipe, DescriptorSet)
 TEMPLATE_NAMESPACE_ARRAY_INSTANTIATE(rdcarray, VKPipe, DescriptorBuffer)

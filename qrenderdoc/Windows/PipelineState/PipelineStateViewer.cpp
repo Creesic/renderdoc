@@ -39,6 +39,7 @@
 #include "D3D11PipelineStateViewer.h"
 #include "D3D12PipelineStateViewer.h"
 #include "GLPipelineStateViewer.h"
+#include "MetalPipelineStateViewer.h"
 #include "VulkanPipelineStateViewer.h"
 #include "ui_PipelineStateViewer.h"
 
@@ -201,6 +202,7 @@ PipelineStateViewer::PipelineStateViewer(ICaptureContext &ctx, QWidget *parent)
   m_D3D11 = NULL;
   m_D3D12 = NULL;
   m_GL = NULL;
+  m_Metal = NULL;
   m_Vulkan = NULL;
 
   m_Current = NULL;
@@ -231,13 +233,18 @@ void PipelineStateViewer::OnCaptureLoaded()
     setToD3D12();
   else if(m_Ctx.APIProps().pipelineType == GraphicsAPI::OpenGL)
     setToGL();
+  else if(m_Ctx.APIProps().pipelineType == GraphicsAPI::Metal)
+    setToMetal();
   else if(m_Ctx.APIProps().pipelineType == GraphicsAPI::Vulkan)
     setToVulkan();
 
   if(m_Current)
     m_Current->OnCaptureLoaded();
 
-  if(!m_Ctx.APIProps().remoteReplay)
+  const bool canCreateTextureOutput = m_Ctx.APIProps().pipelineType != GraphicsAPI::Metal ||
+                                      m_Ctx.APIProps().HasFeature(ReplayFeature::TextureFetch);
+
+  if(!m_Ctx.APIProps().remoteReplay && canCreateTextureOutput)
   {
     WindowingData thumbData = ui->thumbnail->GetWidgetWindowingData();
 
@@ -252,6 +259,8 @@ void PipelineStateViewer::OnCaptureLoaded()
   else
   {
     m_Output = NULL;
+    ui->thumbnail->SetOutput(NULL);
+    ui->thumbnail->hide();
   }
 }
 
@@ -269,6 +278,10 @@ void PipelineStateViewer::OnCaptureClosed()
 {
   if(m_Current)
     m_Current->OnCaptureClosed();
+
+  m_Output = NULL;
+  ui->thumbnail->SetOutput(NULL);
+  ui->thumbnail->hide();
 }
 
 void PipelineStateViewer::OnEventChanged(uint32_t eventId)
@@ -281,6 +294,8 @@ void PipelineStateViewer::OnEventChanged(uint32_t eventId)
     setToD3D12();
   else if(m_Ctx.APIProps().pipelineType == GraphicsAPI::OpenGL)
     setToGL();
+  else if(m_Ctx.APIProps().pipelineType == GraphicsAPI::Metal)
+    setToMetal();
   else if(m_Ctx.APIProps().pipelineType == GraphicsAPI::Vulkan)
     setToVulkan();
 
@@ -296,6 +311,8 @@ QString PipelineStateViewer::GetCurrentAPI()
     return lit("D3D12");
   else if(m_Current == m_GL)
     return lit("OpenGL");
+  else if(m_Current == m_Metal)
+    return lit("Metal");
   else if(m_Current == m_Vulkan)
     return lit("Vulkan");
 
@@ -321,6 +338,8 @@ void PipelineStateViewer::setPersistData(const QVariant &persistData)
     setToD3D12();
   else if(str == lit("GL"))
     setToGL();
+  else if(str == lit("Metal"))
+    setToMetal();
   else if(str == lit("Vulkan"))
     setToVulkan();
 }
@@ -330,11 +349,13 @@ void PipelineStateViewer::reset()
   delete m_D3D11;
   delete m_D3D12;
   delete m_GL;
+  delete m_Metal;
   delete m_Vulkan;
 
   m_D3D11 = NULL;
   m_D3D12 = NULL;
   m_GL = NULL;
+  m_Metal = NULL;
   m_Vulkan = NULL;
 
   m_Current = NULL;
@@ -374,6 +395,18 @@ void PipelineStateViewer::setToGL()
   m_GL = new GLPipelineStateViewer(m_Ctx, *this, this);
   ui->layout->addWidget(m_GL);
   m_Current = m_GL;
+}
+
+void PipelineStateViewer::setToMetal()
+{
+  if(m_Metal)
+    return;
+
+  reset();
+
+  m_Metal = new MetalPipelineStateViewer(m_Ctx, this);
+  ui->layout->addWidget(m_Metal);
+  m_Current = m_Metal;
 }
 
 void PipelineStateViewer::setToVulkan()
@@ -1544,6 +1577,8 @@ void PipelineStateViewer::SelectPipelineStage(PipelineStage stage)
     m_D3D12->SelectPipelineStage(stage);
   else if(m_GL)
     m_GL->SelectPipelineStage(stage);
+  else if(m_Metal)
+    m_Metal->SelectPipelineStage(stage);
   else if(m_Vulkan)
     m_Vulkan->SelectPipelineStage(stage);
 }

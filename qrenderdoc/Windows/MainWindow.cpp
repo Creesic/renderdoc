@@ -614,10 +614,22 @@ void MainWindow::on_action_Open_Capture_triggered()
   if(!PromptCloseCapture())
     return;
 
-  QString filename = RDDialog::getOpenFileName(
-      this, tr("Select file to open"), m_Ctx.Config().LastCaptureFilePath,
-      tr("Capture Files (*.rdc);;Image Files (*.dds *.hdr *.exr *.bmp *.jpg "
-         "*.jpeg *.png *.tga *.gif *.psd);;All Files (*)"));
+  QStringList capturePatterns = {lit("*.rdc")};
+  ICaptureFile *capture = RENDERDOC_OpenCaptureFile();
+  for(const CaptureFileFormat &format : capture->GetCaptureFileFormats())
+  {
+    const QString extension = QString(format.extension);
+    if(format.openSupported && extension != lit("rdc"))
+      capturePatterns << lit("*.") + extension;
+  }
+  capture->Shutdown();
+  capturePatterns.removeDuplicates();
+
+  QString filename =
+      RDDialog::getOpenFileName(this, tr("Select file to open"), m_Ctx.Config().LastCaptureFilePath,
+                                tr("Capture Files (%1);;Image Files (*.dds *.hdr *.exr *.bmp *.jpg "
+                                   "*.jpeg *.png *.tga *.gif *.psd);;All Files (*)")
+                                    .arg(capturePatterns.join(lit(" "))));
 
   if(!filename.isEmpty())
     LoadFromFilename(filename, false);
@@ -720,8 +732,37 @@ void MainWindow::LoadFromFilename(const QString &filename, bool temporary)
   }
   else
   {
-    // not a recognised filetype, see if we can load it anyway
-    LoadCapture(filename, m_Ctx.Config().DefaultReplayOptions, temporary, true);
+    CaptureFileFormat importFormat = {};
+    bool foundImportFormat = false;
+
+    ICaptureFile *capture = RENDERDOC_OpenCaptureFile();
+    for(const CaptureFileFormat &format : capture->GetCaptureFileFormats())
+    {
+      const QString extension = QString(format.extension);
+      if(format.openSupported && extension != lit("rdc") &&
+         filename.endsWith(lit(".") + extension, Qt::CaseInsensitive))
+      {
+        importFormat = format;
+        foundImportFormat = true;
+        break;
+      }
+    }
+    capture->Shutdown();
+
+    if(foundImportFormat)
+    {
+      QString rdcfile = m_Ctx.TempCaptureFilename(lit("imported_") + QString(importFormat.extension));
+      if(m_Ctx.ImportCapture(importFormat, filename, rdcfile))
+      {
+        LoadFromFilename(rdcfile, true);
+        takeCaptureOwnership();
+      }
+    }
+    else
+    {
+      // not a recognised filetype, see if we can load it anyway
+      LoadCapture(filename, m_Ctx.Config().DefaultReplayOptions, temporary, true);
+    }
   }
 }
 
@@ -1223,7 +1264,13 @@ void MainWindow::SetTitle(const QString &filename)
   {
     prefix = QFileInfo(filename).fileName();
     if(m_Ctx.APIProps().degraded)
-      prefix += tr(" !DEGRADED PERFORMANCE!");
+    {
+      const APIProperties &props = m_Ctx.APIProps();
+      const bool readOnlyMetalTrace = props.pipelineType == GraphicsAPI::Metal &&
+                                      !props.features.empty() &&
+                                      !props.HasFeature(ReplayFeature::ExecutableReplay);
+      prefix += readOnlyMetalTrace ? tr(" [READ-ONLY INSPECTION]") : tr(" !DEGRADED PERFORMANCE!");
+    }
     prefix += lit(" - ");
   }
 

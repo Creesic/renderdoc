@@ -1991,7 +1991,11 @@ processing them wherever possible.
 )");
   bool IsFakeMarker() const
   {
-    return events.size() == 1 && events[0].chunkIndex == APIEvent::NoChunk;
+    // Fake markers inserted by AddFakeMarkers always wrap one or more real actions. A real
+    // inspection-only action may also have no structured chunk, so NoChunk alone is not enough to
+    // classify it as a fake marker. Several UI paths intentionally use children[0] after this
+    // predicate succeeds, making the non-empty child invariant important as well as semantic.
+    return !children.empty() && events.size() == 1 && events[0].chunkIndex == APIEvent::NoChunk;
   }
 
   DOCUMENT(R"(Returns the name for this action, either from its custom name (see :data:`customName`)
@@ -2195,6 +2199,54 @@ for very coarse bucketing of actions into similar passes by their outputs.
 
 DECLARE_REFLECTION_STRUCT(ActionDescription);
 
+DOCUMENT(R"(Describes whether a replay or inspection feature is available, with a stable reason
+when it is not.)");
+struct ReplayFeatureCapability
+{
+  DOCUMENT("");
+  ReplayFeatureCapability() = default;
+  ReplayFeatureCapability(ReplayFeature f, bool a, const rdcstr &r = {})
+      : feature(f), available(a), reason(r)
+  {
+  }
+  ReplayFeatureCapability(const ReplayFeatureCapability &) = default;
+  ReplayFeatureCapability &operator=(const ReplayFeatureCapability &) = default;
+
+  bool operator==(const ReplayFeatureCapability &o) const
+  {
+    return feature == o.feature && available == o.available && reason == o.reason;
+  }
+  bool operator<(const ReplayFeatureCapability &o) const
+  {
+    if(feature != o.feature)
+      return feature < o.feature;
+    if(available != o.available)
+      return available < o.available;
+    return reason < o.reason;
+  }
+
+  DOCUMENT(R"(The feature described by this entry.
+
+:type: ReplayFeature
+)");
+  ReplayFeature feature = ReplayFeature::ExecutableReplay;
+
+  DOCUMENT(R"(Whether the feature is available for this capture and replay driver.
+
+:type: bool
+)");
+  bool available = false;
+
+  DOCUMENT(R"(A human-readable explanation when the feature is unavailable. This is empty when the
+feature is available.
+
+:type: str
+)");
+  rdcstr reason;
+};
+
+DECLARE_REFLECTION_STRUCT(ReplayFeatureCapability);
+
 DOCUMENT("Gives some API-specific information about the capture.");
 struct APIProperties
 {
@@ -2202,6 +2254,36 @@ struct APIProperties
   APIProperties() = default;
   APIProperties(const APIProperties &) = default;
   APIProperties &operator=(const APIProperties &) = default;
+
+  DOCUMENT(R"(Checks whether an explicitly reported feature is available. This returns ``False``
+if the driver did not report the feature.
+
+:param ReplayFeature feature: The feature to query.
+:return: Whether the feature was reported as available.
+:rtype: bool
+)");
+  bool HasFeature(ReplayFeature feature) const
+  {
+    for(const ReplayFeatureCapability &capability : features)
+      if(capability.feature == feature)
+        return capability.available;
+    return false;
+  }
+
+  DOCUMENT(R"(Returns the driver's explanation for an unavailable feature. This returns an empty
+string if the feature is available, and a stable fallback if the driver did not report it.
+
+:param ReplayFeature feature: The feature to query.
+:return: The unavailability reason.
+:rtype: str
+)");
+  rdcstr FeatureUnavailableReason(ReplayFeature feature) const
+  {
+    for(const ReplayFeatureCapability &capability : features)
+      if(capability.feature == feature)
+        return capability.available ? rdcstr() : capability.reason;
+    return "Feature availability was not reported by this replay driver";
+  }
 
   DOCUMENT(R"(The :class:`GraphicsAPI` of the actual log/capture.
 
@@ -2252,6 +2334,13 @@ with software rendering, or with some functionality disabled due to lack of supp
 :type: bool
 )");
   bool rgpCapture = false;
+
+  DOCUMENT(R"(Explicit feature availability for this capture and replay driver. An empty list means
+the driver uses RenderDoc's legacy API-wide capability behaviour.
+
+:type: List[ReplayFeatureCapability]
+)");
+  rdcarray<ReplayFeatureCapability> features;
 
 #if !defined(SWIG)
   // flags about edge-case parts of the APIs that might be used in the capture.

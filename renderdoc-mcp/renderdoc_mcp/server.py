@@ -203,6 +203,29 @@ def _target_resource_ids(targets: dict[str, Any] | None) -> set[str]:
     return ids
 
 
+def _capability_error(sess: Any, feature: str) -> dict[str, Any] | None:
+    """Return an MCP error only when the replay driver explicitly reports a feature unavailable.
+
+    Older/non-Metal drivers may not publish the capability array yet, so absence preserves their
+    existing behavior. An explicit unavailable entry is authoritative and must stop the tool
+    before it invokes an unsupported replay operation.
+    """
+    capability = sess.capability(feature) if hasattr(sess, "capability") else None
+    if capability is None or bool(capability.get("available", False)):
+        return None
+    reason = str(capability.get("reason") or "This replay driver does not support the feature")
+    return R.err(
+        "unsupported_capability",
+        reason,
+        {
+            "capture_id": getattr(sess, "capture_id", ""),
+            "api": getattr(sess, "api_name", "Unknown"),
+            "feature": feature,
+            "available": False,
+        },
+    )
+
+
 async def ensure_replay_initialized() -> None:
     """Load pymodules and InitialiseReplay on first tool use — keeps MCP handshake instant."""
     global _replay_initialized
@@ -324,8 +347,36 @@ def build_mcp() -> FastMCP:
                         "capture_id": sess.capture_id,
                         "path": sess.path,
                         "driver": sess.driver_name or rdutil.replay_driver_hint(sess.controller),
-                        "api": enum_api(rd, sess.controller),
+                        "api": sess.api_name or enum_api(rd, sess.controller),
+                        "degraded": sess.degraded,
+                        "capabilities": sess.capabilities,
                         "event_count": len(sess.events_ordered),
+                    }
+                )
+
+            return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
+
+    @mcp.tool()
+    async def get_capture_capabilities(capture_id: str) -> dict[str, Any]:
+        """Return the replay driver's explicit per-feature availability and reasons.
+
+        Call this before expensive or advanced inspection. Metal Apple GPU Trace sessions are
+        intentionally read-only and report unsupported operations here instead of fabricating
+        empty pipeline, texture, pixel-history, mesh, or shader-debug results.
+        """
+        async with replay_execution():
+
+            def _go() -> dict[str, Any]:
+                sess = sessions.get(capture_id)
+                if sess is None:
+                    return R.err("unknown_capture", capture_id)
+                return R.ok(
+                    {
+                        "capture_id": capture_id,
+                        "driver": sess.driver_name,
+                        "api": sess.api_name,
+                        "degraded": sess.degraded,
+                        "capabilities": sess.capabilities,
                     }
                 )
 
@@ -509,6 +560,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "PipelineState")
+                if unsupported:
+                    return unsupported
                 try:
                     sessions.set_frame_event(sess, int(event_id))
                     snap = normalize_pipeline_state(sess.controller, sess.structured_file, int(event_id))
@@ -526,6 +580,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "PipelineState")
+                if unsupported:
+                    return unsupported
                 try:
                     sessions.set_frame_event(sess, int(event_id))
                     data = normalize_bound_resources(sess.controller, sess.structured_file, int(event_id))
@@ -688,6 +745,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "PipelineState")
+                if unsupported:
+                    return unsupported
                 try:
                     rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
@@ -841,6 +901,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "TextureFetch")
+                if unsupported:
+                    return unsupported
                 try:
                     rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
@@ -880,6 +943,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "TextureFetch")
+                if unsupported:
+                    return unsupported
                 try:
                     rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
@@ -940,6 +1006,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "TextureFetch")
+                if unsupported:
+                    return unsupported
                 try:
                     rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
@@ -1006,6 +1075,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "BufferFetch")
+                if unsupported:
+                    return unsupported
                 try:
                     rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
@@ -1061,6 +1133,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "BufferFetch")
+                if unsupported:
+                    return unsupported
                 try:
                     rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
@@ -1143,6 +1218,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "BufferFetch")
+                if unsupported:
+                    return unsupported
                 try:
                     rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
@@ -1238,6 +1316,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "PixelHistory")
+                if unsupported:
+                    return unsupported
                 try:
                     rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
@@ -1380,6 +1461,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "PixelHistory")
+                if unsupported:
+                    return unsupported
                 try:
                     cur_rid = rdutil.parse_resource_id(resource_id)
                 except ValueError as ex:
@@ -1510,6 +1594,10 @@ def build_mcp() -> FastMCP:
                 b = sessions.get(bad_capture_id)
                 if g is None or b is None:
                     return R.err("unknown_capture", "good or bad capture_id invalid")
+                for sess in (g, b):
+                    unsupported = _capability_error(sess, "PipelineState")
+                    if unsupported:
+                        return unsupported
                 try:
                     sessions.set_frame_event(g, int(good_event_id))
                     sg = normalize_pipeline_state(g.controller, g.structured_file, int(good_event_id))
@@ -1544,6 +1632,10 @@ def build_mcp() -> FastMCP:
                 b = sessions.get(bad_capture_id)
                 if g is None or b is None:
                     return R.err("unknown_capture", "good or bad capture_id invalid")
+                for sess in (g, b):
+                    unsupported = _capability_error(sess, "TextureFetch")
+                    if unsupported:
+                        return unsupported
                 try:
                     gr = rdutil.parse_resource_id(good_resource_id)
                     br = rdutil.parse_resource_id(bad_resource_id)
@@ -1586,6 +1678,10 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                for feature in ("PipelineState", "BufferFetch"):
+                    unsupported = _capability_error(sess, feature)
+                    if unsupported:
+                        return unsupported
                 try:
                     sessions.set_frame_event(sess, int(event_id))
                     data = decode_mesh_inputs_core(
@@ -1630,6 +1726,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "PostVS")
+                if unsupported:
+                    return unsupported
                 try:
                     sessions.set_frame_event(sess, int(event_id))
                     data = decode_post_vs_outputs_core(
@@ -1663,6 +1762,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "ShaderSource")
+                if unsupported:
+                    return unsupported
                 st = _stage_from_string(rd, stage)
                 if st is None:
                     return R.err("bad_stage", stage)
@@ -1734,6 +1836,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "ShaderSource")
+                if unsupported:
+                    return unsupported
                 st = _stage_from_string(rd, stage)
                 if st is None:
                     return R.err("bad_stage", stage)
@@ -1837,6 +1942,10 @@ def build_mcp() -> FastMCP:
                 sess_b = sessions.get(capture_b)
                 if sess_a is None or sess_b is None:
                     return R.err("unknown_capture", "capture_a or capture_b invalid")
+                for sess in (sess_a, sess_b):
+                    unsupported = _capability_error(sess, "ShaderDebugging")
+                    if unsupported:
+                        return unsupported
                 try:
                     trace_a, truncated_a = _collect_comparable_shader_trace(
                         sess_a, int(event_id_a), stage, invocation_a
@@ -1899,6 +2008,9 @@ def build_mcp() -> FastMCP:
             sess = sessions.get(capture_id)
             if sess is None:
                 return R.err("unknown_capture", capture_id)
+            unsupported = _capability_error(sess, "ShaderDebugging")
+            if unsupported:
+                return unsupported
             timeout = clamp_shader_debug_timeout(timeout_seconds)
             request = {
                 "operation": "debug_pixel",
@@ -1960,6 +2072,9 @@ def build_mcp() -> FastMCP:
             sess = sessions.get(capture_id)
             if sess is None:
                 return R.err("unknown_capture", capture_id)
+            unsupported = _capability_error(sess, "ShaderDebugging")
+            if unsupported:
+                return unsupported
             timeout = clamp_shader_debug_timeout(timeout_seconds)
             request = {
                 "operation": "debug_vertex",
@@ -2022,6 +2137,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "PipelineState")
+                if unsupported:
+                    return unsupported
                 st = _stage_from_string(rd, stage)
                 if st is None:
                     return R.err("bad_stage", stage)
@@ -2117,6 +2235,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "PipelineState")
+                if unsupported:
+                    return unsupported
                 try:
                     msgs = list(sess.controller.GetDebugMessages())
                 except Exception as ex:
@@ -2239,6 +2360,9 @@ def build_mcp() -> FastMCP:
                 sess = sessions.get(capture_id)
                 if sess is None:
                     return R.err("unknown_capture", capture_id)
+                unsupported = _capability_error(sess, "PipelineState")
+                if unsupported:
+                    return unsupported
                 rows, truncated = _draw_rows(sess, event_ids, name_contains, limit)
                 return R.ok(
                     {"capture_id": capture_id, "draws": rows, "count": len(rows), "truncated": truncated}
@@ -2269,6 +2393,10 @@ def build_mcp() -> FastMCP:
                 sess_b = sessions.get(capture_b)
                 if sess_a is None or sess_b is None:
                     return R.err("unknown_capture", "capture_a or capture_b invalid")
+                for sess in (sess_a, sess_b):
+                    unsupported = _capability_error(sess, "PipelineState")
+                    if unsupported:
+                        return unsupported
 
                 rows_a, _ = _draw_rows(sess_a, event_ids_a, None, limit)
                 rows_b, _ = _draw_rows(sess_b, event_ids_b, None, limit)
@@ -2368,6 +2496,10 @@ def build_mcp() -> FastMCP:
                 sess_b = sessions.get(capture_b)
                 if sess_a is None or sess_b is None:
                     return R.err("unknown_capture", "capture_a or capture_b invalid")
+                for sess in (sess_a, sess_b):
+                    unsupported = _capability_error(sess, "PipelineState")
+                    if unsupported:
+                        return unsupported
                 return {
                     "operation": "find_corresponding_draws",
                     "capture_path_a": sess_a.path,

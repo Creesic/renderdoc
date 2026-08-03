@@ -660,7 +660,7 @@ struct formats_reader
 
     for(const CaptureFileFormat &f : tmp->GetCaptureFileFormats())
     {
-      if(!f.openSupported && input)
+      if((input && !f.openSupported) || (!input && !f.convertSupported))
         continue;
 
       exts.push_back(conv(f.extension));
@@ -756,9 +756,14 @@ public:
     {
       std::cout << "Available formats:" << std::endl;
       for(CaptureFileFormat f : m_Formats)
+      {
+        if(!f.convertSupported)
+          continue;
+
         std::cout << "'" << f.extension << "': " << f.name << std::endl
                   << " * " << f.description << std::endl
                   << std::endl;
+      }
       return 0;
     }
 
@@ -774,6 +779,9 @@ public:
       // try to guess the format by looking for the extension in the filename
       for(CaptureFileFormat f : m_Formats)
       {
+        if(!f.openSupported)
+          continue;
+
         if(infile.find(conv("." + f.extension)) != std::string::npos)
         {
           infmt = conv(f.extension);
@@ -794,6 +802,9 @@ public:
       // try to guess the format by looking for the extension in the filename
       for(CaptureFileFormat f : m_Formats)
       {
+        if(!f.convertSupported)
+          continue;
+
         if(outfile.find(conv("." + f.extension)) != std::string::npos)
         {
           outfmt = conv(f.extension);

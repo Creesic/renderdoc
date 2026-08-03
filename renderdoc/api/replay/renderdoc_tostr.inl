@@ -1066,6 +1066,66 @@ rdcstr DoStringise(const GraphicsAPI &el)
     STRINGISE_ENUM_CLASS(D3D12);
     STRINGISE_ENUM_CLASS(OpenGL);
     STRINGISE_ENUM_CLASS(Vulkan);
+    STRINGISE_ENUM_CLASS(Metal);
+  }
+  END_ENUM_STRINGISE();
+}
+
+template <>
+rdcstr DoStringise(const ReplayFeature &el)
+{
+  BEGIN_ENUM_STRINGISE(ReplayFeature)
+  {
+    STRINGISE_ENUM_CLASS(ExecutableReplay);
+    STRINGISE_ENUM_CLASS(PipelineState);
+    STRINGISE_ENUM_CLASS(TextureFetch);
+    STRINGISE_ENUM_CLASS(BufferFetch);
+    STRINGISE_ENUM_CLASS(ShaderSource);
+    STRINGISE_ENUM_CLASS(Profiling);
+    STRINGISE_ENUM_CLASS(PixelHistory);
+    STRINGISE_ENUM_CLASS(OverlayRendering);
+    STRINGISE_ENUM_CLASS(PostVS);
+    STRINGISE_ENUM_CLASS(ShaderDebugging);
+    STRINGISE_ENUM_CLASS(ShaderReplacement);
+    STRINGISE_ENUM_CLASS(CustomShaders);
+  }
+  END_ENUM_STRINGISE();
+}
+
+template <>
+rdcstr DoStringise(const MetalPipe::LoadAction &el)
+{
+  BEGIN_ENUM_STRINGISE(MetalPipe::LoadAction)
+  {
+    STRINGISE_ENUM_CLASS(DontCare);
+    STRINGISE_ENUM_CLASS(Load);
+    STRINGISE_ENUM_CLASS(Clear);
+  }
+  END_ENUM_STRINGISE();
+}
+
+template <>
+rdcstr DoStringise(const MetalPipe::StoreAction &el)
+{
+  BEGIN_ENUM_STRINGISE(MetalPipe::StoreAction)
+  {
+    STRINGISE_ENUM_CLASS(DontCare);
+    STRINGISE_ENUM_CLASS(Store);
+    STRINGISE_ENUM_CLASS(MultisampleResolve);
+    STRINGISE_ENUM_CLASS(StoreAndMultisampleResolve);
+    STRINGISE_ENUM_CLASS(Unknown);
+  }
+  END_ENUM_STRINGISE();
+}
+
+template <>
+rdcstr DoStringise(const MetalPipe::StepFunction &el)
+{
+  BEGIN_ENUM_STRINGISE(MetalPipe::StepFunction)
+  {
+    STRINGISE_ENUM_CLASS(Constant);
+    STRINGISE_ENUM_CLASS(PerVertex);
+    STRINGISE_ENUM_CLASS(PerInstance);
   }
   END_ENUM_STRINGISE();
 }

@@ -28,15 +28,18 @@
 #include <QPainter>
 #include <QPointer>
 #include <QVBoxLayout>
+#include <utility>
 #include "Code/Interface/QRDInterface.h"
 #include "Code/QRDUtils.h"
 
 CustomPaintWidgetInternal::CustomPaintWidgetInternal(CustomPaintWidget &parentCustom, bool rendering)
-    : m_Custom(parentCustom), m_Rendering(rendering)
+    : m_Custom(parentCustom),
+      m_Rendering(rendering),
+      m_ReadbackPresentation(rendering && parentCustom.m_ReadbackPresentation)
 {
   setAttribute(Qt::WA_OpaquePaintEvent);
   setMouseTracking(true);
-  if(m_Rendering)
+  if(m_Rendering && !m_ReadbackPresentation)
     setAttribute(Qt::WA_PaintOnScreen);
 }
 
@@ -106,6 +109,7 @@ void CustomPaintWidget::OnEventChanged(uint32_t eventId)
 
 void CustomPaintWidget::update()
 {
+  m_ReadbackDirty = true;
   m_Internal->update();
   QWidget::update();
 }
@@ -116,6 +120,16 @@ WindowingData CustomPaintWidget::GetWidgetWindowingData()
   // data
   m_Rendering = true;
   RecreateInternalWidget();
+  if(m_ReadbackPresentation)
+  {
+    const qreal scale = m_Internal->devicePixelRatioF();
+    // A dock widget can briefly report a zero or tiny size while the saved layout is restored.
+    // Keep enough resolution for a useful preview without allowing a Retina-sized window to make
+    // every interaction copy an unbounded framebuffer.
+    const int32_t width = qBound(256, qRound(m_Internal->width() * scale), 2048);
+    const int32_t height = qBound(256, qRound(m_Internal->height() * scale), 2048);
+    return CreateHeadlessWindowingData(width, height);
+  }
   return m_Ctx->CreateWindowingData(m_Internal);
 }
 
@@ -124,6 +138,18 @@ void CustomPaintWidget::SetOutput(IReplayOutput *out)
   m_Output = out;
   m_Rendering = (out != NULL);
 
+  RecreateInternalWidget();
+}
+
+void CustomPaintWidget::SetReadbackPresentation(bool enabled)
+{
+  if(m_ReadbackPresentation == enabled)
+    return;
+
+  m_ReadbackPresentation = enabled;
+  m_ReadbackDirty = true;
+  m_ReadbackPending = false;
+  m_ReadbackImage = QImage();
   RecreateInternalWidget();
 }
 
@@ -139,7 +165,9 @@ void CustomPaintWidget::RecreateInternalWidget()
   m_Rendering = m_Rendering && m_Ctx && m_Ctx->IsCaptureLoaded() && m_Ctx->GetFatalError().OK();
 
   // we need to recreate the widget if it's not matching out rendering state.
-  if(m_Internal == NULL || m_Rendering != m_Internal->IsRendering())
+  if(m_Internal == NULL || m_Rendering != m_Internal->IsRendering() ||
+     (m_Rendering &&
+      m_ReadbackPresentation != m_Internal->IsReadbackPresentation()))
   {
     delete m_Internal;
     m_Internal = new CustomPaintWidgetInternal(*this, m_Rendering);
@@ -163,11 +191,64 @@ void CustomPaintWidget::renderInternal(QPaintEvent *e)
   if(m_Ctx && m_Output && m_Ctx->IsCaptureLoaded())
   {
     QPointer<CustomPaintWidget> me(this);
+    if(m_ReadbackPresentation)
+    {
+      if(m_ReadbackPending || !m_ReadbackDirty)
+        return;
+
+      m_ReadbackPending = true;
+      m_ReadbackDirty = false;
+      m_Ctx->Replay().AsyncInvoke(m_Tag, [me](IReplayController *r) {
+        if(!me || !me->m_Output || !me->m_Ctx->IsCaptureLoaded())
+          return;
+
+        me->m_Output->Display();
+        bytebuf pixels = me->m_Output->ReadbackOutputTexture();
+        rdcpair<int32_t, int32_t> dimensions = me->m_Output->GetDimensions();
+
+        GUIInvoke::call(me, [me, pixels = std::move(pixels), dimensions]() mutable {
+          if(!me)
+            return;
+
+          me->m_ReadbackPending = false;
+          const int32_t width = dimensions.first;
+          const int32_t height = dimensions.second;
+          if(width > 0 && height > 0 && pixels.size() == size_t(width) * size_t(height) * 3)
+          {
+            me->m_ReadbackImage =
+                QImage(pixels.data(), width, height, width * 3, QImage::Format_RGB888).copy();
+          }
+          else
+          {
+            me->m_ReadbackImage = QImage();
+            qWarning() << "Texture Viewer readback failed for" << width << "x" << height << "with"
+                       << pixels.size() << "bytes";
+          }
+
+          if(me->m_Internal)
+            me->m_Internal->update();
+        });
+      });
+      return;
+    }
+
     m_Ctx->Replay().AsyncInvoke(m_Tag, [me](IReplayController *r) {
       if(me && me->m_Output && me->m_Ctx->IsCaptureLoaded())
         me->m_Output->Display();
     });
   }
+}
+
+void CustomPaintWidget::paintReadbackInternal(QPaintEvent *e)
+{
+  if(m_ReadbackImage.isNull())
+  {
+    paintInternal(e);
+    return;
+  }
+
+  QPainter painter(m_Internal);
+  painter.drawImage(m_Internal->rect(), m_ReadbackImage);
 }
 
 void CustomPaintWidget::paintInternal(QPaintEvent *e)
@@ -243,7 +324,11 @@ void CustomPaintWidget::paintEvent(QPaintEvent *e)
 void CustomPaintWidgetInternal::paintEvent(QPaintEvent *e)
 {
   if(m_Rendering)
+  {
     m_Custom.renderInternal(e);
+    if(m_ReadbackPresentation)
+      m_Custom.paintReadbackInternal(e);
+  }
   else
     m_Custom.paintInternal(e);
 }
@@ -251,7 +336,7 @@ void CustomPaintWidgetInternal::paintEvent(QPaintEvent *e)
 #if defined(RENDERDOC_PLATFORM_APPLE)
 bool CustomPaintWidgetInternal::event(QEvent *e)
 {
-  if(m_Rendering && e->type() == QEvent::UpdateRequest)
+  if(m_Rendering && !m_ReadbackPresentation && e->type() == QEvent::UpdateRequest)
     paintEvent(NULL);
   return QWidget::event(e);
 }

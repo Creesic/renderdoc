@@ -867,6 +867,7 @@ void RenderDoc::InitialiseReplay(GlobalEnvironment env, const rdcarray<rdcstr> &
           case GraphicsAPI::D3D12: driverType = RDCDriver::D3D12; break;
           case GraphicsAPI::OpenGL: break;
           case GraphicsAPI::Vulkan: driverType = RDCDriver::Vulkan; break;
+          case GraphicsAPI::Metal: break;
         }
 
         if(driverType == RDCDriver::Unknown || !HasReplayDriver(driverType))
@@ -1795,13 +1796,15 @@ void RenderDoc::RegisterCaptureImportExporter(CaptureImporter importer, CaptureE
     }
   }
 
-  description.openSupported = true;
-  description.convertSupported = true;
+  description.openSupported = importer != NULL;
+  description.convertSupported = exporter != NULL;
 
   m_ImportExportFormats.push_back(description);
 
-  m_Importers[filetype] = importer;
-  m_Exporters[filetype] = exporter;
+  if(importer)
+    m_Importers[filetype] = importer;
+  if(exporter)
+    m_Exporters[filetype] = exporter;
 }
 
 void RenderDoc::RegisterDeviceProtocol(const rdcstr &protocol, ProtocolHandler handler)
@@ -2090,6 +2093,9 @@ DriverInformation RenderDoc::GetDriverInformation(GraphicsAPI api)
     case GraphicsAPI::D3D12: driverType = RDCDriver::D3D12; break;
     case GraphicsAPI::OpenGL: driverType = RDCDriver::OpenGL; break;
     case GraphicsAPI::Vulkan: driverType = RDCDriver::Vulkan; break;
+    // A0 has no Metal proxy driver. Keep this exhaustive without invoking the file-backed provider
+    // with a NULL RDC; driver information is added when a real proxy implementation exists.
+    case GraphicsAPI::Metal: break;
   }
 
   if(driverType == RDCDriver::Unknown || !HasReplayDriver(driverType))

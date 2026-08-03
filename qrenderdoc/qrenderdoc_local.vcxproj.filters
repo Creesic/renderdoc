@@ -180,6 +180,9 @@
     <ClCompile Include="Windows\PipelineState\GLPipelineStateViewer.cpp">
       <Filter>Windows\PipelineState</Filter>
     </ClCompile>
+    <ClCompile Include="Windows\PipelineState\MetalPipelineStateViewer.cpp">
+      <Filter>Windows\PipelineState</Filter>
+    </ClCompile>
     <ClCompile Include="Windows\PipelineState\PipelineStateViewer.cpp">
       <Filter>Windows\PipelineState</Filter>
     </ClCompile>
@@ -985,6 +988,9 @@
     </ClInclude>
     <ClInclude Include="Code\ScintillaSyntax.h">
       <Filter>Code</Filter>
+    </ClInclude>
+    <ClInclude Include="Windows\PipelineState\MetalPipelineStateViewer.h">
+      <Filter>Windows\PipelineState</Filter>
     </ClInclude>
     <ClInclude Include="Code\Resources.h">
       <Filter>Code</Filter>

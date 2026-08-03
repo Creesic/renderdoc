@@ -497,7 +497,9 @@ int main(int argc, char *argv[])
   {
     const QString &fn = remaining[i];
     QFileInfo checkFile(fn);
-    if(checkFile.exists() && checkFile.isFile())
+    const bool appleGPUTraceBundle =
+        checkFile.isDir() && checkFile.fileName().endsWith(lit(".gputrace"), Qt::CaseInsensitive);
+    if(checkFile.exists() && (checkFile.isFile() || appleGPUTraceBundle))
     {
       filename = fn;
       remaining.removeAt(i);

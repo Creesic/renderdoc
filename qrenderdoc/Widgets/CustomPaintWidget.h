@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <QImage>
 #include <QWidget>
 #include "Code/Interface/QRDInterface.h"
 
@@ -37,12 +38,14 @@ private:
 
   CustomPaintWidget &m_Custom;
   bool m_Rendering = false;
+  bool m_ReadbackPresentation = false;
 
 public:
   explicit CustomPaintWidgetInternal(CustomPaintWidget &parentCustom, bool rendering);
   ~CustomPaintWidgetInternal();
 
   bool IsRendering() const { return m_Rendering; }
+  bool IsReadbackPresentation() const { return m_ReadbackPresentation; }
 protected:
   void mousePressEvent(QMouseEvent *e) override;
   void mouseReleaseEvent(QMouseEvent *e) override;
@@ -56,7 +59,10 @@ protected:
 #endif
 
   void paintEvent(QPaintEvent *e) override;
-  QPaintEngine *paintEngine() const override { return m_Rendering ? NULL : QWidget::paintEngine(); }
+  QPaintEngine *paintEngine() const override
+  {
+    return m_Rendering && !m_ReadbackPresentation ? NULL : QWidget::paintEngine();
+  }
 };
 
 // this is the public-facing widget which is persistent and contains & recreates the internal widget
@@ -80,6 +86,7 @@ public:
 
   WindowingData GetWidgetWindowingData();
   void SetOutput(IReplayOutput *out);
+  void SetReadbackPresentation(bool enabled);
   void SetBackCol(QColor col) { m_BackCol = col; }
 signals:
   void clicked(QMouseEvent *e);
@@ -103,10 +110,15 @@ private:
   CustomPaintWidgetInternal *m_Internal = NULL;
 
   bool m_Rendering = false;
+  bool m_ReadbackPresentation = false;
+  bool m_ReadbackDirty = true;
+  bool m_ReadbackPending = false;
+  QImage m_ReadbackImage;
 
   void RecreateInternalWidget();
   void renderInternal(QPaintEvent *e);
   void paintInternal(QPaintEvent *e);
+  void paintReadbackInternal(QPaintEvent *e);
 
   ICaptureContext *m_Ctx = NULL;
   IReplayOutput *m_Output = NULL;

@@ -52,7 +52,7 @@ rdcstr PipeState::GetResourceLayout(ResourceId id) const
 
 rdcstr PipeState::Abbrev(ShaderStage stage) const
 {
-  if(IsCaptureGL() || IsCaptureVK())
+  if(IsCaptureGL() || IsCaptureVK() || IsCaptureMetal())
   {
     switch(stage)
     {
@@ -88,7 +88,7 @@ rdcstr PipeState::Abbrev(ShaderStage stage) const
 
 rdcstr PipeState::OutputAbbrev() const
 {
-  if(IsCaptureGL() || IsCaptureVK())
+  if(IsCaptureGL() || IsCaptureVK() || IsCaptureMetal())
   {
     return "FB";
   }
@@ -154,6 +154,12 @@ bool PipeState::IsVulkanStage(ShaderStage stage) const
     case ShaderStage::Mesh: return true;
     default: return false;
   }
+}
+
+bool PipeState::IsMetalStage(ShaderStage stage) const
+{
+  return stage == ShaderStage::Vertex || stage == ShaderStage::Fragment ||
+         stage == ShaderStage::Compute;
 }
 
 const D3D11Pipe::Shader &PipeState::GetD3D11Stage(ShaderStage stage) const
@@ -240,6 +246,19 @@ const VKPipe::Shader &PipeState::GetVulkanStage(ShaderStage stage) const
   return m_Vulkan->computeShader;
 }
 
+const MetalPipe::Shader &PipeState::GetMetalStage(ShaderStage stage) const
+{
+  if(stage == ShaderStage::Vertex)
+    return m_Metal->vertexShader;
+  if(stage == ShaderStage::Fragment)
+    return m_Metal->fragmentShader;
+  if(stage == ShaderStage::Compute)
+    return m_Metal->computeShader;
+
+  RENDERDOC_LogMessage(LogType::Error, "PIPE", __FILE__, __LINE__, "Error - invalid stage");
+  return m_Metal->computeShader;
+}
+
 Viewport PipeState::GetViewport(uint32_t index) const
 {
   Viewport ret = {};
@@ -261,6 +280,10 @@ Viewport PipeState::GetViewport(uint32_t index) const
     else if(IsCaptureVK() && index < m_Vulkan->viewportScissor.viewportScissors.size())
     {
       return m_Vulkan->viewportScissor.viewportScissors[index].vp;
+    }
+    else if(IsCaptureMetal() && index < m_Metal->rasterizer.viewports.size())
+    {
+      return m_Metal->rasterizer.viewports[index];
     }
   }
 
@@ -288,6 +311,10 @@ Scissor PipeState::GetScissor(uint32_t index) const
     else if(IsCaptureVK() && index < m_Vulkan->viewportScissor.viewportScissors.size())
     {
       return m_Vulkan->viewportScissor.viewportScissors[index].scissor;
+    }
+    else if(IsCaptureMetal() && index < m_Metal->rasterizer.scissors.size())
+    {
+      return m_Metal->rasterizer.scissors[index];
     }
   }
 
@@ -354,6 +381,10 @@ const ShaderReflection *PipeState::GetShaderReflection(ShaderStage stage) const
         default: break;
       }
     }
+    else if(IsCaptureMetal() && IsMetalStage(stage))
+    {
+      return GetMetalStage(stage).reflection;
+    }
   }
 
   return NULL;
@@ -369,6 +400,10 @@ ResourceId PipeState::GetComputePipelineObject() const
   {
     return m_D3D12->pipelineResourceId;
   }
+  else if(IsCaptureLoaded() && IsCaptureMetal())
+  {
+    return m_Metal->computePipeline;
+  }
 
   return ResourceId();
 }
@@ -383,6 +418,10 @@ ResourceId PipeState::GetGraphicsPipelineObject() const
   {
     return m_D3D12->pipelineResourceId;
   }
+  else if(IsCaptureLoaded() && IsCaptureMetal())
+  {
+    return m_Metal->renderPipeline;
+  }
 
   return ResourceId();
 }
@@ -393,7 +432,6 @@ uint32_t PipeState::MultiviewBroadcastCount() const
   {
     return std::max((uint32_t)m_Vulkan->currentPass.renderpass.multiviews.size(), 1U);
   }
-
   return 1;
 }
 
@@ -413,6 +451,10 @@ rdcstr PipeState::GetShaderEntryPoint(ShaderStage stage) const
       case ShaderStage::Mesh: return m_Vulkan->meshShader.entryPoint;
       default: break;
     }
+  }
+  else if(IsCaptureLoaded() && IsCaptureMetal() && IsMetalStage(stage))
+  {
+    return GetMetalStage(stage).entryPoint;
   }
 
   return "main";
@@ -478,6 +520,10 @@ ResourceId PipeState::GetShader(ShaderStage stage) const
         default: break;
       }
     }
+    else if(IsCaptureMetal() && IsMetalStage(stage))
+    {
+      return GetMetalStage(stage).resourceId;
+    }
   }
 
   return ResourceId();
@@ -517,6 +563,13 @@ BoundVBuffer PipeState::GetIBuffer() const
       ret.byteStride = m_Vulkan->inputAssembly.indexBuffer.byteStride;
       ret.byteSize = m_Vulkan->inputAssembly.indexBuffer.byteSize;
     }
+    else if(IsCaptureMetal())
+    {
+      ret.resourceId = m_Metal->vertexInput.indexBuffer.resourceId;
+      ret.byteOffset = m_Metal->vertexInput.indexBuffer.byteOffset;
+      ret.byteStride = m_Metal->vertexInput.indexBuffer.byteStride;
+      ret.byteSize = m_Metal->vertexInput.indexBuffer.byteSize;
+    }
   }
 
   return ret;
@@ -546,6 +599,10 @@ bool PipeState::IsRestartEnabled() const
     {
       return m_Vulkan->inputAssembly.primitiveRestartEnable;
     }
+    else if(IsCaptureMetal())
+    {
+      return m_Metal->vertexInput.primitiveRestartEnable;
+    }
   }
 
   return false;
@@ -567,6 +624,10 @@ uint32_t PipeState::GetRestartIndex() const
     else if(IsCaptureGL())
     {
       return std::min(UINT32_MAX, m_GL->vertexInput.restartIndex);
+    }
+    else if(IsCaptureMetal())
+    {
+      return m_Metal->vertexInput.restartIndex;
     }
   }
 
@@ -623,6 +684,17 @@ rdcarray<BoundVBuffer> PipeState::GetVBuffers() const
         ret[i].byteSize = m_Vulkan->vertexInput.vertexBuffers[i].byteSize;
       }
     }
+    else if(IsCaptureMetal())
+    {
+      ret.resize(m_Metal->vertexInput.vertexBuffers.count());
+      for(int i = 0; i < m_Metal->vertexInput.vertexBuffers.count(); i++)
+      {
+        ret[i].resourceId = m_Metal->vertexInput.vertexBuffers[i].resourceId;
+        ret[i].byteOffset = m_Metal->vertexInput.vertexBuffers[i].byteOffset;
+        ret[i].byteStride = m_Metal->vertexInput.vertexBuffers[i].byteStride;
+        ret[i].byteSize = m_Metal->vertexInput.vertexBuffers[i].byteSize;
+      }
+    }
   }
 
   return ret;
@@ -647,6 +719,10 @@ Topology PipeState::GetPrimitiveTopology() const
     else if(IsCaptureGL())
     {
       return m_GL->vertexInput.topology;
+    }
+    else if(IsCaptureMetal())
+    {
+      return m_Metal->vertexInput.topology;
     }
   }
 
@@ -898,6 +974,48 @@ rdcarray<VertexInputAttribute> PipeState::GetVertexInputs() const
 
       return ret;
     }
+    else if(IsCaptureMetal())
+    {
+      const rdcarray<MetalPipe::VertexAttribute> &attrs = m_Metal->vertexInput.attributes;
+      rdcarray<VertexInputAttribute> ret;
+      ret.resize(attrs.size());
+      for(size_t i = 0; i < attrs.size(); i++)
+      {
+        ret[i].name = "attr" + ToStr(attrs[i].attributeIndex);
+        memset(&ret[i].genericValue, 0, sizeof(PixelValue));
+        ret[i].vertexBuffer = (int)attrs[i].vertexBufferSlot;
+        ret[i].byteOffset = attrs[i].byteOffset;
+        ret[i].perInstance = false;
+        ret[i].instanceRate = 1;
+        for(const MetalPipe::VertexBufferLayout &layout : m_Metal->vertexInput.layouts)
+        {
+          if(layout.slot == attrs[i].vertexBufferSlot)
+          {
+            ret[i].perInstance = layout.stepFunction == MetalPipe::StepFunction::PerInstance;
+            ret[i].instanceRate = (int)layout.stepRate;
+            break;
+          }
+        }
+        ret[i].format = attrs[i].format;
+        ret[i].used = true;
+        ret[i].genericEnabled = false;
+
+        if(m_Metal->vertexShader.reflection != NULL)
+        {
+          for(const SigParameter &attr : m_Metal->vertexShader.reflection->inputSignature)
+          {
+            if(attr.regIndex == attrs[i].attributeIndex &&
+               attr.systemValue == ShaderBuiltin::Undefined)
+            {
+              ret[i].name = attr.varName;
+              break;
+            }
+          }
+        }
+      }
+
+      return ret;
+    }
   }
 
   return rdcarray<VertexInputAttribute>();
@@ -1106,6 +1224,13 @@ Descriptor PipeState::GetDepthTarget() const
         return fb.attachments[rp.depthstencilAttachment];
       }
     }
+    else if(IsCaptureMetal())
+    {
+      ret.resource = m_Metal->depthAttachment.resourceId;
+      ret.firstMip = m_Metal->depthAttachment.mipLevel;
+      ret.firstSlice = m_Metal->depthAttachment.slice;
+      return ret;
+    }
   }
 
   return ret;
@@ -1128,6 +1253,11 @@ Descriptor PipeState::GetDepthResolveTarget() const
       {
         return fb.attachments[rp.depthstencilResolveAttachment];
       }
+    }
+    else if(IsCaptureMetal())
+    {
+      ret.resource = m_Metal->depthAttachment.resolveResourceId;
+      return ret;
     }
   }
 
@@ -1189,6 +1319,16 @@ rdcarray<Descriptor> PipeState::GetOutputTargets() const
         idx++;
       }
     }
+    else if(IsCaptureMetal())
+    {
+      ret.resize(m_Metal->colorAttachments.size());
+      for(size_t i = 0; i < ret.size(); i++)
+      {
+        ret[i].resource = m_Metal->colorAttachments[i].resourceId;
+        ret[i].firstMip = m_Metal->colorAttachments[i].mipLevel;
+        ret[i].firstSlice = m_Metal->colorAttachments[i].slice;
+      }
+    }
   }
 
   return ret;
@@ -1213,6 +1353,10 @@ rdcfixedarray<float, 4> PipeState::GetBlendFactor() const
     else if(IsCaptureVK())
     {
       return m_Vulkan->colorBlend.blendFactor;
+    }
+    else if(IsCaptureMetal())
+    {
+      return m_Metal->colorBlend.blendFactor;
     }
   }
 
@@ -1258,6 +1402,12 @@ DepthTestState PipeState::GetDepthTestState() const
       ret.minDepthBounds = m_Vulkan->depthStencil.minDepthBounds;
       ret.maxDepthBounds = m_Vulkan->depthStencil.maxDepthBounds;
     }
+    else if(IsCaptureMetal())
+    {
+      ret.depthEnable = m_Metal->depthStencil.depthTestEnable;
+      ret.depthWrites = m_Metal->depthStencil.depthWriteEnable;
+      ret.depthFunction = m_Metal->depthStencil.depthFunction;
+    }
   }
 
   return ret;
@@ -1292,6 +1442,12 @@ RasterState PipeState::GetRasterState() const
       ret.cullMode = m_Vulkan->rasterizer.cullMode;
       ret.fillMode = m_Vulkan->rasterizer.fillMode;
       ret.frontCCW = m_Vulkan->rasterizer.frontCCW;
+    }
+    else if(IsCaptureMetal())
+    {
+      ret.cullMode = m_Metal->rasterizer.cullMode;
+      ret.fillMode = m_Metal->rasterizer.fillMode;
+      ret.frontCCW = m_Metal->rasterizer.frontCCW;
     }
   }
 
@@ -1330,6 +1486,10 @@ rdcarray<ColorBlend> PipeState::GetColorBlends() const
     {
       return m_Vulkan->colorBlend.blends;
     }
+    else if(IsCaptureMetal())
+    {
+      return m_Metal->colorBlend.blends;
+    }
   }
 
   return {};
@@ -1354,6 +1514,10 @@ bool PipeState::IsStencilTestEnabled() const
     else if(IsCaptureVK())
     {
       return m_Vulkan->depthStencil.stencilTestEnable;
+    }
+    else if(IsCaptureMetal())
+    {
+      return m_Metal->depthStencil.stencilTestEnable;
     }
   }
 
@@ -1382,6 +1546,10 @@ rdcpair<StencilFace, StencilFace> PipeState::GetStencilFaces() const
     {
       return {m_Vulkan->depthStencil.frontFace, m_Vulkan->depthStencil.backFace};
     }
+    else if(IsCaptureMetal())
+    {
+      return {m_Metal->depthStencil.frontFace, m_Metal->depthStencil.backFace};
+    }
   }
 
   return {StencilFace(), StencilFace()};
@@ -1394,6 +1562,10 @@ const rdcarray<ShaderMessage> &PipeState::GetShaderMessages() const
     if(IsCaptureVK())
     {
       return m_Vulkan->shaderMessages;
+    }
+    else if(IsCaptureMetal())
+    {
+      return m_Metal->shaderMessages;
     }
   }
 
@@ -1424,6 +1596,10 @@ bool PipeState::IsIndependentBlendingEnabled() const
     {
       // similarly for vulkan, there's a physical device feature but it just requires that all
       // states must be identical
+      return true;
+    }
+    else if(IsCaptureMetal())
+    {
       return true;
     }
   }

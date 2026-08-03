@@ -1981,6 +1981,10 @@ DOCUMENT(R"(Identifies a Graphics API.
 
   Vulkan.
 
+.. data:: Metal
+
+  Metal.
+
 )");
 enum class GraphicsAPI : uint32_t
 {
@@ -1988,6 +1992,7 @@ enum class GraphicsAPI : uint32_t
   D3D12,
   OpenGL,
   Vulkan,
+  Metal,
 };
 
 DECLARE_REFLECTION_ENUM(GraphicsAPI);
@@ -4090,6 +4095,75 @@ enum class ReplaySupport : uint32_t
 };
 
 DECLARE_REFLECTION_ENUM(ReplaySupport);
+
+DOCUMENT(R"(A replay or inspection feature whose availability may vary between drivers and capture
+sources.
+
+.. data:: ExecutableReplay
+
+  Re-execute captured GPU commands.
+
+.. data:: PipelineState
+
+  Inspect API-specific pipeline state.
+
+.. data:: TextureFetch
+
+  Fetch captured texture contents.
+
+.. data:: BufferFetch
+
+  Fetch captured buffer contents.
+
+.. data:: ShaderSource
+
+  Inspect shader source or disassembly.
+
+.. data:: Profiling
+
+  Collect GPU counters or timing information.
+
+.. data:: PixelHistory
+
+  Inspect the events which modified a pixel.
+
+.. data:: OverlayRendering
+
+  Render diagnostic overlays.
+
+.. data:: PostVS
+
+  Capture post-transform vertex data.
+
+.. data:: ShaderDebugging
+
+  Debug shader invocations.
+
+.. data:: ShaderReplacement
+
+  Replace a captured shader.
+
+.. data:: CustomShaders
+
+  Compile and run custom display shaders.
+)");
+enum class ReplayFeature : uint32_t
+{
+  ExecutableReplay = 0,
+  PipelineState,
+  TextureFetch,
+  BufferFetch,
+  ShaderSource,
+  Profiling,
+  PixelHistory,
+  OverlayRendering,
+  PostVS,
+  ShaderDebugging,
+  ShaderReplacement,
+  CustomShaders,
+};
+
+DECLARE_REFLECTION_ENUM(ReplayFeature);
 
 DOCUMENT(R"(The result from a replay operation such as opening a capture or connecting to
 a remote server.

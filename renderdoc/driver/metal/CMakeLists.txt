@@ -51,6 +51,17 @@ set(sources
     metal_stringise.cpp
     metal_replay.h
     metal_replay.cpp
+    metal_trace_model.h
+    metal_trace_model.cpp
+    apple_trace_import.h
+    apple_trace_import.cpp
+    apple_trace_session.h
+    apple_trace_session.mm
+    apple_trace_replay.h
+    apple_trace_replay.cpp
+    metal_native_replay.h
+    metal_native_replay.cpp
+    metal_replay_provider.cpp
     official/metal-cpp.h
     official/metal-cpp.cpp)
 

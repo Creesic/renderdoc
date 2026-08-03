@@ -224,6 +224,7 @@ SOURCES += Code/qrenderdoc.cpp \
     Widgets/Extended/RDListWidget.cpp \
     Windows/APIInspector.cpp \
     Windows/PipelineState/PipelineStateViewer.cpp \
+    Windows/PipelineState/MetalPipelineStateViewer.cpp \
     Windows/PipelineState/VulkanPipelineStateViewer.cpp \
     Windows/PipelineState/D3D11PipelineStateViewer.cpp \
     Windows/PipelineState/D3D12PipelineStateViewer.cpp \
@@ -314,6 +315,7 @@ HEADERS += Code/CaptureContext.h \
     Widgets/Extended/RDListWidget.h \
     Windows/APIInspector.h \
     Windows/PipelineState/PipelineStateViewer.h \
+    Windows/PipelineState/MetalPipelineStateViewer.h \
     Windows/PipelineState/VulkanPipelineStateViewer.h \
     Windows/PipelineState/D3D11PipelineStateViewer.h \
     Windows/PipelineState/D3D12PipelineStateViewer.h \
@@ -442,4 +444,3 @@ HEADERS += $$_PRO_FILE_PWD_/3rdparty/scintilla/lexlib/*.h \
     $$_PRO_FILE_PWD_/3rdparty/scintilla/src/*.h \
     $$_PRO_FILE_PWD_/3rdparty/scintilla/qt/ScintillaEdit/*.h \
     $$_PRO_FILE_PWD_/3rdparty/scintilla/qt/ScintillaEditBase/*.h
-

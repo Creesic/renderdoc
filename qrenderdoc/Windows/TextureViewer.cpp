@@ -2924,6 +2924,17 @@ void TextureViewer::OnCaptureLoaded()
 {
   Reset();
 
+  // Apple GPU Trace previews are rendered by a local OpenGL proxy. On x86_64 QRenderDoc under
+  // Rosetta the proxy's headless framebuffer is correct, but presenting its NSOpenGL surface in
+  // the Qt widget can remain black. Read back that proven framebuffer and let Qt paint the main
+  // Texture Viewer instead. This is intentionally limited to read-only Metal inspection.
+  const APIProperties &props = m_Ctx.APIProps();
+  const bool readbackPresentation =
+      props.pipelineType == GraphicsAPI::Metal && props.localRenderer == GraphicsAPI::OpenGL &&
+      props.HasFeature(ReplayFeature::TextureFetch) &&
+      !props.HasFeature(ReplayFeature::ExecutableReplay);
+  ui->render->SetReadbackPresentation(readbackPresentation);
+
   WindowingData renderData = ui->render->GetWidgetWindowingData();
   WindowingData contextData = ui->pixelContext->GetWidgetWindowingData();
 
