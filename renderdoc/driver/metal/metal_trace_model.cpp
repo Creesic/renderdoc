@@ -177,6 +177,18 @@ static bool ReadIndexV3(StreamReader &reader, Index &index)
   return ReadIndexV2(reader, index) && ReadString(reader, index.bufferFetchUnavailableReason);
 }
 
+static bool WriteIndexV4(StreamWriter &writer, const Index &index)
+{
+  return WriteIndexV3(writer, index) && WriteString(writer, index.argumentBufferResolution) &&
+         WriteString(writer, index.argumentBufferUnavailableReason);
+}
+
+static bool ReadIndexV4(StreamReader &reader, Index &index)
+{
+  return ReadIndexV3(reader, index) && ReadString(reader, index.argumentBufferResolution) &&
+         ReadString(reader, index.argumentBufferUnavailableReason);
+}
+
 static RDResult FinishSection(StreamWriter *writer)
 {
   writer->Finish();
@@ -232,7 +244,9 @@ RDResult WriteThinRDC(RDCFile *rdc, const Manifest &manifest, const Index &index
   WriteString(*writer, index.actionName);
   WriteString(*writer, index.resourceName);
   WriteBytes(*writer, index.resourceData.data(), index.resourceData.size());
-  if(manifest.header.indexVersion >= 3)
+  if(manifest.header.indexVersion >= 4)
+    WriteIndexV4(*writer, index);
+  else if(manifest.header.indexVersion >= 3)
     WriteIndexV3(*writer, index);
   else if(manifest.header.indexVersion >= 2)
     WriteIndexV2(*writer, index);
@@ -298,7 +312,9 @@ RDResult ReadIndex(RDCFile *rdc, Index &index)
   bool success = reader->Read(magic) && reader->Read(version) &&
                  ReadString(*reader, index.actionName) && ReadString(*reader, index.resourceName) &&
                  ReadBytes(*reader, index.resourceData);
-  if(success && version >= 3)
+  if(success && version >= 4)
+    success = ReadIndexV4(*reader, index);
+  else if(success && version >= 3)
     success = ReadIndexV3(*reader, index);
   else if(success && version >= 2)
     success = ReadIndexV2(*reader, index);

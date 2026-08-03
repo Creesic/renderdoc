@@ -42,7 +42,7 @@ static constexpr uint32_t IndexMagic = FourCC('M', 'T', 'I', 'X');
 static constexpr uint32_t ContainerVersion = 1;
 static constexpr uint32_t ManifestVersion = 1;
 static constexpr uint32_t MinimumIndexVersion = 1;
-static constexpr uint32_t IndexVersion = 3;
+static constexpr uint32_t IndexVersion = 4;
 
 static constexpr const char *ManifestSectionName = "AppleGPUTrace.Manifest";
 static constexpr const char *IndexSectionName = "AppleGPUTrace.Index";
@@ -154,6 +154,8 @@ struct Index
   bytebuf resourceData;
   rdcstr toolVersion;
   rdcstr bufferFetchUnavailableReason;
+  rdcstr argumentBufferResolution;
+  rdcstr argumentBufferUnavailableReason;
   rdcarray<Node> nodes;
   rdcarray<RawListing> rawListings;
 };

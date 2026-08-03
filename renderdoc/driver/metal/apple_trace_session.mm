@@ -36,6 +36,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <chrono>
+#include <climits>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -524,6 +525,14 @@ static bool ShouldWalkChildren(const MetalTrace::Node &node)
      (node.name == "vertex" || node.name == "fragment" || node.name == "compute"))
     return true;
 
+  // Shader source is the only public description of a Metal argument buffer's members. Keep the
+  // source leaf in the thin index so the normalizer can correlate [[id(n)]] texture members with
+  // the bytes fetched from the stage's bound buffer.
+  if(node.kind == MetalTrace::NodeKind::Binding && node.name == "sources" &&
+     (node.path.contains("/vertex/sources") || node.path.contains("/fragment/sources") ||
+      node.path.contains("/compute/sources")))
+    return true;
+
   return false;
 }
 
@@ -537,6 +546,311 @@ static bool IsTransientReplayerFailure(const rdcstr &message)
 {
   return message.contains("XPC error") &&
          (message.contains("Connection invalid") || message.contains("Connection interrupted"));
+}
+
+enum class ArgumentTextureKind
+{
+  Unknown,
+  Texture1D,
+  Texture1DArray,
+  Texture2D,
+  Texture2DArray,
+  Texture2DMS,
+  TextureCube,
+  TextureCubeArray,
+  Texture3D,
+};
+
+struct ArgumentTextureMember
+{
+  uint32_t argumentBuffer = 0;
+  uint32_t member = 0;
+  ArgumentTextureKind kind = ArgumentTextureKind::Unknown;
+};
+
+struct ArgumentTextureReference
+{
+  rdcstr stagePath;
+  uint32_t member = 0;
+  uint64_t resourceID = 0;
+  ArgumentTextureKind kind = ArgumentTextureKind::Unknown;
+};
+
+struct TraceTextureInfo
+{
+  size_t nodeIndex = 0;
+  uint64_t resourceIndex = 0;
+  rdcstr textureType;
+  uint32_t arrayLength = 1;
+  bool hasParent = false;
+  bool hasLabel = false;
+  bool shaderRead = false;
+};
+
+static bool IsIdentifierCharacter(char c)
+{
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9') || c == '_';
+}
+
+static bool ParseDecimalAt(const rdcstr &text, int32_t begin, uint32_t &value)
+{
+  if(begin < 0 || (size_t)begin >= text.size() || text[begin] < '0' || text[begin] > '9')
+    return false;
+  uint64_t parsed = 0;
+  int32_t pos = begin;
+  while((size_t)pos < text.size() && text[pos] >= '0' && text[pos] <= '9')
+  {
+    parsed = parsed * 10 + uint64_t(text[pos] - '0');
+    if(parsed > UINT32_MAX)
+      return false;
+    pos++;
+  }
+  value = (uint32_t)parsed;
+  return true;
+}
+
+static ArgumentTextureKind TextureKindFromDeclaration(const rdcstr &declaration)
+{
+  if(declaration.contains("texturecube_array") || declaration.contains("depthcube_array"))
+    return ArgumentTextureKind::TextureCubeArray;
+  if(declaration.contains("texturecube") || declaration.contains("depthcube"))
+    return ArgumentTextureKind::TextureCube;
+  if(declaration.contains("texture2d_ms_array") || declaration.contains("depth2d_ms_array"))
+    return ArgumentTextureKind::Texture2DArray;
+  if(declaration.contains("texture2d_ms") || declaration.contains("depth2d_ms"))
+    return ArgumentTextureKind::Texture2DMS;
+  if(declaration.contains("texture2d_array") || declaration.contains("depth2d_array"))
+    return ArgumentTextureKind::Texture2DArray;
+  if(declaration.contains("texture2d") || declaration.contains("depth2d"))
+    return ArgumentTextureKind::Texture2D;
+  if(declaration.contains("texture1d_array"))
+    return ArgumentTextureKind::Texture1DArray;
+  if(declaration.contains("texture1d"))
+    return ArgumentTextureKind::Texture1D;
+  if(declaration.contains("texture3d"))
+    return ArgumentTextureKind::Texture3D;
+  return ArgumentTextureKind::Unknown;
+}
+
+static rdcarray<ArgumentTextureMember> ParseArgumentTextureMembers(const rdcstr &source)
+{
+  std::map<rdcstr, rdcarray<ArgumentTextureMember>> structures;
+  int32_t structPos = 0;
+  while((structPos = source.find("struct ", structPos)) >= 0)
+  {
+    int32_t nameBegin = structPos + 7;
+    while((size_t)nameBegin < source.size() &&
+          (source[nameBegin] == ' ' || source[nameBegin] == '\t'))
+      nameBegin++;
+    int32_t nameEnd = nameBegin;
+    while((size_t)nameEnd < source.size() && IsIdentifierCharacter(source[nameEnd]))
+      nameEnd++;
+    int32_t bodyBegin = source.find('{', nameEnd);
+    if(nameEnd == nameBegin || bodyBegin < 0)
+      break;
+
+    uint32_t braceDepth = 1;
+    int32_t bodyEnd = bodyBegin + 1;
+    while((size_t)bodyEnd < source.size() && braceDepth > 0)
+    {
+      if(source[bodyEnd] == '{')
+        braceDepth++;
+      else if(source[bodyEnd] == '}')
+        braceDepth--;
+      bodyEnd++;
+    }
+    if(braceDepth != 0)
+      break;
+
+    rdcstr name = source.substr(nameBegin, nameEnd - nameBegin);
+    rdcarray<ArgumentTextureMember> members;
+    std::map<uint32_t, bool> declaredIDs;
+    bool linearResourceTable = true;
+    uint32_t maximumID = 0;
+    int32_t memberPos = bodyBegin + 1;
+    while((memberPos = source.find("[[id(", memberPos)) >= 0 && memberPos < bodyEnd)
+    {
+      int32_t declarationBegin = memberPos;
+      while(declarationBegin > bodyBegin && source[declarationBegin - 1] != ';' &&
+            source[declarationBegin - 1] != '{')
+        declarationBegin--;
+      rdcstr declaration = source.substr(declarationBegin, memberPos - declarationBegin);
+      ArgumentTextureKind kind = TextureKindFromDeclaration(declaration);
+      uint32_t member = 0;
+      if(!ParseDecimalAt(source, memberPos + 5, member) || member > 4096 ||
+         declaredIDs.find(member) != declaredIDs.end() || declaration.contains("array<") ||
+         (kind == ArgumentTextureKind::Unknown && !declaration.contains("sampler") &&
+          !declaration.contains("*")))
+      {
+        linearResourceTable = false;
+      }
+      else
+      {
+        declaredIDs[member] = true;
+        if(member > maximumID)
+          maximumID = member;
+      }
+      if(linearResourceTable && kind != ArgumentTextureKind::Unknown)
+        members.push_back({0, member, kind});
+      memberPos += 5;
+    }
+    for(uint32_t id = 0; linearResourceTable && id <= maximumID; id++)
+      linearResourceTable &= declaredIDs.find(id) != declaredIDs.end();
+    if(linearResourceTable && !members.empty())
+      structures[name] = members;
+    structPos = bodyEnd;
+  }
+
+  rdcarray<ArgumentTextureMember> ret;
+  int32_t bufferPos = 0;
+  while((bufferPos = source.find("[[buffer(", bufferPos)) >= 0)
+  {
+    uint32_t argumentBuffer = 0;
+    if(!ParseDecimalAt(source, bufferPos + 9, argumentBuffer))
+    {
+      bufferPos += 9;
+      continue;
+    }
+
+    int32_t parameterBegin = bufferPos;
+    while(parameterBegin > 0 && source[parameterBegin - 1] != ',' &&
+          source[parameterBegin - 1] != '(')
+      parameterBegin--;
+    int32_t ampersand = bufferPos;
+    while(ampersand > parameterBegin && source[ampersand] != '&')
+      ampersand--;
+    if(ampersand <= parameterBegin)
+    {
+      bufferPos += 9;
+      continue;
+    }
+
+    int32_t nameEnd = ampersand;
+    while(nameEnd > parameterBegin &&
+          (source[nameEnd - 1] == ' ' || source[nameEnd - 1] == '\t'))
+      nameEnd--;
+    int32_t nameBegin = nameEnd;
+    while(nameBegin > parameterBegin && IsIdentifierCharacter(source[nameBegin - 1]))
+      nameBegin--;
+    rdcstr structureName = source.substr(nameBegin, nameEnd - nameBegin);
+    auto structure = structures.find(structureName);
+    if(structure != structures.end())
+    {
+      for(ArgumentTextureMember member : structure->second)
+      {
+        member.argumentBuffer = argumentBuffer;
+        ret.push_back(member);
+      }
+    }
+    bufferPos += 9;
+  }
+  return ret;
+}
+
+static bool TextureKindMatches(const ArgumentTextureReference &reference,
+                               const TraceTextureInfo &texture)
+{
+  if(reference.kind == ArgumentTextureKind::Texture1D)
+    return texture.textureType == "1D";
+  if(reference.kind == ArgumentTextureKind::Texture1DArray)
+    return texture.textureType == "1DArray";
+  if(reference.kind == ArgumentTextureKind::Texture2D)
+    return texture.textureType == "2D";
+  if(reference.kind == ArgumentTextureKind::Texture2DArray)
+    return texture.textureType == "2DArray";
+  if(reference.kind == ArgumentTextureKind::Texture2DMS)
+    return texture.textureType.contains("Multisample");
+  if(reference.kind == ArgumentTextureKind::TextureCube)
+    return texture.textureType == "Cube" ||
+           (texture.textureType == "2DArray" && texture.arrayLength >= 6 &&
+            texture.arrayLength % 6 == 0);
+  if(reference.kind == ArgumentTextureKind::TextureCubeArray)
+    return texture.textureType == "CubeArray" ||
+           (texture.textureType == "2DArray" && texture.arrayLength >= 6 &&
+            texture.arrayLength % 6 == 0);
+  if(reference.kind == ArgumentTextureKind::Texture3D)
+    return texture.textureType == "3D";
+  return false;
+}
+
+static bool InferTextureResourceIndexDelta(const rdcarray<ArgumentTextureReference> &references,
+                                           const rdcarray<TraceTextureInfo> &textures,
+                                           int64_t &resolvedDelta, rdcstr &reason)
+{
+  resolvedDelta = 0;
+  reason.clear();
+  if(references.empty() || textures.empty())
+  {
+    reason = "No argument-buffer texture references or texture metadata were available";
+    return false;
+  }
+
+  std::map<uint64_t, const TraceTextureInfo *> byResourceIndex;
+  for(const TraceTextureInfo &texture : textures)
+    byResourceIndex[texture.resourceIndex] = &texture;
+
+  bool found = false;
+  int bestScore = INT_MIN;
+  bool tied = false;
+  const uint64_t firstID = references[0].resourceID;
+  for(const TraceTextureInfo &anchor : textures)
+  {
+    if(anchor.resourceIndex > uint64_t(INT64_MAX) || firstID > uint64_t(INT64_MAX))
+      continue;
+    int64_t delta = int64_t(anchor.resourceIndex) - int64_t(firstID);
+    int score = 0;
+    bool compatible = true;
+    for(const ArgumentTextureReference &reference : references)
+    {
+      if(reference.resourceID > uint64_t(INT64_MAX) ||
+         (delta < 0 && reference.resourceID < uint64_t(-delta)))
+      {
+        compatible = false;
+        break;
+      }
+      int64_t mapped = int64_t(reference.resourceID) + delta;
+      if(mapped < 0)
+      {
+        compatible = false;
+        break;
+      }
+      auto texture = byResourceIndex.find((uint64_t)mapped);
+      if(texture == byResourceIndex.end() || !TextureKindMatches(reference, *texture->second))
+      {
+        compatible = false;
+        break;
+      }
+      score += texture->second->shaderRead ? 1 : 0;
+      score += texture->second->hasParent ? 0 : 2;
+      score += texture->second->hasLabel ? 2 : 0;
+    }
+    if(!compatible)
+      continue;
+    if(!found || score > bestScore)
+    {
+      found = true;
+      bestScore = score;
+      resolvedDelta = delta;
+      tied = false;
+    }
+    else if(score == bestScore && delta != resolvedDelta)
+    {
+      tied = true;
+    }
+  }
+
+  if(!found)
+  {
+    reason = "No texture resource-index mapping matched every shader-declared argument member";
+    return false;
+  }
+  if(tied)
+  {
+    reason = "Multiple texture resource-index mappings matched the argument-buffer metadata";
+    return false;
+  }
+  return true;
 }
 
 class GPUDebugAppleTraceSession final : public AppleTraceSession
@@ -584,8 +898,13 @@ public:
     if(!m_ReplayerReady)
     {
       index.bufferFetchUnavailableReason = m_ReplayerUnavailableReason;
+      index.argumentBufferUnavailableReason = m_ReplayerUnavailableReason;
       for(MetalTrace::Node &node : index.nodes)
         node.canFetch = false;
+    }
+    else
+    {
+      NormaliseArgumentBufferBindings(index);
     }
 
     for(const MetalTrace::Node &node : index.nodes)
@@ -607,6 +926,31 @@ public:
   RDResult Fetch(uint64_t stableId, const rdcstr &path, bytebuf &data) override
   {
     std::lock_guard<std::mutex> lock(m_Lock);
+    return FetchLocked(stableId, path, data);
+  }
+
+  void Cancel() override { m_Cancelled.store(true); }
+
+  void Shutdown() override
+  {
+    m_Cancelled.store(true);
+    std::lock_guard<std::mutex> lock(m_Lock);
+    if(m_Shutdown)
+      return;
+
+    if(m_SessionID != 0)
+    {
+      std::atomic<bool> notCancelled(false);
+      m_Runner->Run({"--json", "-q", "--terminate", ToStr(m_SessionID)}, 5000, notCancelled);
+      m_SessionID = 0;
+    }
+    m_Cache.clear();
+    m_Shutdown = true;
+  }
+
+private:
+  RDResult FetchLocked(uint64_t stableId, const rdcstr &path, bytebuf &data)
+  {
     data.clear();
     if(m_Shutdown)
       return RDResult(ResultCode::APIReplayFailed, "gpudebug session is shut down");
@@ -670,26 +1014,207 @@ public:
     return ResultCode::Succeeded;
   }
 
-  void Cancel() override { m_Cancelled.store(true); }
-
-  void Shutdown() override
+  void NormaliseArgumentBufferBindings(MetalTrace::Index &index)
   {
-    m_Cancelled.store(true);
-    std::lock_guard<std::mutex> lock(m_Lock);
-    if(m_Shutdown)
-      return;
+    const size_t originalNodeCount = index.nodes.size();
+    rdcarray<ArgumentTextureReference> references;
+    std::map<rdcstr, bytebuf> sourceCache;
+    bool sawArgumentBufferCandidate = false;
 
-    if(m_SessionID != 0)
+    for(size_t stageIndex = 0; stageIndex < originalNodeCount; stageIndex++)
     {
-      std::atomic<bool> notCancelled(false);
-      m_Runner->Run({"--json", "-q", "--terminate", ToStr(m_SessionID)}, 5000, notCancelled);
-      m_SessionID = 0;
+      const MetalTrace::Node &stage = index.nodes[stageIndex];
+      if(stage.kind != MetalTrace::NodeKind::Binding ||
+         (stage.name != "vertex" && stage.name != "fragment" && stage.name != "compute"))
+        continue;
+
+      const rdcstr prefix = stage.path + "/";
+      const rdcstr sourcePrefix = stage.path + "/sources/";
+      std::map<uint32_t, const MetalTrace::Node *> buffers;
+      const MetalTrace::Node *sourceNode = NULL;
+      for(size_t childIndex = 0; childIndex < originalNodeCount; childIndex++)
+      {
+        const MetalTrace::Node &child = index.nodes[childIndex];
+        if(child.path.beginsWith(sourcePrefix) && child.canFetch)
+        {
+          if(sourceNode == NULL)
+            sourceNode = &child;
+          continue;
+        }
+        if(!child.path.beginsWith(prefix))
+          continue;
+        rdcstr relative = child.path.substr(prefix.size());
+        if(relative.contains("/"))
+          continue;
+        unsigned int slot = 0;
+        if(sscanf(child.name.c_str(), "buf[%u]", &slot) == 1)
+          buffers[slot] = &child;
+      }
+      if(sourceNode == NULL || buffers.empty())
+        continue;
+
+      sawArgumentBufferCandidate = true;
+      bytebuf sourceBytes;
+      auto cachedSource = sourceCache.find(sourceNode->name);
+      if(cachedSource != sourceCache.end())
+      {
+        sourceBytes = cachedSource->second;
+      }
+      else
+      {
+        RDResult fetched = FetchLocked(sourceNode->stableId, sourceNode->path, sourceBytes);
+        if(fetched != ResultCode::Succeeded)
+          continue;
+        sourceCache[sourceNode->name] = sourceBytes;
+      }
+
+      rdcstr source((const char *)sourceBytes.data(), sourceBytes.size());
+      rdcarray<ArgumentTextureMember> members = ParseArgumentTextureMembers(source);
+      if(members.empty())
+        continue;
+
+      std::map<uint32_t, bytebuf> argumentData;
+      for(const ArgumentTextureMember &member : members)
+      {
+        auto buffer = buffers.find(member.argumentBuffer);
+        if(buffer == buffers.end())
+          continue;
+        auto data = argumentData.find(member.argumentBuffer);
+        if(data == argumentData.end())
+        {
+          bytebuf fetchedData;
+          // A resource can be overwritten between draws. Cache this stage snapshot by its path,
+          // not by the underlying @buf object identifier.
+          RDResult fetched = FetchLocked(StableHash("argument:" + buffer->second->path),
+                                         buffer->second->path, fetchedData);
+          if(fetched != ResultCode::Succeeded)
+            continue;
+          data = argumentData.insert({member.argumentBuffer, fetchedData}).first;
+        }
+
+        const uint64_t byteOffset = uint64_t(member.member) * sizeof(uint64_t);
+        if(byteOffset + sizeof(uint64_t) > data->second.size())
+          continue;
+        uint64_t resourceID = 0;
+        for(uint32_t byteIndex = 0; byteIndex < sizeof(uint64_t); byteIndex++)
+          resourceID |= uint64_t(data->second[(size_t)byteOffset + byteIndex]) << (byteIndex * 8);
+        if(resourceID != 0)
+          references.push_back({stage.path, member.member, resourceID, member.kind});
+      }
     }
-    m_Cache.clear();
-    m_Shutdown = true;
+
+    if(references.empty())
+    {
+      if(sawArgumentBufferCandidate)
+        index.argumentBufferUnavailableReason =
+            "Shader sources and stage buffers exposed no decodable texture argument members";
+      return;
+    }
+
+    rdcarray<TraceTextureInfo> textures;
+    for(size_t nodeIndex = 0; nodeIndex < originalNodeCount; nodeIndex++)
+    {
+      const MetalTrace::Node &node = index.nodes[nodeIndex];
+      if(node.kind != MetalTrace::NodeKind::Texture || node.objectName.empty() || !node.canInfo)
+        continue;
+
+      rdcstr json;
+      RDResult inspected = RunCommand("info @" + node.objectName + " --all", 5000, json);
+      if(inspected != ResultCode::Succeeded)
+        continue;
+
+      @autoreleasepool
+      {
+        rdcstr parseError;
+        NSDictionary *info = ParseJSONObject(json, parseError);
+        rdcstr resourceIndex = StringFromObject([info objectForKey:@"resourceIndex"]);
+        if(info == nil || resourceIndex.empty())
+          continue;
+        char *end = NULL;
+        errno = 0;
+        uint64_t parsedIndex = strtoull(resourceIndex.c_str(), &end, 0);
+        if(errno != 0 || end == resourceIndex.c_str() || *end != 0)
+          continue;
+
+        TraceTextureInfo texture;
+        texture.nodeIndex = nodeIndex;
+        texture.resourceIndex = parsedIndex;
+        texture.textureType = StringFromObject([info objectForKey:@"textureType"]);
+        rdcstr arrayLength = StringFromObject([info objectForKey:@"arrayLength"]);
+        if(!arrayLength.empty())
+        {
+          uint32_t parsedLength = 0;
+          if(ParseDecimalAt(arrayLength, 0, parsedLength) && parsedLength > 0)
+            texture.arrayLength = parsedLength;
+        }
+        texture.hasParent = [info objectForKey:@"parentTexture"] != nil;
+        rdcstr label = StringFromObject([info objectForKey:@"label"]);
+        texture.hasLabel = !label.empty() && label != "(none)";
+        texture.shaderRead = StringFromObject([info objectForKey:@"usage"]).contains("ShaderRead");
+        textures.push_back(texture);
+      }
+    }
+
+    int64_t delta = 0;
+    rdcstr inferenceFailure;
+    if(!InferTextureResourceIndexDelta(references, textures, delta, inferenceFailure))
+    {
+      index.argumentBufferUnavailableReason = inferenceFailure;
+      return;
+    }
+
+    std::map<uint64_t, const TraceTextureInfo *> byResourceIndex;
+    for(const TraceTextureInfo &texture : textures)
+      byResourceIndex[texture.resourceIndex] = &texture;
+    std::map<rdcstr, bool> existingPaths;
+    for(const MetalTrace::Node &node : index.nodes)
+      existingPaths[node.path] = true;
+
+    uint32_t resolved = 0;
+    for(const ArgumentTextureReference &reference : references)
+    {
+      if(reference.resourceID > uint64_t(INT64_MAX))
+        continue;
+      int64_t mappedIndex = int64_t(reference.resourceID) + delta;
+      if(mappedIndex < 0)
+        continue;
+      auto mapped = byResourceIndex.find((uint64_t)mappedIndex);
+      if(mapped == byResourceIndex.end())
+        continue;
+      const MetalTrace::Node &resource = index.nodes[mapped->second->nodeIndex];
+
+      rdcstr name = StringFormat::Fmt("tex[%u]", reference.member);
+      rdcstr path = reference.stagePath + "/" + name;
+      if(existingPaths.find(path) != existingPaths.end())
+        continue;
+
+      MetalTrace::Node binding;
+      binding.stableId = resource.stableId;
+      binding.kind = MetalTrace::NodeKind::Binding;
+      binding.path = path;
+      binding.name = name;
+      binding.label = resource.label;
+      binding.objectName = resource.objectName;
+      binding.values = {StringFormat::Fmt("@%s via argument-buffer MTLResourceID %llu",
+                                          resource.objectName.c_str(),
+                                          (unsigned long long)reference.resourceID)};
+      index.nodes.push_back(binding);
+      existingPaths[path] = true;
+      resolved++;
+    }
+
+    if(resolved == 0)
+    {
+      index.argumentBufferUnavailableReason =
+          "The resolved argument-buffer mapping produced no new texture bindings";
+      return;
+    }
+    index.argumentBufferResolution = StringFormat::Fmt(
+        "Resolved %u texture inputs by correlating shader-declared argument-buffer members with "
+        "gpudebug texture resource indices (index offset %lld)",
+        resolved, (long long)delta);
   }
 
-private:
   RDResult EnsureSession()
   {
     if(m_Cancelled.load())
@@ -1211,6 +1736,80 @@ private:
   FakeRunnerState &m_State;
 };
 };    // namespace
+
+TEST_CASE("Apple GPU Trace parses texture members from Metal argument-buffer source",
+          "[metal][apple-trace]")
+{
+  const rdcstr source = R"(
+struct DescriptorSet
+{
+  texture2d<float> albedo [[id(0)]];
+  constant float* padding1 [[id(1)]];
+  texturecube<float> environment [[id(2)]];
+  constant float* padding3 [[id(3)]];
+  sampler linearSampler [[id(4)]];
+  constant float* padding5 [[id(5)]];
+  constant float* padding6 [[id(6)]];
+  constant float* padding7 [[id(7)]];
+  constant float4* constants [[id(8)]];
+};
+fragment float4 main0(constant DescriptorSet& set [[buffer(3)]]) { return {}; }
+)";
+
+  rdcarray<ArgumentTextureMember> members = ParseArgumentTextureMembers(source);
+  REQUIRE(members.size() == 2);
+  CHECK(members[0].argumentBuffer == 3);
+  CHECK(members[0].member == 0);
+  CHECK((uint32_t)members[0].kind == (uint32_t)ArgumentTextureKind::Texture2D);
+  CHECK(members[1].argumentBuffer == 3);
+  CHECK(members[1].member == 2);
+  CHECK((uint32_t)members[1].kind == (uint32_t)ArgumentTextureKind::TextureCube);
+
+  const rdcstr nonLinear = R"(
+struct EncodedLayout
+{
+  texture2d<float> albedo [[id(0)]];
+  float inlineValue [[id(2)]];
+};
+fragment float4 main1(constant EncodedLayout& set [[buffer(0)]]) { return {}; }
+)";
+  CHECK(ParseArgumentTextureMembers(nonLinear).empty());
+}
+
+TEST_CASE("Apple GPU Trace resolves opaque argument-buffer texture IDs without choosing views",
+          "[metal][apple-trace]")
+{
+  rdcarray<ArgumentTextureReference> references = {
+      {"/commands/cb0/re0/draw0/fragment", 0, 14, ArgumentTextureKind::Texture2D},
+      {"/commands/cb0/re0/draw0/fragment", 1, 34, ArgumentTextureKind::Texture2D},
+      {"/commands/cb0/re1/draw0/fragment", 0, 282, ArgumentTextureKind::Texture2D},
+      {"/commands/cb0/re1/draw0/fragment", 1, 286, ArgumentTextureKind::TextureCube},
+  };
+  rdcarray<TraceTextureInfo> textures = {
+      {0, 31, "2D", 1, false, true, true},
+      {1, 32, "2D", 1, true, false, true},
+      {2, 51, "2D", 1, false, true, true},
+      {3, 52, "2D", 1, true, false, true},
+      {4, 299, "2D", 1, false, true, true},
+      {5, 300, "2D", 1, true, false, true},
+      {6, 303, "2DArray", 6, false, true, true},
+      {7, 304, "2DArray", 6, true, false, true},
+  };
+
+  int64_t delta = 0;
+  rdcstr reason;
+  REQUIRE(InferTextureResourceIndexDelta(references, textures, delta, reason));
+  CHECK(delta == 17);
+  CHECK(reason.empty());
+
+  for(TraceTextureInfo &texture : textures)
+  {
+    texture.hasParent = false;
+    texture.hasLabel = true;
+  }
+  CHECK_FALSE(InferTextureResourceIndexDelta(references, textures, delta, reason));
+  CHECK(reason.contains("Multiple"));
+}
 
 TEST_CASE("Apple GPU Trace session normalizes, caches, and shuts down", "[metal][apple-trace]")
 {

@@ -529,6 +529,27 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
   m_TextureFetchUnavailableReason.clear();
   m_FrameRecord = {};
 
+  if(!m_Index.argumentBufferResolution.empty())
+  {
+    DebugMessage message = {};
+    message.category = MessageCategory::Execution;
+    message.severity = MessageSeverity::Info;
+    message.source = MessageSource::RuntimeWarning;
+    message.description = "Apple GPU Trace: " + m_Index.argumentBufferResolution;
+    m_DebugMessages.push_back(message);
+  }
+  else if(!m_Index.argumentBufferUnavailableReason.empty())
+  {
+    DebugMessage message = {};
+    message.category = MessageCategory::Execution;
+    message.severity = MessageSeverity::Medium;
+    message.source = MessageSource::RuntimeWarning;
+    message.description =
+        "Apple GPU Trace argument-buffer inputs are unavailable: " +
+        m_Index.argumentBufferUnavailableReason;
+    m_DebugMessages.push_back(message);
+  }
+
   if(!m_Index.nodes.empty())
   {
     for(size_t nodeIndex = 0; nodeIndex < m_Index.nodes.size(); nodeIndex++)
@@ -598,11 +619,14 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
       if(node.kind == MetalTrace::NodeKind::Draw || node.kind == MetalTrace::NodeKind::Dispatch)
       {
         rdcstr descendant = node.path + "/";
-        for(size_t bindingIndex = nodeIndex + 1; bindingIndex < m_Index.nodes.size(); bindingIndex++)
+        // Some normalized bindings (notably resources decoded from argument buffers) are appended
+        // after the public gpudebug tree has been walked, so locate descendants by path instead of
+        // relying on pre-order adjacency.
+        for(size_t bindingIndex = 0; bindingIndex < m_Index.nodes.size(); bindingIndex++)
         {
           const MetalTrace::Node &binding = m_Index.nodes[bindingIndex];
           if(!binding.path.beginsWith(descendant))
-            break;
+            continue;
           auto resource = m_StableResources.find(binding.stableId);
           if(resource == m_StableResources.end())
             continue;
@@ -1158,11 +1182,12 @@ TEST_CASE("Apple GPU Trace live texture preview is fetchable through replay",
 
   bool foundStageBinding = false;
   bool foundTextureInput = false;
+  rdcarray<ResourceId> textureInputs;
   std::function<void(const rdcarray<ActionDescription> &)> findStageBinding =
       [&](const rdcarray<ActionDescription> &actions) {
         for(const ActionDescription &action : actions)
         {
-          if(!foundTextureInput && (action.flags & (ActionFlags::Drawcall | ActionFlags::Dispatch)))
+          if(action.flags & (ActionFlags::Drawcall | ActionFlags::Dispatch))
           {
             controller->SetFrameEvent(action.eventId, true);
             for(ShaderStage stage : {ShaderStage::Vertex, ShaderStage::Fragment,
@@ -1173,18 +1198,24 @@ TEST_CASE("Apple GPU Trace live texture preview is fetchable through replay",
               {
                 foundStageBinding = true;
                 for(const TextureDescription &texture : textures)
-                  foundTextureInput |= texture.resourceId == input.descriptor.resource;
+                {
+                  if(texture.resourceId != input.descriptor.resource)
+                    continue;
+                  foundTextureInput = true;
+                  if(!textureInputs.contains(texture.resourceId))
+                    textureInputs.push_back(texture.resourceId);
+                }
               }
             }
           }
-          if(!foundTextureInput)
-            findStageBinding(action.children);
+          findStageBinding(action.children);
         }
       };
   findStageBinding(controller->GetRootActions());
   REQUIRE(foundStageBinding);
-  if(!foundTextureInput)
-    INFO("This trace exposes stage buffers but no directly-bound texture inputs through gpudebug");
+  REQUIRE(foundTextureInput);
+  REQUIRE(textureInputs.size() > 1);
+  REQUIRE_FALSE(controller->GetTextureData(textureInputs[0], Subresource()).empty());
 
   ResourceId drawable;
   for(const ResourceDescription &resource : controller->GetResources())
