@@ -38,15 +38,32 @@ public:
   void SetCommandQueue(WrappedMTLCommandQueue *commandQueue) { m_CommandQueue = commandQueue; }
   WrappedMTLCommandQueue *GetCommandQueue() { return m_CommandQueue; }
   DECLARE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLBlitCommandEncoder *, blitCommandEncoder);
+  DECLARE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLBlitCommandEncoder *,
+                                          blitCommandEncoderWithDescriptor,
+                                          MTL::BlitPassDescriptor *descriptor);
   DECLARE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLRenderCommandEncoder *,
                                           renderCommandEncoderWithDescriptor,
                                           RDMTL::RenderPassDescriptor &descriptor);
+  DECLARE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLComputeCommandEncoder *,
+                                          computeCommandEncoder);
+  DECLARE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLComputeCommandEncoder *,
+                                          computeCommandEncoderWithDispatchType,
+                                          MTL::DispatchType dispatchType);
+  DECLARE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLComputeCommandEncoder *,
+                                          computeCommandEncoderWithDescriptor,
+                                          RDMTL::ComputePassDescriptor &descriptor);
+  DECLARE_FUNCTION_SERIALISED(void, pushDebugGroup, NS::String *string);
+  DECLARE_FUNCTION_SERIALISED(void, popDebugGroup);
+  DECLARE_FUNCTION_SERIALISED(void, encodeWaitForEvent, WrappedMTLEvent *event, uint64_t value);
+  DECLARE_FUNCTION_SERIALISED(void, encodeSignalEvent, WrappedMTLEvent *event, uint64_t value);
   void presentDrawable(MTL::Drawable *drawable);
   template <typename SerialiserType>
   bool Serialise_presentDrawable(SerialiserType &ser, WrappedMTLTexture *presentedImage);
   DECLARE_FUNCTION_SERIALISED(void, commit);
   DECLARE_FUNCTION_SERIALISED(void, enqueue);
   DECLARE_FUNCTION_SERIALISED(void, waitUntilCompleted);
+  void ScheduledDrawablePresented(MTL::Drawable *drawable);
+  void CompleteScheduledPresent();
 
   enum
   {
@@ -55,4 +72,6 @@ public:
 
 private:
   WrappedMTLCommandQueue *m_CommandQueue;
+  Threading::CriticalSection m_ScheduledPresentLock;
+  MTL::Drawable *m_ScheduledPresentedDrawable = NULL;
 };

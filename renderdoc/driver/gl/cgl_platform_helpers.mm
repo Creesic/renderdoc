@@ -272,10 +272,9 @@ static void contextUpdateMT(int contextIndex, int replaySalt)
     [lockedContext update];
     UnLockContext(contextIndex);
   }
-  else
-  {
-    scheduleContextUpdate(contextIndex, replaySalt);
-  }
+  // The replay thread normally keeps the active context locked. A later resize/display request
+  // will schedule another update; recursively requeueing this callback only floods the main
+  // dispatch queue until a tiny unlock window happens to occur.
 }
 
 static void contextSetViewMT(int contextIndex, int replaySalt, NSView *view)
@@ -473,7 +472,11 @@ void NSGL_makeCurrentContext(void *context)
   SetCurrentContextIndexTLS(contextIndex);
   LockContext(contextIndex);
   [nsglContext makeCurrentContext];
-  scheduleContextUpdate(contextIndex, s_ReplaySalt);
+
+  // Attaching the NSView and explicit resize notifications already update the context. Scheduling
+  // another update here races the replay thread's deliberately-held context lock; the main-thread
+  // callback then continuously reschedules itself while an output remains current, consuming a
+  // full CPU core even when QRenderDoc is idle.
 }
 
 void NSGL_update(void *context)

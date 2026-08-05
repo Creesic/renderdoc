@@ -42,6 +42,11 @@ static RDResult Metal_CreateReplayDevice(RDCFile *rdc, const ReplayOptions &opts
     RETURN_ERROR_RESULT(ResultCode::APIUnsupported,
                         "Metal proxy replay is unavailable in the A0 skeleton");
 
+  // Native captures produced by the in-process Metal wrappers are conventional FrameCapture
+  // streams. The manifest/index sections are only used by imported Apple .gputrace files.
+  if(rdc->SectionIndex(MetalTrace::ManifestSectionName) < 0)
+    return NativeMetalReplayDriver::Create(rdc, opts, driver);
+
   MetalTrace::ContainerHeader container;
   RDResult result = MetalTrace::ReadContainerHeader(rdc, container);
   if(result != ResultCode::Succeeded)

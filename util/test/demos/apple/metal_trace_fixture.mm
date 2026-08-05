@@ -27,10 +27,12 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <simd/simd.h>
 
+#include <dlfcn.h>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "../renderdoc_app.h"
 
 namespace
 {
@@ -92,6 +94,17 @@ fragment float4 fixtureFragment(VertexOut in [[stage_in]],
   return float4(sampled.rgb * float3(0.9, 0.8, 1.0), 1.0);
 }
 
+kernel void fixtureCompute(texture2d<float, access::write> output [[texture(0)]],
+                           constant uint &seed [[buffer(1)]],
+                           uint2 gid [[thread_position_in_grid]])
+{
+  if(gid.x >= output.get_width() || gid.y >= output.get_height())
+    return;
+  bool alternate = ((gid.x + gid.y + seed) & 1) != 0;
+  output.write(alternate ? float4(0.125, 0.25, 1.0, 1.0)
+                         : float4(1.0, 0.5, 0.125, 1.0), gid);
+}
+
 vertex VertexOut presentVertex(uint vertexID [[vertex_id]],
                                const device VertexIn *vertices [[buffer(0)]])
 {
@@ -110,10 +123,26 @@ fragment float4 presentFragment(VertexOut in [[stage_in]],
 }
 )metal";
 
+bool TriggerRenderDocCapture()
+{
+  pRENDERDOC_GetAPI getAPI =
+      reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(RTLD_DEFAULT, "RENDERDOC_GetAPI"));
+  RENDERDOC_API_1_7_0 *api = nullptr;
+  if(getAPI == nullptr ||
+     getAPI(eRENDERDOC_API_Version_1_7_0, reinterpret_cast<void **>(&api)) != 1 || api == nullptr)
+  {
+    std::fprintf(stderr, "RenderDoc API 1.7.0 is unavailable; native capture was not triggered\n");
+    return false;
+  }
+
+  api->TriggerCapture();
+  std::fprintf(stderr, "Triggered one native RenderDoc Metal capture\n");
+  return true;
+}
+
 id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> library,
-                                        NSString *label, NSString *vertexName,
-                                        NSString *fragmentName, MTLPixelFormat colorFormat,
-                                        MTLPixelFormat depthFormat)
+                                        NSString *label, NSString *vertexName, NSString *fragmentName,
+                                        MTLPixelFormat colorFormat, MTLPixelFormat depthFormat)
 {
   MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
   descriptor.label = label;
@@ -137,14 +166,26 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) id<MTLRenderPipelineState> offscreenPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> presentPipeline;
+@property(nonatomic, strong) id<MTLComputePipelineState> computePipeline;
 @property(nonatomic, strong) id<MTLDepthStencilState> depthState;
 @property(nonatomic, strong) id<MTLBuffer> vertexBuffer;
 @property(nonatomic, strong) id<MTLBuffer> indexBuffer;
 @property(nonatomic, strong) id<MTLBuffer> dynamicBuffer;
+@property(nonatomic, strong) id<MTLBuffer> argumentIdentityBuffer;
+@property(nonatomic, strong) id<MTLBuffer> residencyOnlyBuffer;
+@property(nonatomic, strong) id<MTLBuffer> bufferTextureBacking;
+@property(nonatomic, strong) id<MTLTexture> blitSourceTexture;
+@property(nonatomic, strong) id<MTLTexture> bufferBackedTexture;
 @property(nonatomic, strong) id<MTLTexture> sampledTexture;
+@property(nonatomic, strong) id<MTLTexture> sampledTextureView;
+@property(nonatomic, strong) id<MTLTexture> privateBCTexture;
 @property(nonatomic, strong) id<MTLTexture> offscreenTexture;
 @property(nonatomic, strong) id<MTLTexture> depthTexture;
 @property(nonatomic, strong) id<MTLSamplerState> sampler;
+@property(nonatomic, strong) id<MTLSamplerState> indirectSampler;
+@property(nonatomic, strong) id<MTLFence> frameFence;
+@property(nonatomic, strong) id<MTLEvent> frameEvent;
+@property(nonatomic, strong) id<MTLResidencySet> residencySet API_AVAILABLE(macos(15.0));
 @property(nonatomic) NSUInteger frameLimit;
 @property(nonatomic) NSUInteger frameCount;
 - (instancetype)initWithLayer:(CAMetalLayer *)layer frameLimit:(NSUInteger)frameLimit;
@@ -188,14 +229,31 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
   }
   library.label = @"RenderDoc Metal Fixture Library";
 
-  _offscreenPipeline = MakePipeline(_device, library, @"Fixture Offscreen Pipeline",
-                                    @"fixtureVertex", @"fixtureFragment",
-                                    MTLPixelFormatRGBA8Unorm, MTLPixelFormatDepth32Float);
-  _presentPipeline = MakePipeline(_device, library, @"Fixture Present Pipeline",
-                                  @"presentVertex", @"presentFragment",
-                                  MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid);
+  _offscreenPipeline =
+      MakePipeline(_device, library, @"Fixture Offscreen Pipeline", @"fixtureVertex",
+                   @"fixtureFragment", MTLPixelFormatRGBA8Unorm, MTLPixelFormatDepth32Float);
+  _presentPipeline =
+      MakePipeline(_device, library, @"Fixture Present Pipeline", @"presentVertex",
+                   @"presentFragment", MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid);
   if(_offscreenPipeline == nil || _presentPipeline == nil)
     return nil;
+
+  MTLComputePipelineDescriptor *computeDescriptor = [[MTLComputePipelineDescriptor alloc] init];
+  computeDescriptor.label = @"Fixture Checkerboard Compute Pipeline";
+  MTLFunctionConstantValues *emptyFunctionConstants = [[MTLFunctionConstantValues alloc] init];
+  computeDescriptor.computeFunction = [library newFunctionWithName:@"fixtureCompute"
+                                                    constantValues:emptyFunctionConstants
+                                                             error:&error];
+  _computePipeline = [_device newComputePipelineStateWithDescriptor:computeDescriptor
+                                                            options:MTLPipelineOptionNone
+                                                         reflection:nil
+                                                              error:&error];
+  if(_computePipeline == nil)
+  {
+    std::fprintf(stderr, "compute pipeline creation failed: %s\n",
+                 error.localizedDescription.UTF8String);
+    return nil;
+  }
 
   MTLDepthStencilDescriptor *depthDescriptor = [[MTLDepthStencilDescriptor alloc] init];
   depthDescriptor.label = @"Fixture Less Depth State";
@@ -215,16 +273,51 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
   const std::array<uint16_t, 6> indices = {{3, 4, 5, 3, 5, 6}};
 
   _vertexBuffer = [_device newBufferWithBytes:vertices.data()
-                                        length:sizeof(vertices)
-                                       options:MTLResourceStorageModeShared];
+                                       length:sizeof(vertices)
+                                      options:MTLResourceStorageModeShared];
   _vertexBuffer.label = @"Fixture Vertex Buffer";
   _indexBuffer = [_device newBufferWithBytes:indices.data()
-                                       length:sizeof(indices)
-                                      options:MTLResourceStorageModeShared];
+                                      length:sizeof(indices)
+                                     options:MTLResourceStorageModeShared];
   _indexBuffer.label = @"Fixture Index Buffer";
   _dynamicBuffer = [_device newBufferWithLength:sizeof(Uniforms)
                                         options:MTLResourceStorageModeShared];
   _dynamicBuffer.label = @"Fixture Dynamic Uniform Buffer";
+  const std::array<uint32_t, 4> residencyMarker = {
+      {0x52444f43U, 0x4d455441U, 0x4c525345U, 0x544f4e4cU}};
+  _residencyOnlyBuffer = [_device newBufferWithBytes:residencyMarker.data()
+                                              length:sizeof(residencyMarker)
+                                             options:MTLResourceStorageModeShared];
+  _residencyOnlyBuffer.label = @"Fixture Residency Only Buffer";
+
+  constexpr NSUInteger BufferTextureRowPitch = 256;
+  std::array<uint8_t, BufferTextureRowPitch * 4> bufferTextureBytes = {};
+  for(NSUInteger y = 0; y < 4; y++)
+  {
+    uint8_t *row = bufferTextureBytes.data() + y * BufferTextureRowPitch;
+    for(NSUInteger x = 0; x < 4; x++)
+    {
+      row[x * 4 + 0] = uint8_t(32 + x * 48);
+      row[x * 4 + 1] = uint8_t(32 + y * 48);
+      row[x * 4 + 2] = uint8_t(224 - x * 24);
+      row[x * 4 + 3] = 255;
+    }
+  }
+  _bufferTextureBacking = [_device newBufferWithBytes:bufferTextureBytes.data()
+                                               length:bufferTextureBytes.size()
+                                              options:MTLResourceStorageModeShared];
+  _bufferTextureBacking.label = @"Fixture Buffer Texture Backing";
+  MTLTextureDescriptor *bufferTextureDescriptor =
+      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                         width:4
+                                                        height:4
+                                                     mipmapped:NO];
+  bufferTextureDescriptor.storageMode = MTLStorageModeShared;
+  bufferTextureDescriptor.usage = MTLTextureUsageShaderRead;
+  _bufferBackedTexture = [_bufferTextureBacking newTextureWithDescriptor:bufferTextureDescriptor
+                                                                  offset:0
+                                                             bytesPerRow:BufferTextureRowPitch];
+  _bufferBackedTexture.label = @"Fixture Buffer-backed Texture";
 
   MTLTextureDescriptor *sampledDescriptor =
       [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -232,19 +325,74 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
                                                         height:4
                                                      mipmapped:NO];
   sampledDescriptor.storageMode = MTLStorageModeShared;
-  sampledDescriptor.usage = MTLTextureUsageShaderRead;
+  sampledDescriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+  MTLTextureDescriptor *blitSourceDescriptor = [sampledDescriptor copy];
+  blitSourceDescriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+  _blitSourceTexture = [_device newTextureWithDescriptor:blitSourceDescriptor];
+  _blitSourceTexture.label = @"Fixture Blit Source Checkerboard";
   _sampledTexture = [_device newTextureWithDescriptor:sampledDescriptor];
-  _sampledTexture.label = @"Fixture Sampled Checkerboard";
-  const std::array<uint32_t, 16> texels = {{
-      0xff2040ffU, 0xffe08020U, 0xff2040ffU, 0xffe08020U,
-      0xffe08020U, 0xff2040ffU, 0xffe08020U, 0xff2040ffU,
-      0xff2040ffU, 0xffe08020U, 0xff2040ffU, 0xffe08020U,
-      0xffe08020U, 0xff2040ffU, 0xffe08020U, 0xff2040ffU,
-  }};
-  [_sampledTexture replaceRegion:MTLRegionMake2D(0, 0, 4, 4)
-                     mipmapLevel:0
-                       withBytes:texels.data()
-                     bytesPerRow:4 * sizeof(uint32_t)];
+  _sampledTexture.label = @"Fixture Blit Destination";
+  _sampledTextureView = [_sampledTexture newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
+  _sampledTextureView.label = @"Fixture Sampled Checkerboard View";
+
+  // This texture is populated before capture, lives only in private storage, uses block
+  // compression, and has a complete mip chain. It is the deterministic regression case for game
+  // asset textures that must be snapshotted as initial contents rather than reconstructed from
+  // commands recorded inside the captured frame.
+  MTLTextureDescriptor *privateBCDescriptor =
+      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBC1_RGBA
+                                                         width:8
+                                                        height:8
+                                                     mipmapped:YES];
+  privateBCDescriptor.storageMode = MTLStorageModePrivate;
+  privateBCDescriptor.usage = MTLTextureUsageShaderRead;
+  _privateBCTexture = [_device newTextureWithDescriptor:privateBCDescriptor];
+  _privateBCTexture.label = @"Fixture Private BC1 Mip Chain";
+
+  constexpr NSUInteger BCStagingSize = 1280;
+  std::array<uint8_t, BCStagingSize> bcStaging = {};
+  const std::array<NSUInteger, 4> bcOffsets = {{0, 512, 768, 1024}};
+  for(NSUInteger mip = 0; mip < 4; mip++)
+  {
+    const NSUInteger mipWidth = std::max<NSUInteger>(8 >> mip, 1);
+    const NSUInteger mipHeight = std::max<NSUInteger>(8 >> mip, 1);
+    const NSUInteger blockColumns = (mipWidth + 3) / 4;
+    const NSUInteger blockRows = (mipHeight + 3) / 4;
+    for(NSUInteger blockY = 0; blockY < blockRows; blockY++)
+    {
+      for(NSUInteger blockX = 0; blockX < blockColumns; blockX++)
+      {
+        uint8_t *block = bcStaging.data() + bcOffsets[mip] + blockY * 256 + blockX * 8;
+        const uint16_t color = (mip & 1) ? uint16_t(0x07e0) : uint16_t(0xf800);
+        std::memcpy(block, &color, sizeof(color));
+        block[2] = 0;
+        block[3] = 0;
+      }
+    }
+  }
+
+  id<MTLBuffer> bcUpload = [_device newBufferWithBytes:bcStaging.data()
+                                                length:bcStaging.size()
+                                               options:MTLResourceStorageModeShared];
+  id<MTLCommandBuffer> bcUploadCommand = [_queue commandBuffer];
+  id<MTLBlitCommandEncoder> bcUploadBlit = [bcUploadCommand blitCommandEncoder];
+  for(NSUInteger mip = 0; mip < 4; mip++)
+  {
+    const NSUInteger mipWidth = std::max<NSUInteger>(8 >> mip, 1);
+    const NSUInteger mipHeight = std::max<NSUInteger>(8 >> mip, 1);
+    [bcUploadBlit copyFromBuffer:bcUpload
+                    sourceOffset:bcOffsets[mip]
+               sourceBytesPerRow:256
+             sourceBytesPerImage:256 * ((mipHeight + 3) / 4)
+                      sourceSize:MTLSizeMake(mipWidth, mipHeight, 1)
+                       toTexture:_privateBCTexture
+                destinationSlice:0
+                destinationLevel:mip
+               destinationOrigin:MTLOriginMake(0, 0, 0)];
+  }
+  [bcUploadBlit endEncoding];
+  [bcUploadCommand commit];
+  [bcUploadCommand waitUntilCompleted];
 
   MTLTextureDescriptor *offscreenDescriptor =
       [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -268,11 +416,71 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
 
   MTLSamplerDescriptor *samplerDescriptor = [[MTLSamplerDescriptor alloc] init];
   samplerDescriptor.label = @"Fixture Linear Clamp Sampler";
+  samplerDescriptor.supportArgumentBuffers = YES;
   samplerDescriptor.minFilter = MTLSamplerMinMagFilterLinear;
   samplerDescriptor.magFilter = MTLSamplerMinMagFilterLinear;
   samplerDescriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
   samplerDescriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
   _sampler = [_device newSamplerStateWithDescriptor:samplerDescriptor];
+  samplerDescriptor.label = @"Fixture Indirect Argument Sampler";
+  samplerDescriptor.minFilter = MTLSamplerMinMagFilterNearest;
+  samplerDescriptor.magFilter = MTLSamplerMinMagFilterNearest;
+  _indirectSampler = [_device newSamplerStateWithDescriptor:samplerDescriptor];
+  _frameFence = [_device newFence];
+  _frameFence.label = @"Fixture Cross Encoder Fence";
+  _frameEvent = [_device newEvent];
+  _frameEvent.label = @"Fixture Cross Command Buffer Event";
+
+  if(@available(macOS 13.0, *))
+  {
+    // Plume writes these process-specific Metal 3 identities directly into Tier 2 argument
+    // buffers. This unused binding gives strict replay an integration check for all three forms:
+    // a buffer GPU address, a texture resource ID, and a sampler resource ID. Use the
+    // residency-only buffer here so the buffer address is never also exposed by a direct encoder
+    // binding.
+    const std::array<uint64_t, 3> argumentIdentities = {{
+        _residencyOnlyBuffer.gpuAddress,
+        _sampledTextureView.gpuResourceID._impl,
+        _indirectSampler.gpuResourceID._impl,
+    }};
+    _argumentIdentityBuffer = [_device newBufferWithBytes:argumentIdentities.data()
+                                                   length:sizeof(argumentIdentities)
+                                                  options:MTLResourceStorageModeShared];
+    _argumentIdentityBuffer.label = @"Fixture Argument Identity Buffer";
+  }
+
+  if(@available(macOS 15.0, *))
+  {
+    MTLResidencySetDescriptor *residencyDescriptor = [[MTLResidencySetDescriptor alloc] init];
+    residencyDescriptor.label = @"Fixture Global Residency Set";
+    residencyDescriptor.initialCapacity = 12;
+    _residencySet = [_device newResidencySetWithDescriptor:residencyDescriptor error:&error];
+    if(_residencySet == nil)
+    {
+      std::fprintf(stderr, "residency set creation failed: %s\n",
+                   error.localizedDescription.UTF8String);
+      return nil;
+    }
+    const std::array<id<MTLAllocation>, 12> allocations = {{
+        _vertexBuffer,
+        _indexBuffer,
+        _dynamicBuffer,
+        _residencyOnlyBuffer,
+        _blitSourceTexture,
+        _sampledTexture,
+        _privateBCTexture,
+        _offscreenTexture,
+        _depthTexture,
+        _argumentIdentityBuffer,
+        _bufferTextureBacking,
+        _bufferBackedTexture,
+    }};
+    for(id<MTLAllocation> allocation : allocations)
+      if(allocation != nil)
+        [_residencySet addAllocation:allocation];
+    [_residencySet commit];
+    [_queue addResidencySet:_residencySet];
+  }
   return self;
 }
 
@@ -287,9 +495,50 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
     const Uniforms uniforms = {{0.0F, 0.0F}, {0.0F, 0.0F}};
     std::memcpy(_dynamicBuffer.contents, &uniforms, sizeof(uniforms));
 
-    id<MTLCommandBuffer> commandBuffer = [_queue commandBuffer];
+    // Plume brackets submitted frame work with MTLEvent command buffers. Exercise the same path
+    // separately from encoder fences so capture must retain the event and both ordering chunks.
+    const uint64_t eventValue = _frameCount + 1;
+    id<MTLCommandBuffer> signalBuffer = [_queue commandBufferWithUnretainedReferences];
+    signalBuffer.label = @"Fixture Event Signal Command Buffer";
+    [signalBuffer enqueue];
+    [signalBuffer encodeSignalEvent:_frameEvent value:eventValue];
+    [signalBuffer commit];
+
+    // Plume and MM3 use this constructor for their frame command buffers. Keeping the fixture on
+    // the same path prevents an unwrapped command buffer from collapsing a native capture to only
+    // its resource-creation chunks.
+    id<MTLCommandBuffer> commandBuffer = [_queue commandBufferWithUnretainedReferences];
     commandBuffer.label = @"Fixture Frame Command Buffer";
+    [commandBuffer enqueue];
+    [commandBuffer encodeWaitForEvent:_frameEvent value:eventValue];
     [commandBuffer pushDebugGroup:@"RenderDoc Metal Fixture Frame"];
+
+    id<MTLComputeCommandEncoder> compute =
+        [commandBuffer computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+    compute.label = @"Fixture Concurrent Compute Encoder";
+    [compute pushDebugGroup:@"Generate Checkerboard With Compute"];
+    [compute setComputePipelineState:_computePipeline];
+    [compute setTexture:_blitSourceTexture atIndex:0];
+    [compute setTexture:_bufferBackedTexture atIndex:2];
+    const uint32_t checkerboardSeed = 0;
+    [compute setBytes:&checkerboardSeed length:sizeof(checkerboardSeed) atIndex:1];
+    if(_argumentIdentityBuffer != nil)
+      [compute setBuffer:_argumentIdentityBuffer offset:0 atIndex:3];
+    [compute useResource:_blitSourceTexture usage:MTLResourceUsageWrite];
+    [compute dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(4, 4, 1)];
+    [compute updateFence:_frameFence];
+    [compute popDebugGroup];
+    [compute endEncoding];
+
+    MTLBlitPassDescriptor *blitDescriptor = [MTLBlitPassDescriptor blitPassDescriptor];
+    id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoderWithDescriptor:blitDescriptor];
+    blit.label = @"Fixture Descriptor Blit Encoder";
+    [blit pushDebugGroup:@"Copy Checkerboard Into View Parent"];
+    [blit waitForFence:_frameFence];
+    [blit copyFromTexture:_blitSourceTexture toTexture:_sampledTexture];
+    [blit updateFence:_frameFence];
+    [blit popDebugGroup];
+    [blit endEncoding];
 
     MTLRenderPassDescriptor *offscreenPass = [MTLRenderPassDescriptor renderPassDescriptor];
     offscreenPass.colorAttachments[0].texture = _offscreenTexture;
@@ -305,16 +554,39 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
         [commandBuffer renderCommandEncoderWithDescriptor:offscreenPass];
     offscreen.label = @"Fixture Offscreen Encoder";
     [offscreen pushDebugGroup:@"Offscreen Render To Texture"];
+    [offscreen waitForFence:_frameFence beforeStages:MTLRenderStageVertex | MTLRenderStageFragment];
+    const MTLViewport fixtureViewport = {0.0, 0.0, 64.0, 64.0, 0.0, 1.0};
+    const MTLScissorRect fixtureScissor = {0, 0, 64, 64};
+    const float fixtureVertexInline[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    [offscreen setViewports:&fixtureViewport count:1];
+    [offscreen setScissorRects:&fixtureScissor count:1];
+    [offscreen setFrontFacingWinding:MTLWindingCounterClockwise];
+    [offscreen setCullMode:MTLCullModeNone];
+    [offscreen setDepthClipMode:MTLDepthClipModeClip];
+    [offscreen setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
+    [offscreen setTriangleFillMode:MTLTriangleFillModeFill];
+    [offscreen setStencilReferenceValue:0];
+    [offscreen setVertexBytes:fixtureVertexInline length:sizeof(fixtureVertexInline) atIndex:7];
     [offscreen setRenderPipelineState:_offscreenPipeline];
     [offscreen setDepthStencilState:_depthState];
     [offscreen setVertexBuffer:_vertexBuffer offset:0 atIndex:0];
     [offscreen setVertexBuffer:_dynamicBuffer offset:0 atIndex:1];
-    [offscreen setFragmentTexture:_sampledTexture atIndex:0];
+    [offscreen setFragmentTexture:_sampledTextureView atIndex:0];
+    [offscreen setFragmentTexture:_privateBCTexture atIndex:1];
     [offscreen setFragmentSamplerState:_sampler atIndex:0];
+    [offscreen useResource:_sampledTextureView
+                     usage:MTLResourceUsageRead
+                    stages:MTLRenderStageFragment];
+    [offscreen useResource:_privateBCTexture
+                     usage:MTLResourceUsageRead
+                    stages:MTLRenderStageFragment];
+    if(_argumentIdentityBuffer != nil)
+      [offscreen setFragmentBuffer:_argumentIdentityBuffer offset:0 atIndex:3];
     const vector_float4 inlineTint = {1.0F, 1.0F, 1.0F, 1.0F};
     [offscreen setFragmentBytes:&inlineTint length:sizeof(inlineTint) atIndex:2];
     [offscreen pushDebugGroup:@"Fixture Direct Draw"];
     [offscreen drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [offscreen updateFence:_frameFence afterStages:MTLRenderStageVertex | MTLRenderStageFragment];
     [offscreen popDebugGroup];
     [offscreen popDebugGroup];
     [offscreen endEncoding];
@@ -329,6 +601,7 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
         [commandBuffer renderCommandEncoderWithDescriptor:presentPass];
     present.label = @"Fixture Present Encoder";
     [present pushDebugGroup:@"Sample Offscreen Texture And Present"];
+    [present waitForFence:_frameFence beforeStages:MTLRenderStageVertex | MTLRenderStageFragment];
     [present setRenderPipelineState:_presentPipeline];
     [present setVertexBuffer:_vertexBuffer offset:0 atIndex:0];
     [present setFragmentTexture:_offscreenTexture atIndex:0];
@@ -344,7 +617,13 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
     [present endEncoding];
 
     [commandBuffer popDebugGroup];
-    [commandBuffer presentDrawable:drawable];
+    // Plume presents the drawable from a scheduled callback rather than encoding
+    // presentDrawable: on the command buffer. Native capture must recognise this as the frame
+    // boundary and associate the drawable texture with this command stream.
+    [commandBuffer addScheduledHandler:^(id<MTLCommandBuffer> scheduledBuffer) {
+      (void)scheduledBuffer;
+      [drawable present];
+    }];
     [commandBuffer commit];
 
     ++_frameCount;
@@ -354,11 +633,12 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
 }
 @end
 
-@interface FixtureAppDelegate : NSObject <NSApplicationDelegate>
+@interface FixtureAppDelegate : NSObject<NSApplicationDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) FixtureRenderer *renderer;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic) NSUInteger frameLimit;
+@property(nonatomic) BOOL triggerRenderDocCapture;
 @end
 
 @implementation FixtureAppDelegate
@@ -366,11 +646,10 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
 {
   (void)notification;
   NSRect frame = NSMakeRect(0, 0, FixtureWidth, FixtureHeight);
-  _window = [[NSWindow alloc]
-      initWithContentRect:frame
-                styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
-                  backing:NSBackingStoreBuffered
-                    defer:NO];
+  _window = [[NSWindow alloc] initWithContentRect:frame
+                                        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                                          backing:NSBackingStoreBuffered
+                                            defer:NO];
   _window.title = @"RenderDoc Metal Trace Fixture";
 
   NSView *view = [[NSView alloc] initWithFrame:frame];
@@ -389,11 +668,14 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
     return;
   }
 
+  if(_triggerRenderDocCapture)
+    TriggerRenderDocCapture();
+
   _timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 60.0)
-                                           target:_renderer
-                                         selector:@selector(renderFrame)
-                                         userInfo:nil
-                                          repeats:YES];
+                                            target:_renderer
+                                          selector:@selector(renderFrame)
+                                          userInfo:nil
+                                           repeats:YES];
   [_renderer renderFrame];
 }
 
@@ -409,16 +691,20 @@ int main(int argc, const char **argv)
   @autoreleasepool
   {
     NSUInteger frameLimit = 0;
-    for(int i = 1; i + 1 < argc; ++i)
+    BOOL triggerRenderDocCapture = NO;
+    for(int i = 1; i < argc; ++i)
     {
-      if(std::strcmp(argv[i], "--frames") == 0)
+      if(std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
         frameLimit = std::strtoul(argv[++i], nullptr, 10);
+      else if(std::strcmp(argv[i], "--renderdoc-capture") == 0)
+        triggerRenderDocCapture = YES;
     }
 
     NSApplication *application = [NSApplication sharedApplication];
     application.activationPolicy = NSApplicationActivationPolicyRegular;
     FixtureAppDelegate *delegate = [[FixtureAppDelegate alloc] init];
     delegate.frameLimit = frameLimit;
+    delegate.triggerRenderDocCapture = triggerRenderDocCapture;
     application.delegate = delegate;
     [application run];
   }

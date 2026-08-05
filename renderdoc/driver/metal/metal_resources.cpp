@@ -27,11 +27,17 @@
 #include "metal_buffer.h"
 #include "metal_command_buffer.h"
 #include "metal_command_queue.h"
+#include "metal_compute_command_encoder.h"
+#include "metal_compute_pipeline_state.h"
 #include "metal_device.h"
+#include "metal_depth_stencil_state.h"
+#include "metal_event.h"
 #include "metal_function.h"
+#include "metal_fence.h"
 #include "metal_library.h"
 #include "metal_render_command_encoder.h"
 #include "metal_render_pipeline_state.h"
+#include "metal_sampler_state.h"
 #include "metal_texture.h"
 
 ResourceId GetResID(WrappedMTLObject *obj)

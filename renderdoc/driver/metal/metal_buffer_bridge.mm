@@ -165,8 +165,9 @@
                                         bytesPerRow:(NSUInteger)bytesPerRow
     API_AVAILABLE(macos(10.13), ios(8.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real newTextureWithDescriptor:descriptor offset:offset bytesPerRow:bytesPerRow];
+  RDMTL::TextureDescriptor rdDescriptor((MTL::TextureDescriptor *)descriptor);
+  return id<MTLTexture>(
+      GetWrapped(self)->newTextureWithDescriptor(rdDescriptor, offset, bytesPerRow));
 }
 
 - (void)addDebugMarker:(NSString *)marker

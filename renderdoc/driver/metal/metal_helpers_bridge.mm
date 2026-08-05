@@ -22,7 +22,49 @@
  * THE SOFTWARE.
  ******************************************************************************/
 
-#include "metal_types.h"
+#include "metal_resources.h"
+#include "metal_types_bridge.h"
+
+@implementation ObjCBridgeMTLObject
+
+- (id)retain
+{
+  WrappedMTLObject *wrapped = (WrappedMTLObject *)self;
+  if(!wrapped->m_ObjCBridgeMirrorsRealOwnership || !wrapped->m_ObjCBridgeAssociated)
+    return [super retain];
+
+  id real = (id)wrapped->m_Real;
+  id retained = [super retain];
+  [real retain];
+  return retained;
+}
+
+- (oneway void)release
+{
+  WrappedMTLObject *wrapped = (WrappedMTLObject *)self;
+  if(!wrapped->m_ObjCBridgeMirrorsRealOwnership || !wrapped->m_ObjCBridgeAssociated)
+  {
+    [super release];
+    return;
+  }
+
+  // The real object owns one association reference to the embedded bridge. When that is the only
+  // remaining bridge reference, this release came from the association being torn down during the
+  // real object's deallocation and must not be forwarded back to the real object.
+  if([super retainCount] <= 1)
+  {
+    [super release];
+    return;
+  }
+
+  id real = (id)wrapped->m_Real;
+  // Drop the application's bridge reference first. If releasing the real object destroys it, its
+  // association can then safely release the bridge's final reference and delete the wrapper.
+  [super release];
+  [real release];
+}
+
+@end
 
 @interface ObjCTrackedCAMetalLayer : NSObject
 @end

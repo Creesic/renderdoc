@@ -35,6 +35,9 @@ public:
 
   void *contents();
 
+  DECLARE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLTexture *, newTextureWithDescriptor,
+                                          RDMTL::TextureDescriptor &descriptor,
+                                          NS::UInteger offset, NS::UInteger bytesPerRow);
   DECLARE_FUNCTION_SERIALISED(void, didModifyRange, NS::Range &range);
   template <typename SerialiserType>
   bool Serialise_InternalModifyCPUContents(SerialiserType &ser, uint64_t start, uint64_t end,

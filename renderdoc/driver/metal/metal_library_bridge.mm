@@ -90,8 +90,8 @@
                                           error:(__autoreleasing NSError **)error
     API_AVAILABLE(macos(10.12), ios(10.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real newFunctionWithName:name constantValues:constantValues error:error];
+  return id<MTLFunction>(GetWrapped(self)->newFunctionWithNameConstantValues(
+      (NS::String *)name, (MTL::FunctionConstantValues *)constantValues, (NS::Error **)error));
 }
 
 - (void)newFunctionWithName:(NSString *)name

@@ -28,7 +28,10 @@
 
 class RDCFile;
 class IReplayDriver;
+struct SDFile;
 struct ReplayOptions;
+
+RDResult Metal_ProcessStructuredCapture(RDCFile *rdc, SDFile &output);
 
 class NativeMetalReplayDriver
 {

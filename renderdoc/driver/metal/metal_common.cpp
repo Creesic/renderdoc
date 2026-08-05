@@ -1169,6 +1169,37 @@ uint32_t GetByteSize(uint32_t width, uint32_t height, uint32_t depth, MTL::Pixel
   return size;
 }
 
+rdcarray<MetalTextureSubresourceLayout> GetTextureSubresourceLayouts(
+    uint32_t width, uint32_t height, uint32_t depth, uint32_t mipCount, uint32_t arrayLength,
+    MTL::TextureType textureType, MTL::PixelFormat format)
+{
+  rdcarray<MetalTextureSubresourceLayout> layouts;
+  const bool is3D = textureType == MTL::TextureType3D;
+  const uint32_t slices = is3D ? 1U : RDCMAX(arrayLength, 1U);
+  uint64_t dataOffset = 0;
+
+  for(uint32_t slice = 0; slice < slices; slice++)
+  {
+    for(uint32_t mip = 0; mip < RDCMAX(mipCount, 1U); mip++)
+    {
+      MetalTextureSubresourceLayout layout;
+      layout.mipLevel = mip;
+      layout.arraySlice = slice;
+      layout.width = RDCMAX(width >> mip, 1U);
+      layout.height = RDCMAX(height >> mip, 1U);
+      layout.depth = is3D ? RDCMAX(depth >> mip, 1U) : 1U;
+      layout.rowPitch = GetByteSize(layout.width, 1, 1, format, 0);
+      layout.imagePitch = GetByteSize(layout.width, layout.height, 1, format, 0);
+      layout.dataOffset = dataOffset;
+      layout.dataSize = layout.imagePitch * layout.depth;
+      dataOffset += layout.dataSize;
+      layouts.push_back(layout);
+    }
+  }
+
+  return layouts;
+}
+
 #if ENABLED(ENABLE_UNIT_TESTS)
 
 #undef None

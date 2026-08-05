@@ -24,7 +24,9 @@
 
 #include "metal_command_buffer.h"
 #include "metal_blit_command_encoder.h"
+#include "metal_compute_command_encoder.h"
 #include "metal_device.h"
+#include "metal_event.h"
 #include "metal_render_command_encoder.h"
 #include "metal_resources.h"
 #include "metal_texture.h"
@@ -34,7 +36,105 @@ WrappedMTLCommandBuffer::WrappedMTLCommandBuffer(MTL::CommandBuffer *realMTLComm
     : WrappedMTLObject(realMTLCommandBuffer, objId, wrappedMTLDevice, wrappedMTLDevice->GetStateRef())
 {
   if(realMTLCommandBuffer && objId != ResourceId())
+  {
+    m_ObjCBridgeMirrorsRealOwnership = true;
     AllocateObjCBridge(this);
+  }
+}
+
+template <typename SerialiserType>
+bool WrappedMTLCommandBuffer::Serialise_pushDebugGroup(SerialiserType &ser, NS::String *string)
+{
+  SERIALISE_ELEMENT_LOCAL(CommandBuffer, this);
+  SERIALISE_ELEMENT(string).Important();
+
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+void WrappedMTLCommandBuffer::pushDebugGroup(NS::String *string)
+{
+  SERIALISE_TIME_CALL(Unwrap(this)->pushDebugGroup(string));
+
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLCommandBuffer_pushDebugGroup);
+    Serialise_pushDebugGroup(ser, string);
+    GetRecord(this)->AddChunk(scope.Get());
+  }
+}
+
+template <typename SerialiserType>
+bool WrappedMTLCommandBuffer::Serialise_popDebugGroup(SerialiserType &ser)
+{
+  SERIALISE_ELEMENT_LOCAL(CommandBuffer, this);
+
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+void WrappedMTLCommandBuffer::popDebugGroup()
+{
+  SERIALISE_TIME_CALL(Unwrap(this)->popDebugGroup());
+
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLCommandBuffer_popDebugGroup);
+    Serialise_popDebugGroup(ser);
+    GetRecord(this)->AddChunk(scope.Get());
+  }
+}
+
+template <typename SerialiserType>
+bool WrappedMTLCommandBuffer::Serialise_encodeWaitForEvent(SerialiserType &ser,
+                                                           WrappedMTLEvent *event, uint64_t value)
+{
+  SERIALISE_ELEMENT_LOCAL(CommandBuffer, this);
+  SERIALISE_ELEMENT(event).Important();
+  SERIALISE_ELEMENT(value).Important();
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+void WrappedMTLCommandBuffer::encodeWaitForEvent(WrappedMTLEvent *event, uint64_t value)
+{
+  SERIALISE_TIME_CALL(Unwrap(this)->encodeWait(event ? Unwrap(event) : NULL, value));
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLCommandBuffer_encodeWaitForEvent);
+    Serialise_encodeWaitForEvent(ser, event, value);
+    MetalResourceRecord *record = GetRecord(this);
+    record->AddChunk(scope.Get());
+    record->MarkResourceFrameReferenced(GetResID(event), eFrameRef_Read);
+  }
+}
+
+template <typename SerialiserType>
+bool WrappedMTLCommandBuffer::Serialise_encodeSignalEvent(SerialiserType &ser,
+                                                           WrappedMTLEvent *event, uint64_t value)
+{
+  SERIALISE_ELEMENT_LOCAL(CommandBuffer, this);
+  SERIALISE_ELEMENT(event).Important();
+  SERIALISE_ELEMENT(value).Important();
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+void WrappedMTLCommandBuffer::encodeSignalEvent(WrappedMTLEvent *event, uint64_t value)
+{
+  SERIALISE_TIME_CALL(Unwrap(this)->encodeSignalEvent(event ? Unwrap(event) : NULL, value));
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLCommandBuffer_encodeSignalEvent);
+    Serialise_encodeSignalEvent(ser, event, value);
+    MetalResourceRecord *record = GetRecord(this);
+    record->AddChunk(scope.Get());
+    record->MarkResourceFrameReferenced(GetResID(event), eFrameRef_PartialWrite);
+  }
 }
 
 template <typename SerialiserType>
@@ -86,6 +186,45 @@ WrappedMTLBlitCommandEncoder *WrappedMTLCommandBuffer::blitCommandEncoder()
 }
 
 template <typename SerialiserType>
+bool WrappedMTLCommandBuffer::Serialise_blitCommandEncoderWithDescriptor(
+    SerialiserType &ser, WrappedMTLBlitCommandEncoder *encoder,
+    MTL::BlitPassDescriptor *descriptor)
+{
+  SERIALISE_ELEMENT_LOCAL(CommandBuffer, this);
+  SERIALISE_ELEMENT_LOCAL(BlitCommandEncoder, GetResID(encoder))
+      .TypedAs("MTLBlitCommandEncoder"_lit);
+  // Counter-sampling attachments are not part of executable replay yet. The descriptor-based
+  // constructor used by Plume carries a default descriptor, so command semantics are identical to
+  // the plain constructor for the supported copy/fill surface.
+  (void)descriptor;
+
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+WrappedMTLBlitCommandEncoder *WrappedMTLCommandBuffer::blitCommandEncoderWithDescriptor(
+    MTL::BlitPassDescriptor *descriptor)
+{
+  MTL::BlitCommandEncoder *real;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->blitCommandEncoder(descriptor));
+  if(real == NULL)
+    return NULL;
+
+  WrappedMTLBlitCommandEncoder *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  wrapped->SetCommandBuffer(this);
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLCommandBuffer_blitCommandEncoderWithDescriptor);
+    Serialise_blitCommandEncoderWithDescriptor(ser, wrapped, descriptor);
+    GetRecord(this)->AddChunk(scope.Get());
+    GetResourceManager()->AddResourceRecord(wrapped);
+  }
+  return wrapped;
+}
+
+template <typename SerialiserType>
 bool WrappedMTLCommandBuffer::Serialise_renderCommandEncoderWithDescriptor(
     SerialiserType &ser, WrappedMTLRenderCommandEncoder *encoder,
     RDMTL::RenderPassDescriptor &descriptor)
@@ -131,14 +270,27 @@ WrappedMTLRenderCommandEncoder *WrappedMTLCommandBuffer::renderCommandEncoderWit
     MetalResourceRecord *encoderRecord =
         GetResourceManager()->AddResourceRecord(wrappedMTLRenderCommandEncoder);
 
+    auto markAttachment = [bufferRecord](RDMTL::RenderPassAttachmentDescriptor &attachment) {
+      if(attachment.texture != NULL)
+      {
+        FrameRefType ref = eFrameRef_PartialWrite;
+        if(attachment.loadAction == MTL::LoadActionLoad)
+          ref = eFrameRef_ReadBeforeWrite;
+        else if(attachment.loadAction == MTL::LoadActionClear)
+          ref = eFrameRef_CompleteWrite;
+        bufferRecord->MarkResourceFrameReferenced(GetResID(attachment.texture), ref);
+      }
+      if(attachment.resolveTexture != NULL)
+        bufferRecord->MarkResourceFrameReferenced(GetResID(attachment.resolveTexture),
+                                                   eFrameRef_CompleteWrite);
+    };
+
     for(int i = 0; i < descriptor.colorAttachments.count(); ++i)
     {
-      WrappedMTLTexture *texture = descriptor.colorAttachments[i].texture;
-      if(texture != NULL)
-      {
-        bufferRecord->MarkResourceFrameReferenced(GetResID(texture), eFrameRef_Read);
-      }
+      markAttachment(descriptor.colorAttachments[i]);
     }
+    markAttachment(descriptor.depthAttachment);
+    markAttachment(descriptor.stencilAttachment);
   }
   else
   {
@@ -146,6 +298,106 @@ WrappedMTLRenderCommandEncoder *WrappedMTLCommandBuffer::renderCommandEncoderWit
     //     GetResourceManager()->AddLiveResource(id, *wrappedMTLLibrary);
   }
   return wrappedMTLRenderCommandEncoder;
+}
+
+template <typename SerialiserType>
+bool WrappedMTLCommandBuffer::Serialise_computeCommandEncoder(
+    SerialiserType &ser, WrappedMTLComputeCommandEncoder *encoder)
+{
+  SERIALISE_ELEMENT_LOCAL(CommandBuffer, this);
+  SERIALISE_ELEMENT_LOCAL(ComputeCommandEncoder, GetResID(encoder))
+      .TypedAs("MTLComputeCommandEncoder"_lit);
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+WrappedMTLComputeCommandEncoder *WrappedMTLCommandBuffer::computeCommandEncoder()
+{
+  MTL::ComputeCommandEncoder *real;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->computeCommandEncoder());
+  if(real == NULL)
+    return NULL;
+  WrappedMTLComputeCommandEncoder *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  wrapped->SetCommandBuffer(this);
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLCommandBuffer_computeCommandEncoder);
+    Serialise_computeCommandEncoder(ser, wrapped);
+    GetRecord(this)->AddChunk(scope.Get());
+    GetResourceManager()->AddResourceRecord(wrapped);
+  }
+  return wrapped;
+}
+
+template <typename SerialiserType>
+bool WrappedMTLCommandBuffer::Serialise_computeCommandEncoderWithDispatchType(
+    SerialiserType &ser, WrappedMTLComputeCommandEncoder *encoder, MTL::DispatchType dispatchType)
+{
+  SERIALISE_ELEMENT_LOCAL(CommandBuffer, this);
+  SERIALISE_ELEMENT_LOCAL(ComputeCommandEncoder, GetResID(encoder))
+      .TypedAs("MTLComputeCommandEncoder"_lit);
+  SERIALISE_ELEMENT(dispatchType).Important();
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+WrappedMTLComputeCommandEncoder *WrappedMTLCommandBuffer::computeCommandEncoderWithDispatchType(
+    MTL::DispatchType dispatchType)
+{
+  MTL::ComputeCommandEncoder *real;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->computeCommandEncoder(dispatchType));
+  if(real == NULL)
+    return NULL;
+  WrappedMTLComputeCommandEncoder *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  wrapped->SetCommandBuffer(this);
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLCommandBuffer_computeCommandEncoderWithDispatchType);
+    Serialise_computeCommandEncoderWithDispatchType(ser, wrapped, dispatchType);
+    GetRecord(this)->AddChunk(scope.Get());
+    GetResourceManager()->AddResourceRecord(wrapped);
+  }
+  return wrapped;
+}
+
+template <typename SerialiserType>
+bool WrappedMTLCommandBuffer::Serialise_computeCommandEncoderWithDescriptor(
+    SerialiserType &ser, WrappedMTLComputeCommandEncoder *encoder,
+    RDMTL::ComputePassDescriptor &descriptor)
+{
+  SERIALISE_ELEMENT_LOCAL(CommandBuffer, this);
+  SERIALISE_ELEMENT_LOCAL(ComputeCommandEncoder, GetResID(encoder))
+      .TypedAs("MTLComputeCommandEncoder"_lit);
+  SERIALISE_ELEMENT(descriptor).Important();
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+WrappedMTLComputeCommandEncoder *WrappedMTLCommandBuffer::computeCommandEncoderWithDescriptor(
+    RDMTL::ComputePassDescriptor &descriptor)
+{
+  MTL::ComputePassDescriptor *mtlDescriptor(descriptor);
+  MTL::ComputeCommandEncoder *real;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->computeCommandEncoder(mtlDescriptor));
+  mtlDescriptor->release();
+  if(real == NULL)
+    return NULL;
+  WrappedMTLComputeCommandEncoder *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  wrapped->SetCommandBuffer(this);
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLCommandBuffer_computeCommandEncoderWithDescriptor);
+    Serialise_computeCommandEncoderWithDescriptor(ser, wrapped, descriptor);
+    GetRecord(this)->AddChunk(scope.Get());
+    GetResourceManager()->AddResourceRecord(wrapped);
+  }
+  return wrapped;
 }
 
 template <typename SerialiserType>
@@ -318,13 +570,75 @@ void WrappedMTLCommandBuffer::waitUntilCompleted()
   }
 }
 
+void WrappedMTLCommandBuffer::ScheduledDrawablePresented(MTL::Drawable *drawable)
+{
+  if(drawable == NULL)
+    return;
+
+  // Starting a capture at a background present must happen before the application begins
+  // submitting the following frame. Ending an active capture waits for submitted work, so defer
+  // that path until this scheduled command buffer's completion handler runs.
+  if(!IsActiveCapturing(m_State))
+  {
+    m_Device->CaptureScheduledPresent(this, drawable);
+    return;
+  }
+
+  SCOPED_LOCK(m_ScheduledPresentLock);
+  if(m_ScheduledPresentedDrawable != NULL)
+  {
+    RDCWARN("A Metal command buffer presented more than one scheduled drawable");
+    m_ScheduledPresentedDrawable->release();
+  }
+  drawable->retain();
+  m_ScheduledPresentedDrawable = drawable;
+}
+
+void WrappedMTLCommandBuffer::CompleteScheduledPresent()
+{
+  MTL::Drawable *drawable = NULL;
+  {
+    SCOPED_LOCK(m_ScheduledPresentLock);
+    drawable = m_ScheduledPresentedDrawable;
+    m_ScheduledPresentedDrawable = NULL;
+  }
+
+  if(drawable != NULL)
+  {
+    m_Device->CaptureScheduledPresent(this, drawable);
+    drawable->release();
+  }
+}
+
 INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLCommandBuffer,
                                             WrappedMTLBlitCommandEncoder *encoder,
                                             blitCommandEncoder);
 INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLCommandBuffer,
+                                            WrappedMTLBlitCommandEncoder *encoder,
+                                            blitCommandEncoderWithDescriptor,
+                                            MTL::BlitPassDescriptor *descriptor);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLCommandBuffer,
                                             WrappedMTLRenderCommandEncoder *encoder,
                                             renderCommandEncoderWithDescriptor,
                                             RDMTL::RenderPassDescriptor &descriptor);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLCommandBuffer,
+                                            WrappedMTLComputeCommandEncoder *encoder,
+                                            computeCommandEncoder);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLCommandBuffer,
+                                            WrappedMTLComputeCommandEncoder *encoder,
+                                            computeCommandEncoderWithDispatchType,
+                                            MTL::DispatchType dispatchType);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLCommandBuffer,
+                                            WrappedMTLComputeCommandEncoder *encoder,
+                                            computeCommandEncoderWithDescriptor,
+                                            RDMTL::ComputePassDescriptor &descriptor);
+INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLCommandBuffer, void, pushDebugGroup,
+                                NS::String *string);
+INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLCommandBuffer, void, popDebugGroup);
+INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLCommandBuffer, void, encodeWaitForEvent,
+                                WrappedMTLEvent *event, uint64_t value);
+INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLCommandBuffer, void, encodeSignalEvent,
+                                WrappedMTLEvent *event, uint64_t value);
 INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLCommandBuffer, void, presentDrawable,
                                 WrappedMTLTexture *presentedImage);
 INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLCommandBuffer, void, commit);

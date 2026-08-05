@@ -263,6 +263,21 @@ enum class MetalChunk : uint32_t
   MTLBlitCommandEncoder_optimizeIndirectCommandBuffer,
   MTLBlitCommandEncoder_sampleCountersInBuffer,
   MTLBlitCommandEncoder_resolveCounters,
+  MTLResource_captureIdentity,
+  MTLComputeCommandEncoder_setLabel,
+  MTLComputeCommandEncoder_endEncoding,
+  MTLComputeCommandEncoder_pushDebugGroup,
+  MTLComputeCommandEncoder_popDebugGroup,
+  MTLComputeCommandEncoder_setComputePipelineState,
+  MTLComputeCommandEncoder_setBytes,
+  MTLComputeCommandEncoder_setBuffer,
+  MTLComputeCommandEncoder_setTexture,
+  MTLComputeCommandEncoder_setSamplerState,
+  MTLComputeCommandEncoder_dispatchThreadgroups,
+  MTLComputeCommandEncoder_dispatchThreads,
+  MTLComputeCommandEncoder_useResource,
+  MTLComputeCommandEncoder_updateFence,
+  MTLComputeCommandEncoder_waitForFence,
   Max
 };
 
@@ -305,10 +320,14 @@ DECLARE_REFLECTION_ENUM(MetalChunk);
 #define IsReplayingAndReading() (ser.IsReading() && IsReplayMode(m_Device->GetState()))
 
 #ifdef __OBJC__
-#define METAL_NOT_HOOKED()                                                            \
-  do                                                                                  \
-  {                                                                                   \
-    RDCFATAL("Metal %s %s not hooked", object_getClassName(self), sel_getName(_cmd)); \
+#define METAL_NOT_HOOKED()                                                           \
+  do                                                                                 \
+  {                                                                                  \
+    static bool warned = false;                                                      \
+    if(!warned)                                                                      \
+      RDCWARN("Metal %s %s is not captured; passing through to the real object",    \
+              object_getClassName(self), sel_getName(_cmd));                         \
+    warned = true;                                                                   \
   } while((void)0, 0)
 #endif
 
@@ -342,3 +361,20 @@ byte MakeWriteMask(MTL::ColorWriteMask mask);
 ResourceFormat MakeResourceFormat(MTL::PixelFormat mtlFormat);
 uint32_t GetByteSize(uint32_t width, uint32_t height, uint32_t depth, MTL::PixelFormat mtlFormat,
                      uint32_t mip);
+
+struct MetalTextureSubresourceLayout
+{
+  uint32_t mipLevel = 0;
+  uint32_t arraySlice = 0;
+  uint32_t width = 1;
+  uint32_t height = 1;
+  uint32_t depth = 1;
+  uint64_t rowPitch = 0;
+  uint64_t imagePitch = 0;
+  uint64_t dataOffset = 0;
+  uint64_t dataSize = 0;
+};
+
+rdcarray<MetalTextureSubresourceLayout> GetTextureSubresourceLayouts(
+    uint32_t width, uint32_t height, uint32_t depth, uint32_t mipCount, uint32_t arrayLength,
+    MTL::TextureType textureType, MTL::PixelFormat format);

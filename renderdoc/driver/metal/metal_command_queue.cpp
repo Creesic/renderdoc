@@ -25,6 +25,17 @@
 #include "metal_command_queue.h"
 #include "metal_command_buffer.h"
 #include "metal_device.h"
+#include "metal_residency_set.h"
+
+void WrappedMTLCommandQueue::AddResidencySet(WrappedMTLResidencySet *residencySet)
+{
+  if(residencySet == NULL || m_ResidencySets.indexOf(residencySet) >= 0)
+    return;
+  m_ResidencySets.push_back(residencySet);
+  MetalResourceRecord *queueRecord = GetRecord(this);
+  if(queueRecord)
+    queueRecord->AddParent(GetRecord(residencySet));
+}
 
 WrappedMTLCommandQueue::WrappedMTLCommandQueue(MTL::CommandQueue *realMTLCommandQueue,
                                                ResourceId objId, WrappedMTLDevice *wrappedMTLDevice)
@@ -71,6 +82,7 @@ WrappedMTLCommandBuffer *WrappedMTLCommandQueue::commandBuffer()
     MetalResourceRecord *bufferRecord =
         GetResourceManager()->AddResourceRecord(wrappedMTLCommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->AddParent(GetRecord(this));
     bufferRecord->cmdInfo = new MetalCmdBufferRecordingInfo(this);
   }
   else
@@ -82,5 +94,55 @@ WrappedMTLCommandBuffer *WrappedMTLCommandQueue::commandBuffer()
   return wrappedMTLCommandBuffer;
 }
 
+template <typename SerialiserType>
+bool WrappedMTLCommandQueue::Serialise_commandBufferWithUnretainedReferences(
+    SerialiserType &ser, WrappedMTLCommandBuffer *buffer)
+{
+  SERIALISE_ELEMENT_LOCAL(CommandQueue, this);
+  SERIALISE_ELEMENT_LOCAL(CommandBuffer, GetResID(buffer)).TypedAs("MTLCommandBuffer"_lit);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    // Native replay rebuilds this command buffer from the structured chunk stream.
+  }
+  return true;
+}
+
+WrappedMTLCommandBuffer *WrappedMTLCommandQueue::commandBufferWithUnretainedReferences()
+{
+  MTL::CommandBuffer *realMTLCommandBuffer;
+  SERIALISE_TIME_CALL(realMTLCommandBuffer = Unwrap(this)->commandBufferWithUnretainedReferences());
+  WrappedMTLCommandBuffer *wrappedMTLCommandBuffer;
+  ResourceId id = GetResourceManager()->WrapResource(ResourceId(), realMTLCommandBuffer,
+                                                     wrappedMTLCommandBuffer);
+  wrappedMTLCommandBuffer->SetCommandQueue(this);
+
+  if(IsCaptureMode(m_State))
+  {
+    Chunk *chunk = NULL;
+    {
+      CACHE_THREAD_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(MetalChunk::MTLCommandQueue_commandBufferWithUnretainedReferences);
+      Serialise_commandBufferWithUnretainedReferences(ser, wrappedMTLCommandBuffer);
+      chunk = scope.Get();
+    }
+    MetalResourceRecord *bufferRecord =
+        GetResourceManager()->AddResourceRecord(wrappedMTLCommandBuffer);
+    bufferRecord->AddChunk(chunk);
+    bufferRecord->AddParent(GetRecord(this));
+    bufferRecord->cmdInfo = new MetalCmdBufferRecordingInfo(this);
+  }
+  else
+  {
+    GetResourceManager()->AddResource(id, wrappedMTLCommandBuffer);
+  }
+
+  return wrappedMTLCommandBuffer;
+}
+
 INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLCommandQueue, WrappedMTLCommandBuffer *,
                                             commandBuffer);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLCommandQueue, WrappedMTLCommandBuffer *,
+                                            commandBufferWithUnretainedReferences);

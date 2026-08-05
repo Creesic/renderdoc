@@ -93,14 +93,12 @@
 
 - (void)pushDebugGroup:(NSString *)string
 {
-  METAL_NOT_HOOKED();
-  return [self.real pushDebugGroup:string];
+  GetWrapped(self)->pushDebugGroup((NS::String *)string);
 }
 
 - (void)popDebugGroup
 {
-  METAL_NOT_HOOKED();
-  return [self.real popDebugGroup];
+  GetWrapped(self)->popDebugGroup();
 }
 
 // MTLRenderCommandEncoder : based on the protocol defined in
@@ -115,8 +113,7 @@
                 length:(NSUInteger)length
                atIndex:(NSUInteger)index API_AVAILABLE(macos(10.11), ios(8.3))
 {
-  METAL_NOT_HOOKED();
-  return [self.real setVertexBytes:bytes length:length atIndex:index];
+  GetWrapped(self)->setVertexBytes(bytes, length, index);
 }
 
 - (void)setVertexBuffer:(nullable id<MTLBuffer>)buffer
@@ -286,14 +283,14 @@
 - (void)setViewports:(const MTLViewport[__nonnull])viewports
                count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(12.0), tvos(14.5))
 {
-  METAL_NOT_HOOKED();
-  return [self.real setViewports:viewports count:count];
+  rdcarray<MTL::Viewport> copied;
+  copied.assign((const MTL::Viewport *)viewports, count);
+  GetWrapped(self)->setViewports(copied);
 }
 
 - (void)setFrontFacingWinding:(MTLWinding)frontFacingWinding
 {
-  METAL_NOT_HOOKED();
-  return [self.real setFrontFacingWinding:frontFacingWinding];
+  GetWrapped(self)->setFrontFacingWinding((MTL::Winding)frontFacingWinding);
 }
 
 - (void)setVertexAmplificationCount:(NSUInteger)count
@@ -306,47 +303,42 @@
 
 - (void)setCullMode:(MTLCullMode)cullMode
 {
-  METAL_NOT_HOOKED();
-  return [self.real setCullMode:cullMode];
+  GetWrapped(self)->setCullMode((MTL::CullMode)cullMode);
 }
 
 - (void)setDepthClipMode:(MTLDepthClipMode)depthClipMode API_AVAILABLE(macos(10.11), ios(11.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real setDepthClipMode:depthClipMode];
+  GetWrapped(self)->setDepthClipMode((MTL::DepthClipMode)depthClipMode);
 }
 
 - (void)setDepthBias:(float)depthBias slopeScale:(float)slopeScale clamp:(float)clamp
 {
-  METAL_NOT_HOOKED();
-  return [self.real setDepthBias:depthBias slopeScale:slopeScale clamp:clamp];
+  GetWrapped(self)->setDepthBias(depthBias, slopeScale, clamp);
 }
 
 - (void)setScissorRect:(MTLScissorRect)rect
 {
-  METAL_NOT_HOOKED();
-  return [self.real setScissorRect:rect];
+  GetWrapped(self)->setScissorRect((MTL::ScissorRect &)rect);
 }
 
 - (void)setScissorRects:(const MTLScissorRect[__nonnull])scissorRects
                   count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(12.0), tvos(14.5))
 {
-  METAL_NOT_HOOKED();
-  return [self.real setScissorRects:scissorRects count:count];
+  rdcarray<MTL::ScissorRect> copied;
+  copied.assign((const MTL::ScissorRect *)scissorRects, count);
+  GetWrapped(self)->setScissorRects(copied);
 }
 
 - (void)setTriangleFillMode:(MTLTriangleFillMode)fillMode
 {
-  METAL_NOT_HOOKED();
-  return [self.real setTriangleFillMode:fillMode];
+  GetWrapped(self)->setTriangleFillMode((MTL::TriangleFillMode)fillMode);
 }
 
 - (void)setFragmentBytes:(const void *)bytes
                   length:(NSUInteger)length
                  atIndex:(NSUInteger)index API_AVAILABLE(macos(10.11), ios(8.3))
 {
-  METAL_NOT_HOOKED();
-  return [self.real setFragmentBytes:bytes length:length atIndex:index];
+  GetWrapped(self)->setFragmentBytes(bytes, length, index);
 }
 
 - (void)setFragmentBuffer:(nullable id<MTLBuffer>)buffer
@@ -385,8 +377,7 @@
 
 - (void)setFragmentSamplerState:(nullable id<MTLSamplerState>)sampler atIndex:(NSUInteger)index
 {
-  METAL_NOT_HOOKED();
-  return [self.real setFragmentSamplerState:sampler atIndex:index];
+  GetWrapped(self)->setFragmentSamplerState(GetWrapped(sampler), index);
 }
 
 - (void)setFragmentSamplerStates:(const id<MTLSamplerState> __nullable[__nonnull])samplers
@@ -471,14 +462,12 @@
 
 - (void)setDepthStencilState:(nullable id<MTLDepthStencilState>)depthStencilState
 {
-  METAL_NOT_HOOKED();
-  return [self.real setDepthStencilState:depthStencilState];
+  GetWrapped(self)->setDepthStencilState(GetWrapped(depthStencilState));
 }
 
 - (void)setStencilReferenceValue:(uint32_t)referenceValue
 {
-  METAL_NOT_HOOKED();
-  return [self.real setStencilReferenceValue:referenceValue];
+  GetWrapped(self)->setStencilReferenceValue(referenceValue);
 }
 
 - (void)setStencilFrontReferenceValue:(uint32_t)frontReferenceValue
@@ -816,13 +805,9 @@
             indexBufferOffset:(NSUInteger)indexBufferOffset
                 instanceCount:(NSUInteger)instanceCount
 {
-  METAL_NOT_HOOKED();
-  return [self.real drawIndexedPrimitives:primitiveType
-                               indexCount:indexCount
-                                indexType:indexType
-                              indexBuffer:indexBuffer
-                        indexBufferOffset:indexBufferOffset
-                            instanceCount:instanceCount];
+  GetWrapped(self)->drawIndexedPrimitives(
+      (MTL::PrimitiveType)primitiveType, indexCount, (MTL::IndexType)indexType,
+      GetWrapped((MTL::Buffer *)indexBuffer), indexBufferOffset, instanceCount);
 }
 
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType
@@ -831,12 +816,9 @@
                   indexBuffer:(id<MTLBuffer>)indexBuffer
             indexBufferOffset:(NSUInteger)indexBufferOffset
 {
-  METAL_NOT_HOOKED();
-  return [self.real drawIndexedPrimitives:primitiveType
-                               indexCount:indexCount
-                                indexType:indexType
-                              indexBuffer:indexBuffer
-                        indexBufferOffset:indexBufferOffset];
+  GetWrapped(self)->drawIndexedPrimitives(
+      (MTL::PrimitiveType)primitiveType, indexCount, (MTL::IndexType)indexType,
+      GetWrapped((MTL::Buffer *)indexBuffer), indexBufferOffset);
 }
 
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType
@@ -858,15 +840,10 @@
                    baseVertex:(NSInteger)baseVertex
                  baseInstance:(NSUInteger)baseInstance API_AVAILABLE(macos(10.11), ios(9.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real drawIndexedPrimitives:primitiveType
-                               indexCount:indexCount
-                                indexType:indexType
-                              indexBuffer:indexBuffer
-                        indexBufferOffset:indexBufferOffset
-                            instanceCount:instanceCount
-                               baseVertex:baseVertex
-                             baseInstance:baseInstance];
+  GetWrapped(self)->drawIndexedPrimitives(
+      (MTL::PrimitiveType)primitiveType, indexCount, (MTL::IndexType)indexType,
+      GetWrapped((MTL::Buffer *)indexBuffer), indexBufferOffset, instanceCount, baseVertex,
+      baseInstance);
 }
 
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType
@@ -908,15 +885,13 @@
 - (void)updateFence:(id<MTLFence>)fence
         afterStages:(MTLRenderStages)stages API_AVAILABLE(macos(10.13), ios(10.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real updateFence:fence afterStages:stages];
+  GetWrapped(self)->updateFence(GetWrapped(fence), (MTL::RenderStages)stages);
 }
 
 - (void)waitForFence:(id<MTLFence>)fence
         beforeStages:(MTLRenderStages)stages API_AVAILABLE(macos(10.13), ios(10.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real waitForFence:fence beforeStages:stages];
+  GetWrapped(self)->waitForFence(GetWrapped(fence), (MTL::RenderStages)stages);
 }
 
 - (void)setTessellationFactorBuffer:(nullable id<MTLBuffer>)buffer
@@ -1169,8 +1144,9 @@
 - (void)useResource:(id<MTLResource>)resource
               usage:(MTLResourceUsage)usage API_AVAILABLE(macos(10.13), ios(11.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real useResource:resource usage:usage];
+  GetWrapped(self)->useResource(
+      GetWrapped(resource), (MTL::ResourceUsage)usage,
+      (MTL::RenderStages)(MTL::RenderStageVertex | MTL::RenderStageFragment), false);
 }
 
 - (void)useResources:(const id<MTLResource> __nonnull[__nonnull])resources
@@ -1185,8 +1161,8 @@
               usage:(MTLResourceUsage)usage
              stages:(MTLRenderStages)stages API_AVAILABLE(macos(10.15), ios(13.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real useResource:resource usage:usage stages:stages];
+  GetWrapped(self)->useResource(GetWrapped(resource), (MTL::ResourceUsage)usage,
+                                (MTL::RenderStages)stages, true);
 }
 
 - (void)useResources:(const id<MTLResource> __nonnull[__nonnull])resources

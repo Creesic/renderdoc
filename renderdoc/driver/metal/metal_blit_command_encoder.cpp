@@ -23,7 +23,10 @@
  ******************************************************************************/
 
 #include "metal_blit_command_encoder.h"
+#include "metal_buffer.h"
 #include "metal_command_buffer.h"
+#include "metal_fence.h"
+#include "metal_texture.h"
 
 WrappedMTLBlitCommandEncoder::WrappedMTLBlitCommandEncoder(
     MTL::BlitCommandEncoder *realMTLBlitCommandEncoder, ResourceId objId,
@@ -32,7 +35,10 @@ WrappedMTLBlitCommandEncoder::WrappedMTLBlitCommandEncoder(
                        wrappedMTLDevice->GetStateRef())
 {
   if(realMTLBlitCommandEncoder && objId != ResourceId())
+  {
+    m_ObjCBridgeMirrorsRealOwnership = true;
     AllocateObjCBridge(this);
+  }
 }
 
 template <typename SerialiserType>
@@ -334,11 +340,14 @@ void WrappedMTLBlitCommandEncoder::copyFromBuffer(WrappedMTLBuffer *sourceBuffer
     {
       CACHE_THREAD_SERIALISER();
       SCOPED_SERIALISE_CHUNK(MetalChunk::MTLBlitCommandEncoder_copyFromBuffer_toBuffer);
-      Serialise_endEncoding(ser);
+      Serialise_copyFromBuffer(ser, sourceBuffer, sourceOffset, destinationBuffer,
+                               destinationOffset, size);
       chunk = scope.Get();
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(sourceBuffer), eFrameRef_Read);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(destinationBuffer), eFrameRef_PartialWrite);
   }
   else
   {
@@ -397,6 +406,9 @@ void WrappedMTLBlitCommandEncoder::copyFromBuffer(
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(sourceBuffer), eFrameRef_Read);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(destinationTexture),
+                                               eFrameRef_PartialWrite);
   }
   else
   {
@@ -454,6 +466,9 @@ void WrappedMTLBlitCommandEncoder::copyFromTexture(
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(sourceTexture), eFrameRef_Read);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(destinationTexture),
+                                               eFrameRef_PartialWrite);
   }
   else
   {
@@ -514,6 +529,8 @@ void WrappedMTLBlitCommandEncoder::copyFromTexture(
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(sourceTexture), eFrameRef_Read);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(destinationBuffer), eFrameRef_PartialWrite);
   }
   else
   {
@@ -556,6 +573,9 @@ void WrappedMTLBlitCommandEncoder::copyFromTexture(WrappedMTLTexture *sourceText
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(sourceTexture), eFrameRef_Read);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(destinationTexture),
+                                               eFrameRef_CompleteWrite);
   }
   else
   {
@@ -612,6 +632,9 @@ void WrappedMTLBlitCommandEncoder::copyFromTexture(WrappedMTLTexture *sourceText
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(sourceTexture), eFrameRef_Read);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(destinationTexture),
+                                               eFrameRef_PartialWrite);
   }
   else
   {
@@ -650,6 +673,7 @@ void WrappedMTLBlitCommandEncoder::generateMipmapsForTexture(WrappedMTLTexture *
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(texture), eFrameRef_PartialWrite);
   }
   else
   {
@@ -691,6 +715,7 @@ void WrappedMTLBlitCommandEncoder::fillBuffer(WrappedMTLBuffer *buffer, NS::Rang
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(buffer), eFrameRef_PartialWrite);
   }
   else
   {
@@ -702,8 +727,7 @@ template <typename SerialiserType>
 bool WrappedMTLBlitCommandEncoder::Serialise_updateFence(SerialiserType &ser, WrappedMTLFence *fence)
 {
   SERIALISE_ELEMENT_LOCAL(BlitCommandEncoder, this);
-  // TODO: when WrappedMTLFence exists
-  //  SERIALISE_ELEMENT(fence).Important();
+  SERIALISE_ELEMENT(fence).Important();
 
   SERIALISE_CHECK_READ_ERRORS();
 
@@ -711,15 +735,13 @@ bool WrappedMTLBlitCommandEncoder::Serialise_updateFence(SerialiserType &ser, Wr
   if(IsReplayingAndReading())
   {
   }
-  return false;
+  return true;
 }
 
 void WrappedMTLBlitCommandEncoder::updateFence(WrappedMTLFence *fence)
 {
   SERIALISE_TIME_CALL(Unwrap(this)->updateFence(Unwrap(fence)));
 
-  // TODO: when WrappedMTLFence exists
-  METAL_CAPTURE_NOT_IMPLEMENTED();
   if(IsCaptureMode(m_State))
   {
     Chunk *chunk = NULL;
@@ -731,6 +753,7 @@ void WrappedMTLBlitCommandEncoder::updateFence(WrappedMTLFence *fence)
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(fence), eFrameRef_PartialWrite);
   }
   else
   {
@@ -742,8 +765,7 @@ template <typename SerialiserType>
 bool WrappedMTLBlitCommandEncoder::Serialise_waitForFence(SerialiserType &ser, WrappedMTLFence *fence)
 {
   SERIALISE_ELEMENT_LOCAL(BlitCommandEncoder, this);
-  // TODO: when WrappedMTLFence exists
-  //  SERIALISE_ELEMENT(fence).Important();
+  SERIALISE_ELEMENT(fence).Important();
 
   SERIALISE_CHECK_READ_ERRORS();
 
@@ -751,15 +773,13 @@ bool WrappedMTLBlitCommandEncoder::Serialise_waitForFence(SerialiserType &ser, W
   if(IsReplayingAndReading())
   {
   }
-  return false;
+  return true;
 }
 
 void WrappedMTLBlitCommandEncoder::waitForFence(WrappedMTLFence *fence)
 {
   SERIALISE_TIME_CALL(Unwrap(this)->waitForFence(Unwrap(fence)));
 
-  // TODO: when WrappedMTLFence exists
-  METAL_CAPTURE_NOT_IMPLEMENTED();
   if(IsCaptureMode(m_State))
   {
     Chunk *chunk = NULL;
@@ -771,6 +791,7 @@ void WrappedMTLBlitCommandEncoder::waitForFence(WrappedMTLFence *fence)
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(fence), eFrameRef_Read);
   }
   else
   {
@@ -1185,6 +1206,7 @@ bool WrappedMTLBlitCommandEncoder::Serialise_sampleCountersInBuffer(
   SERIALISE_ELEMENT_LOCAL(BlitCommandEncoder, this);
   //  SERIALISE_ELEMENT(sampleBuffer).Important();
   SERIALISE_ELEMENT(sampleIndex);
+  SERIALISE_ELEMENT(barrier);
 
   SERIALISE_CHECK_READ_ERRORS();
 
@@ -1192,7 +1214,7 @@ bool WrappedMTLBlitCommandEncoder::Serialise_sampleCountersInBuffer(
   if(IsReplayingAndReading())
   {
   }
-  return false;
+  return true;
 }
 
 void WrappedMTLBlitCommandEncoder::sampleCountersInBuffer(WrappedMTLCounterSampleBuffer *sampleBuffer,
@@ -1201,8 +1223,6 @@ void WrappedMTLBlitCommandEncoder::sampleCountersInBuffer(WrappedMTLCounterSampl
   SERIALISE_TIME_CALL(
       Unwrap(this)->sampleCountersInBuffer(Unwrap(sampleBuffer), sampleIndex, barrier));
 
-  // TODO: when WrappedMTLCounterSampleBuffer exists
-  METAL_CAPTURE_NOT_IMPLEMENTED();
   if(IsCaptureMode(m_State))
   {
     Chunk *chunk = NULL;
@@ -1239,7 +1259,7 @@ bool WrappedMTLBlitCommandEncoder::Serialise_resolveCounters(
   if(IsReplayingAndReading())
   {
   }
-  return false;
+  return true;
 }
 
 void WrappedMTLBlitCommandEncoder::resolveCounters(WrappedMTLCounterSampleBuffer *sampleBuffer,
@@ -1250,8 +1270,6 @@ void WrappedMTLBlitCommandEncoder::resolveCounters(WrappedMTLCounterSampleBuffer
   SERIALISE_TIME_CALL(Unwrap(this)->resolveCounters(Unwrap(sampleBuffer), range,
                                                     Unwrap(destinationBuffer), destinationOffset));
 
-  // TODO: when WrappedMTLCounterSampleBuffer exists
-  METAL_CAPTURE_NOT_IMPLEMENTED();
   if(IsCaptureMode(m_State))
   {
     Chunk *chunk = NULL;
@@ -1263,6 +1281,8 @@ void WrappedMTLBlitCommandEncoder::resolveCounters(WrappedMTLCounterSampleBuffer
     }
     MetalResourceRecord *bufferRecord = GetRecord(m_CommandBuffer);
     bufferRecord->AddChunk(chunk);
+    bufferRecord->MarkResourceFrameReferenced(GetResID(destinationBuffer),
+                                               eFrameRef_PartialWrite);
   }
   else
   {

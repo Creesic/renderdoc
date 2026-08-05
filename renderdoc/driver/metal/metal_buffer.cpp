@@ -25,6 +25,7 @@
 #include "metal_buffer.h"
 #include "core/core.h"
 #include "metal_resources.h"
+#include "metal_texture.h"
 
 WrappedMTLBuffer::WrappedMTLBuffer(MTL::Buffer *realMTLBuffer, ResourceId objId,
                                    WrappedMTLDevice *wrappedMTLDevice)
@@ -51,6 +52,70 @@ void *WrappedMTLBuffer::contents()
     // TODO: implement RD MTL replay
   }
   return data;
+}
+
+template <typename SerialiserType>
+bool WrappedMTLBuffer::Serialise_newTextureWithDescriptor(
+    SerialiserType &ser, WrappedMTLTexture *texture, RDMTL::TextureDescriptor &descriptor,
+    NS::UInteger offset, NS::UInteger bytesPerRow)
+{
+  SERIALISE_ELEMENT_LOCAL(Buffer, this).Important();
+  SERIALISE_ELEMENT_LOCAL(Texture, GetResID(texture)).TypedAs("MTLTexture"_lit);
+  SERIALISE_ELEMENT(descriptor).Important();
+  SERIALISE_ELEMENT(offset);
+  SERIALISE_ELEMENT(bytesPerRow).Important();
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    MTL::TextureDescriptor *mtlDescriptor(descriptor);
+    MTL::Texture *real = Unwrap(Buffer)->newTexture(mtlDescriptor, offset, bytesPerRow);
+    mtlDescriptor->release();
+    if(real != NULL)
+    {
+      WrappedMTLTexture *wrapped;
+      GetResourceManager()->WrapResource(Texture, real, wrapped);
+      m_Device->AddResource(Texture, ResourceType::Texture, "Buffer-backed Texture");
+      m_Device->DerivedResource(Buffer, Texture);
+    }
+  }
+  return true;
+}
+
+WrappedMTLTexture *WrappedMTLBuffer::newTextureWithDescriptor(
+    RDMTL::TextureDescriptor &descriptor, NS::UInteger offset, NS::UInteger bytesPerRow)
+{
+  MTL::TextureDescriptor *mtlDescriptor(descriptor);
+  MTL::Texture *real = NULL;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->newTexture(mtlDescriptor, offset, bytesPerRow));
+  mtlDescriptor->release();
+  if(real == NULL)
+    return NULL;
+
+  WrappedMTLTexture *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  if(IsCaptureMode(m_State))
+  {
+    MetalResourceRecord *record = GetResourceManager()->AddResourceRecord(wrapped);
+    {
+      CACHE_THREAD_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(MetalChunk::MTLBuffer_newTextureWithDescriptor);
+      Serialise_newTextureWithDescriptor(ser, wrapped, descriptor, offset, bytesPerRow);
+      record->AddChunk(scope.Get());
+    }
+    {
+      CACHE_THREAD_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(MetalChunk::MTLResource_captureIdentity);
+      const uint64_t gpuResourceID = Unwrap(m_Device)->supportsFamily(MTL::GPUFamilyMetal3)
+                                         ? real->gpuResourceID()._impl
+                                         : 0;
+      m_Device->Serialise_ResourceIdentity(ser, GetResID(wrapped), eResTexture, 0, 0,
+                                           gpuResourceID);
+      record->AddChunk(scope.Get());
+    }
+    record->AddParent(GetRecord(this));
+  }
+  return wrapped;
 }
 
 template <typename SerialiserType>
@@ -148,5 +213,9 @@ bool WrappedMTLBuffer::Serialise_InternalModifyCPUContents(SerialiserType &ser, 
 }
 
 INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLBuffer, void, didModifyRange, NS::Range &);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLBuffer, WrappedMTLTexture *,
+                                            newTextureWithDescriptor,
+                                            RDMTL::TextureDescriptor &descriptor,
+                                            NS::UInteger offset, NS::UInteger bytesPerRow);
 INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLBuffer, void, InternalModifyCPUContents, uint64_t,
                                 uint64_t, MetalBufferInfo *);

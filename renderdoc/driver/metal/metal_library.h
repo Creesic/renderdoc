@@ -34,6 +34,9 @@ public:
 
   DECLARE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLFunction *, newFunctionWithName,
                                           NS::String *functionName);
+  DECLARE_FUNCTION_WITH_RETURN_SERIALISED(
+      WrappedMTLFunction *, newFunctionWithNameConstantValues, NS::String *functionName,
+      MTL::FunctionConstantValues *constantValues, NS::Error **error);
 
   enum
   {

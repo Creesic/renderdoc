@@ -50,7 +50,7 @@ bool WrappedMTLLibrary::Serialise_newFunctionWithName(SerialiserType &ser,
   {
     MTL::Function *realMTLFunction = Unwrap(Library)->newFunction(FunctionName);
     WrappedMTLFunction *wrappedMTLFunction;
-    GetResourceManager()->WrapResource(ResourceId(), realMTLFunction, wrappedMTLFunction);
+    GetResourceManager()->WrapResource(Function, realMTLFunction, wrappedMTLFunction);
     m_Device->AddResource(Function, ResourceType::Shader, "Function");
     m_Device->DerivedResource(Library, Function);
   }
@@ -86,5 +86,64 @@ WrappedMTLFunction *WrappedMTLLibrary::newFunctionWithName(NS::String *functionN
   return wrappedMTLFunction;
 }
 
+template <typename SerialiserType>
+bool WrappedMTLLibrary::Serialise_newFunctionWithNameConstantValues(
+    SerialiserType &ser, WrappedMTLFunction *function, NS::String *functionName,
+    MTL::FunctionConstantValues *constantValues, NS::Error **error)
+{
+  SERIALISE_ELEMENT_LOCAL(Library, this);
+  SERIALISE_ELEMENT_LOCAL(Function, GetResID(function)).TypedAs("MTLFunction"_lit);
+  SERIALISE_ELEMENT_LOCAL(FunctionName, functionName).Important();
+  bool hasDeclaredFunctionConstants = false;
+  if(ser.IsWriting() && function != NULL)
+  {
+    NS::Dictionary *constants = Unwrap(function)->functionConstantsDictionary();
+    hasDeclaredFunctionConstants = constants != NULL && constants->count() != 0;
+  }
+  SERIALISE_ELEMENT(hasDeclaredFunctionConstants).Important();
+  (void)constantValues;
+  (void)error;
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading() && !hasDeclaredFunctionConstants)
+  {
+    MTL::Function *real = Unwrap(Library)->newFunction(functionName);
+    if(real != NULL)
+    {
+      WrappedMTLFunction *wrapped;
+      GetResourceManager()->WrapResource(Function, real, wrapped);
+      m_Device->AddResource(Function, ResourceType::Shader, "Function");
+      m_Device->DerivedResource(Library, Function);
+    }
+  }
+  return true;
+}
+
+WrappedMTLFunction *WrappedMTLLibrary::newFunctionWithNameConstantValues(
+    NS::String *functionName, MTL::FunctionConstantValues *constantValues, NS::Error **error)
+{
+  MTL::Function *real = NULL;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->newFunction(functionName, constantValues, error));
+  if(real == NULL)
+    return NULL;
+
+  WrappedMTLFunction *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLLibrary_newFunctionWithName_constantValues);
+    Serialise_newFunctionWithNameConstantValues(ser, wrapped, functionName, constantValues, error);
+    MetalResourceRecord *record = GetResourceManager()->AddResourceRecord(wrapped);
+    record->AddChunk(scope.Get());
+    record->AddParent(GetRecord(this));
+  }
+  return wrapped;
+}
+
 INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLLibrary, WrappedMTLFunction *function,
                                             newFunctionWithName, NS::String *functionName);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(
+    WrappedMTLLibrary, WrappedMTLFunction *function, newFunctionWithNameConstantValues,
+    NS::String *functionName, MTL::FunctionConstantValues *constantValues, NS::Error **error);

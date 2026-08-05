@@ -808,8 +808,14 @@ void GetHookingEnvMods(rdcarray<EnvironmentModification> &modifications, const C
       EnvironmentModification(EnvMod::Set, EnvSep::NoSep, "RENDERDOC_CAPFILE", capturefile));
   modifications.push_back(
       EnvironmentModification(EnvMod::Set, EnvSep::NoSep, "RENDERDOC_CAPOPTS", optstr));
+  rdcstr debugLog = RDCGETLOGFILE();
+  // A developer build can inherit a logger path derived from the requested capture template. If
+  // that resolves to the frame's .rdc, debug writes race RDCFile::Create and prepend text to an
+  // otherwise valid binary capture. Keep target logging beside, but never inside, the capture.
+  if(!capturefile.empty() && (debugLog.empty() || debugLog.beginsWith(capturefile)))
+    debugLog = capturefile + ".log";
   modifications.push_back(EnvironmentModification(EnvMod::Set, EnvSep::NoSep,
-                                                  "RENDERDOC_DEBUG_LOG_FILE", RDCGETLOGFILE()));
+                                                  "RENDERDOC_DEBUG_LOG_FILE", debugLog));
 }
 
 void PreForkConfigureHooks()

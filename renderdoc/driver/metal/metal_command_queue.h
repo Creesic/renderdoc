@@ -27,6 +27,7 @@
 #include "metal_common.h"
 
 class WrappedMTLCommandBuffer;
+class WrappedMTLResidencySet;
 
 class WrappedMTLCommandQueue : public WrappedMTLObject
 {
@@ -35,6 +36,9 @@ public:
                          WrappedMTLDevice *wrappedMTLDevice);
 
   DECLARE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLCommandBuffer *, commandBuffer);
+  DECLARE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLCommandBuffer *,
+                                          commandBufferWithUnretainedReferences);
+  void AddResidencySet(WrappedMTLResidencySet *residencySet);
 
   enum
   {
@@ -42,4 +46,5 @@ public:
   };
 
 private:
+  rdcarray<WrappedMTLResidencySet *> m_ResidencySets;
 };

@@ -31,3 +31,133 @@ WrappedMTLTexture::WrappedMTLTexture(MTL::Texture *realMTLTexture, ResourceId ob
 {
   AllocateObjCBridge(this);
 }
+
+void WrappedMTLTexture::MarkDirty()
+{
+  if(IsCaptureMode(m_State))
+    GetResourceManager()->MarkDirtyResource(m_ID);
+}
+
+template <typename SerialiserType>
+bool WrappedMTLTexture::Serialise_newTextureView(
+    SerialiserType &ser, WrappedMTLTexture *textureView, MetalChunk variant,
+    MTL::PixelFormat pixelFormat, MTL::TextureType textureType, NS::Range levelRange,
+    NS::Range sliceRange, MTL::TextureSwizzleChannels swizzle)
+{
+  SERIALISE_ELEMENT_LOCAL(Texture, this).Important();
+  SERIALISE_ELEMENT_LOCAL(TextureView, GetResID(textureView)).TypedAs("MTLTexture"_lit);
+  SERIALISE_ELEMENT(variant);
+  SERIALISE_ELEMENT(pixelFormat).Important();
+  SERIALISE_ELEMENT(textureType);
+  SERIALISE_ELEMENT(levelRange);
+  SERIALISE_ELEMENT(sliceRange);
+  SERIALISE_ELEMENT(swizzle);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    MTL::Texture *parent = Unwrap(Texture);
+    MTL::Texture *real = NULL;
+    if(variant == MetalChunk::MTLTexture_newTextureViewWithPixelFormat)
+      real = parent->newTextureView(pixelFormat);
+    else if(variant == MetalChunk::MTLTexture_newTextureViewWithPixelFormat_subset)
+      real = parent->newTextureView(pixelFormat, textureType, levelRange, sliceRange);
+    else
+      real = parent->newTextureView(pixelFormat, textureType, levelRange, sliceRange, swizzle);
+
+    WrappedMTLTexture *wrapped;
+    GetResourceManager()->WrapResource(TextureView, real, wrapped);
+    m_Device->AddResource(TextureView, ResourceType::Texture, "Texture View");
+    m_Device->DerivedResource(Texture, TextureView);
+  }
+  return true;
+}
+
+WrappedMTLTexture *WrappedMTLTexture::Common_NewTextureView(
+    MetalChunk variant, MTL::PixelFormat pixelFormat, MTL::TextureType textureType,
+    NS::Range levelRange, NS::Range sliceRange, MTL::TextureSwizzleChannels swizzle)
+{
+  MTL::Texture *real = NULL;
+  if(variant == MetalChunk::MTLTexture_newTextureViewWithPixelFormat)
+  {
+    SERIALISE_TIME_CALL(real = Unwrap(this)->newTextureView(pixelFormat));
+  }
+  else if(variant == MetalChunk::MTLTexture_newTextureViewWithPixelFormat_subset)
+  {
+    SERIALISE_TIME_CALL(
+        real = Unwrap(this)->newTextureView(pixelFormat, textureType, levelRange, sliceRange));
+  }
+  else
+  {
+    SERIALISE_TIME_CALL(real = Unwrap(this)->newTextureView(pixelFormat, textureType, levelRange,
+                                                           sliceRange, swizzle));
+  }
+
+  if(real == NULL)
+    return NULL;
+
+  WrappedMTLTexture *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  if(IsCaptureMode(m_State))
+  {
+    MetalResourceRecord *record = GetResourceManager()->AddResourceRecord(wrapped);
+    {
+      CACHE_THREAD_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(variant);
+      Serialise_newTextureView(ser, wrapped, variant, pixelFormat, textureType, levelRange,
+                               sliceRange, swizzle);
+      record->AddChunk(scope.Get());
+    }
+    {
+      CACHE_THREAD_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(MetalChunk::MTLResource_captureIdentity);
+      const uint64_t gpuResourceID = Unwrap(m_Device)->supportsFamily(MTL::GPUFamilyMetal3)
+                                         ? real->gpuResourceID()._impl
+                                         : 0;
+      m_Device->Serialise_ResourceIdentity(ser, GetResID(wrapped), eResTexture, 0, 0,
+                                           gpuResourceID);
+      record->AddChunk(scope.Get());
+    }
+    record->AddParent(GetRecord(this));
+  }
+  return wrapped;
+}
+
+WrappedMTLTexture *WrappedMTLTexture::newTextureViewWithPixelFormat(MTL::PixelFormat pixelFormat)
+{
+  return Common_NewTextureView(
+      MetalChunk::MTLTexture_newTextureViewWithPixelFormat, pixelFormat, Unwrap(this)->textureType(),
+      NS::Range::Make(0, Unwrap(this)->mipmapLevelCount()),
+      NS::Range::Make(0, Unwrap(this)->arrayLength()),
+      {MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue,
+       MTL::TextureSwizzleAlpha});
+}
+
+WrappedMTLTexture *WrappedMTLTexture::newTextureViewWithPixelFormat(
+    MTL::PixelFormat pixelFormat, MTL::TextureType textureType, NS::Range levelRange,
+    NS::Range sliceRange)
+{
+  return Common_NewTextureView(
+      MetalChunk::MTLTexture_newTextureViewWithPixelFormat_subset, pixelFormat, textureType,
+      levelRange, sliceRange,
+      {MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen, MTL::TextureSwizzleBlue,
+       MTL::TextureSwizzleAlpha});
+}
+
+WrappedMTLTexture *WrappedMTLTexture::newTextureViewWithPixelFormat(
+    MTL::PixelFormat pixelFormat, MTL::TextureType textureType, NS::Range levelRange,
+    NS::Range sliceRange, MTL::TextureSwizzleChannels swizzle)
+{
+  return Common_NewTextureView(MetalChunk::MTLTexture_newTextureViewWithPixelFormat_subset_swizzle,
+                               pixelFormat, textureType, levelRange, sliceRange, swizzle);
+}
+
+template bool WrappedMTLTexture::Serialise_newTextureView(
+    ReadSerialiser &ser, WrappedMTLTexture *textureView, MetalChunk variant,
+    MTL::PixelFormat pixelFormat, MTL::TextureType textureType, NS::Range levelRange,
+    NS::Range sliceRange, MTL::TextureSwizzleChannels swizzle);
+template bool WrappedMTLTexture::Serialise_newTextureView(
+    WriteSerialiser &ser, WrappedMTLTexture *textureView, MetalChunk variant,
+    MTL::PixelFormat pixelFormat, MTL::TextureType textureType, NS::Range levelRange,
+    NS::Range sliceRange, MTL::TextureSwizzleChannels swizzle);

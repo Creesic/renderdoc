@@ -34,6 +34,10 @@ class AppleTraceReplayDriver final : public IReplayDriver
 public:
   explicit AppleTraceReplayDriver(const MetalTrace::Manifest &manifest,
                                   AppleTraceSession *ownedSession = NULL);
+  AppleTraceReplayDriver(const MetalTrace::Manifest &manifest, MetalTrace::Index &&index,
+                         std::map<uint64_t, bytebuf> &&nativeBufferData,
+                         std::map<uint64_t, bytebuf> &&nativeTextureData,
+                         SDFile &structuredFile);
 
   void CancelReplayWork();
 
@@ -86,7 +90,9 @@ public:
                               MeshDataStage stage) override
   {
     MeshFormat ret;
-    ret.status = "Post-VS data is unavailable for read-only Apple GPU Trace inspection";
+    ret.status = m_Manifest.header.sourceKind == MetalTrace::SourceKind::NativeMetal
+                     ? rdcstr("Post-VS data is unavailable until native Metal replay is implemented")
+                     : rdcstr("Post-VS data is unavailable for read-only Apple GPU Trace inspection");
     return ret;
   }
   void GetBufferData(ResourceId buff, uint64_t offset, uint64_t len, bytebuf &retData) override;
@@ -215,6 +221,9 @@ private:
 
   MetalTrace::Manifest m_Manifest;
   MetalTrace::Index m_Index;
+  bool m_IndexPreloaded = false;
+  std::map<uint64_t, bytebuf> m_NativeBufferData;
+  std::map<uint64_t, bytebuf> m_NativeTextureData;
   ResourceId m_ResourceID;
   rdcarray<ResourceDescription> m_Resources;
   rdcarray<BufferDescription> m_Buffers;
@@ -233,8 +242,12 @@ private:
   std::map<ResourceId, ResourceId> m_ProxyBuffers;
   std::map<ResourceId, bytebuf> m_TexturePreviewData;
   std::map<ResourceId, rdcstr> m_TexturePreviewErrors;
+  std::map<ResourceId, rdcstr> m_TexturePreviewReportedErrors;
   rdcarray<DebugMessage> m_DebugMessages;
   std::map<uint32_t, MetalPipe::VertexInput> m_EventVertexInputs;
+  std::map<uint32_t, MetalPipe::DepthStencil> m_EventDepthStencil;
+  rdcstr m_NativeReplayError;
+  uint32_t m_LastNativeReplayDrawCount = ~0U;
   FrameRecord m_FrameRecord;
   SDFile *m_StructuredFile = NULL;
   AppleTraceSession *m_Session = NULL;

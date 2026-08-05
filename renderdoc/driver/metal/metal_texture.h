@@ -32,10 +32,30 @@ public:
   WrappedMTLTexture(MTL::Texture *realMTLTexture, ResourceId objId,
                     WrappedMTLDevice *wrappedMTLDevice);
 
+  void MarkDirty();
+
+  WrappedMTLTexture *newTextureViewWithPixelFormat(MTL::PixelFormat pixelFormat);
+  WrappedMTLTexture *newTextureViewWithPixelFormat(MTL::PixelFormat pixelFormat,
+                                                   MTL::TextureType textureType,
+                                                   NS::Range levelRange, NS::Range sliceRange);
+  WrappedMTLTexture *newTextureViewWithPixelFormat(
+      MTL::PixelFormat pixelFormat, MTL::TextureType textureType, NS::Range levelRange,
+      NS::Range sliceRange, MTL::TextureSwizzleChannels swizzle);
+
+  template <typename SerialiserType>
+  bool Serialise_newTextureView(SerialiserType &ser, WrappedMTLTexture *textureView,
+                                MetalChunk variant, MTL::PixelFormat pixelFormat,
+                                MTL::TextureType textureType, NS::Range levelRange,
+                                NS::Range sliceRange, MTL::TextureSwizzleChannels swizzle);
+
   enum
   {
     TypeEnum = eResTexture
   };
 
 private:
+  WrappedMTLTexture *Common_NewTextureView(MetalChunk variant, MTL::PixelFormat pixelFormat,
+                                           MTL::TextureType textureType, NS::Range levelRange,
+                                           NS::Range sliceRange,
+                                           MTL::TextureSwizzleChannels swizzle);
 };

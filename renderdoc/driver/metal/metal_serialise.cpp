@@ -26,12 +26,18 @@
 #include "metal_buffer.h"
 #include "metal_command_buffer.h"
 #include "metal_command_queue.h"
+#include "metal_compute_command_encoder.h"
+#include "metal_compute_pipeline_state.h"
 #include "metal_device.h"
+#include "metal_depth_stencil_state.h"
+#include "metal_event.h"
 #include "metal_function.h"
+#include "metal_fence.h"
 #include "metal_library.h"
 #include "metal_manager.h"
 #include "metal_render_command_encoder.h"
 #include "metal_render_pipeline_state.h"
+#include "metal_sampler_state.h"
 #include "metal_resources.h"
 #include "metal_texture.h"
 #include "metal_types.h"
@@ -85,7 +91,7 @@ template <typename SerialiserType>
 void DoSerialise(SerialiserType &ser, NS::String *&el)
 {
   rdcstr rdcStr;
-  if(el)
+  if(ser.IsWriting() && el)
   {
     rdcStr = el->utf8String();
   }
@@ -131,6 +137,15 @@ void DoSerialise(SerialiserType &ser, MTL::Viewport &el)
   SERIALISE_MEMBER(height);
   SERIALISE_MEMBER(znear);
   SERIALISE_MEMBER(zfar);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, MTL::ScissorRect &el)
+{
+  SERIALISE_MEMBER(x);
+  SERIALISE_MEMBER(y);
+  SERIALISE_MEMBER(width);
+  SERIALISE_MEMBER(height);
 }
 
 template <typename SerialiserType>
@@ -181,6 +196,49 @@ void DoSerialise(SerialiserType &ser, RDMTL::TextureDescriptor &el)
   SERIALISE_MEMBER(usage);
   SERIALISE_MEMBER(allowGPUOptimizedContents);
   SERIALISE_MEMBER(swizzle);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, RDMTL::StencilDescriptor &el)
+{
+  SERIALISE_MEMBER(stencilCompareFunction);
+  SERIALISE_MEMBER(stencilFailureOperation);
+  SERIALISE_MEMBER(depthFailureOperation);
+  SERIALISE_MEMBER(depthStencilPassOperation);
+  SERIALISE_MEMBER(readMask);
+  SERIALISE_MEMBER(writeMask);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, RDMTL::DepthStencilDescriptor &el)
+{
+  SERIALISE_MEMBER(label);
+  SERIALISE_MEMBER(depthCompareFunction);
+  SERIALISE_MEMBER(depthWriteEnabled);
+  SERIALISE_MEMBER(hasFrontFaceStencil);
+  SERIALISE_MEMBER(frontFaceStencil);
+  SERIALISE_MEMBER(hasBackFaceStencil);
+  SERIALISE_MEMBER(backFaceStencil);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, RDMTL::SamplerDescriptor &el)
+{
+  SERIALISE_MEMBER(label);
+  SERIALISE_MEMBER(minFilter);
+  SERIALISE_MEMBER(magFilter);
+  SERIALISE_MEMBER(mipFilter);
+  SERIALISE_MEMBER(maxAnisotropy);
+  SERIALISE_MEMBER(sAddressMode);
+  SERIALISE_MEMBER(tAddressMode);
+  SERIALISE_MEMBER(rAddressMode);
+  SERIALISE_MEMBER(borderColor);
+  SERIALISE_MEMBER(normalizedCoordinates);
+  SERIALISE_MEMBER(lodMinClamp);
+  SERIALISE_MEMBER(lodMaxClamp);
+  SERIALISE_MEMBER(lodAverage);
+  SERIALISE_MEMBER(compareFunction);
+  SERIALISE_MEMBER(supportArgumentBuffers);
 }
 
 template <typename SerialiserType>
@@ -421,10 +479,14 @@ INSTANTIATE_SERIALISE_TYPE(MTL::TextureSwizzleChannels);
 INSTANTIATE_SERIALISE_TYPE(MTL::ClearColor);
 INSTANTIATE_SERIALISE_TYPE(MTL::SamplePosition);
 INSTANTIATE_SERIALISE_TYPE(MTL::Viewport);
+INSTANTIATE_SERIALISE_TYPE(MTL::ScissorRect);
 INSTANTIATE_SERIALISE_TYPE(MTL::Origin);
 INSTANTIATE_SERIALISE_TYPE(MTL::Region);
 INSTANTIATE_SERIALISE_TYPE(MTL::Size);
 INSTANTIATE_SERIALISE_TYPE(RDMTL::TextureDescriptor);
+INSTANTIATE_SERIALISE_TYPE(RDMTL::StencilDescriptor);
+INSTANTIATE_SERIALISE_TYPE(RDMTL::DepthStencilDescriptor);
+INSTANTIATE_SERIALISE_TYPE(RDMTL::SamplerDescriptor);
 INSTANTIATE_SERIALISE_TYPE(RDMTL::RenderPipelineColorAttachmentDescriptor);
 INSTANTIATE_SERIALISE_TYPE(RDMTL::PipelineBufferDescriptor);
 INSTANTIATE_SERIALISE_TYPE(RDMTL::VertexAttributeDescriptor);

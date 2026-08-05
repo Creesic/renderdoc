@@ -23,6 +23,7 @@
  ******************************************************************************/
 
 #include "metal_command_queue.h"
+#include "metal_residency_set.h"
 #include "metal_types_bridge.h"
 
 // Bridge for MTLCommandQueue
@@ -80,6 +81,14 @@
   return id<MTLDevice>(GetWrapped(self)->GetDevice());
 }
 
+- (void)addResidencySet:(id<MTLResidencySet>)residencySet API_AVAILABLE(macos(15.0), ios(18.0))
+{
+  WrappedMTLResidencySet *wrapped =
+      GetWrappedResidencySet((__bridge void *)residencySet);
+  [self.real addResidencySet:(id<MTLResidencySet>)wrapped->GetReal()];
+  GetWrapped(self)->AddResidencySet(wrapped);
+}
+
 - (nullable id<MTLCommandBuffer>)commandBuffer
 {
   return id<MTLCommandBuffer>(GetWrapped(self)->commandBuffer());
@@ -94,8 +103,7 @@
 
 - (nullable id<MTLCommandBuffer>)commandBufferWithUnretainedReferences
 {
-  METAL_NOT_HOOKED();
-  return [self.real commandBufferWithUnretainedReferences];
+  return id<MTLCommandBuffer>(GetWrapped(self)->commandBufferWithUnretainedReferences());
 }
 
 #pragma clang diagnostic push

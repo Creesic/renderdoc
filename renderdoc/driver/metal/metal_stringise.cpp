@@ -31,7 +31,7 @@
 template <>
 rdcstr DoStringise(const MetalChunk &el)
 {
-  RDCCOMPILE_ASSERT((uint32_t)MetalChunk::Max == 1229, "Chunks changed without updating names");
+  RDCCOMPILE_ASSERT((uint32_t)MetalChunk::Max == 1244, "Chunks changed without updating names");
 
   BEGIN_ENUM_STRINGISE(MetalChunk)
   {
@@ -362,8 +362,6 @@ rdcstr DoStringise(const MetalChunk &el)
                                "MTLRenderCommandEncoder::dispatchThreadsPerTile");
     STRINGISE_ENUM_CLASS_NAMED(MTLRenderCommandEncoder_setThreadgroupMemoryLength,
                                "MTLRenderCommandEncoder::setThreadgroupMemoryLength");
-    STRINGISE_ENUM_CLASS_NAMED(MTLRenderCommandEncoder_useResource,
-                               "MTLRenderCommandEncoder::useResource");
     STRINGISE_ENUM_CLASS_NAMED(MTLRenderCommandEncoder_useResource_stages,
                                "MTLRenderCommandEncoder::useResource");
     STRINGISE_ENUM_CLASS_NAMED(MTLRenderCommandEncoder_useResources,
@@ -459,6 +457,37 @@ rdcstr DoStringise(const MetalChunk &el)
                                "MTLBlitCommandEncoder::sampleCountersInBuffer");
     STRINGISE_ENUM_CLASS_NAMED(MTLBlitCommandEncoder_resolveCounters,
                                "MTLBlitCommandEncoder::resolveCounters");
+    STRINGISE_ENUM_CLASS_NAMED(MTLResource_captureIdentity, "MTLResource::captureIdentity");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_setLabel,
+                               "MTLComputeCommandEncoder::setLabel");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_endEncoding,
+                               "MTLComputeCommandEncoder::endEncoding");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_pushDebugGroup,
+                               "MTLComputeCommandEncoder::pushDebugGroup");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_popDebugGroup,
+                               "MTLComputeCommandEncoder::popDebugGroup");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_setComputePipelineState,
+                               "MTLComputeCommandEncoder::setComputePipelineState");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_setBytes,
+                               "MTLComputeCommandEncoder::setBytes");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_setBuffer,
+                               "MTLComputeCommandEncoder::setBuffer");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_setTexture,
+                               "MTLComputeCommandEncoder::setTexture");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_setSamplerState,
+                               "MTLComputeCommandEncoder::setSamplerState");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_dispatchThreadgroups,
+                               "MTLComputeCommandEncoder::dispatchThreadgroups");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_dispatchThreads,
+                               "MTLComputeCommandEncoder::dispatchThreads");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_useResource,
+                               "MTLComputeCommandEncoder::useResource");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_updateFence,
+                               "MTLComputeCommandEncoder::updateFence");
+    STRINGISE_ENUM_CLASS_NAMED(MTLComputeCommandEncoder_waitForFence,
+                               "MTLComputeCommandEncoder::waitForFence");
+    STRINGISE_ENUM_CLASS_NAMED(MTLRenderCommandEncoder_useResource,
+                               "MTLRenderCommandEncoder::useResource");
     STRINGISE_ENUM_CLASS_NAMED(Max, "Max Chunk");
   }
   END_ENUM_STRINGISE()
@@ -1201,6 +1230,90 @@ rdcstr DoStringise(const MTL::AttributeFormat &el)
 }
 
 template <>
+rdcstr DoStringise(const MTL::CompareFunction &el)
+{
+  BEGIN_ENUM_STRINGISE(MTL::CompareFunction)
+  {
+    MTL_STRINGISE_ENUM(CompareFunctionNever);
+    MTL_STRINGISE_ENUM(CompareFunctionLess);
+    MTL_STRINGISE_ENUM(CompareFunctionEqual);
+    MTL_STRINGISE_ENUM(CompareFunctionLessEqual);
+    MTL_STRINGISE_ENUM(CompareFunctionGreater);
+    MTL_STRINGISE_ENUM(CompareFunctionNotEqual);
+    MTL_STRINGISE_ENUM(CompareFunctionGreaterEqual);
+    MTL_STRINGISE_ENUM(CompareFunctionAlways);
+  }
+  END_ENUM_STRINGISE()
+}
+
+template <>
+rdcstr DoStringise(const MTL::StencilOperation &el)
+{
+  BEGIN_ENUM_STRINGISE(MTL::StencilOperation)
+  {
+    MTL_STRINGISE_ENUM(StencilOperationKeep);
+    MTL_STRINGISE_ENUM(StencilOperationZero);
+    MTL_STRINGISE_ENUM(StencilOperationReplace);
+    MTL_STRINGISE_ENUM(StencilOperationIncrementClamp);
+    MTL_STRINGISE_ENUM(StencilOperationDecrementClamp);
+    MTL_STRINGISE_ENUM(StencilOperationInvert);
+    MTL_STRINGISE_ENUM(StencilOperationIncrementWrap);
+    MTL_STRINGISE_ENUM(StencilOperationDecrementWrap);
+  }
+  END_ENUM_STRINGISE()
+}
+
+template <>
+rdcstr DoStringise(const MTL::SamplerMinMagFilter &el)
+{
+  BEGIN_ENUM_STRINGISE(MTL::SamplerMinMagFilter)
+  {
+    MTL_STRINGISE_ENUM(SamplerMinMagFilterNearest);
+    MTL_STRINGISE_ENUM(SamplerMinMagFilterLinear);
+  }
+  END_ENUM_STRINGISE()
+}
+
+template <>
+rdcstr DoStringise(const MTL::SamplerMipFilter &el)
+{
+  BEGIN_ENUM_STRINGISE(MTL::SamplerMipFilter)
+  {
+    MTL_STRINGISE_ENUM(SamplerMipFilterNotMipmapped);
+    MTL_STRINGISE_ENUM(SamplerMipFilterNearest);
+    MTL_STRINGISE_ENUM(SamplerMipFilterLinear);
+  }
+  END_ENUM_STRINGISE()
+}
+
+template <>
+rdcstr DoStringise(const MTL::SamplerAddressMode &el)
+{
+  BEGIN_ENUM_STRINGISE(MTL::SamplerAddressMode)
+  {
+    MTL_STRINGISE_ENUM(SamplerAddressModeClampToEdge);
+    MTL_STRINGISE_ENUM(SamplerAddressModeMirrorClampToEdge);
+    MTL_STRINGISE_ENUM(SamplerAddressModeRepeat);
+    MTL_STRINGISE_ENUM(SamplerAddressModeMirrorRepeat);
+    MTL_STRINGISE_ENUM(SamplerAddressModeClampToZero);
+    MTL_STRINGISE_ENUM(SamplerAddressModeClampToBorderColor);
+  }
+  END_ENUM_STRINGISE()
+}
+
+template <>
+rdcstr DoStringise(const MTL::SamplerBorderColor &el)
+{
+  BEGIN_ENUM_STRINGISE(MTL::SamplerBorderColor)
+  {
+    MTL_STRINGISE_ENUM(SamplerBorderColorTransparentBlack);
+    MTL_STRINGISE_ENUM(SamplerBorderColorOpaqueBlack);
+    MTL_STRINGISE_ENUM(SamplerBorderColorOpaqueWhite);
+  }
+  END_ENUM_STRINGISE()
+}
+
+template <>
 rdcstr DoStringise(const MTL::StepFunction &el)
 {
   BEGIN_ENUM_STRINGISE(MTL::StepFunction)
@@ -1230,9 +1343,34 @@ rdcstr DoStringise(const MTL::DispatchType &el)
 }
 
 template <>
+rdcstr DoStringise(const MTL::PipelineOption &el)
+{
+  BEGIN_BITFIELD_STRINGISE(MTL::PipelineOption)
+  {
+    MTL_STRINGISE_BITFIELD_VALUE(PipelineOptionNone);
+    MTL_STRINGISE_BITFIELD_BIT(PipelineOptionArgumentInfo);
+    MTL_STRINGISE_BITFIELD_BIT(PipelineOptionBufferTypeInfo);
+    MTL_STRINGISE_BITFIELD_BIT(PipelineOptionFailOnBinaryArchiveMiss);
+  }
+  END_BITFIELD_STRINGISE()
+}
+
+template <>
+rdcstr DoStringise(const MTL::ResourceUsage &el)
+{
+  BEGIN_BITFIELD_STRINGISE(MTL::ResourceUsage)
+  {
+    MTL_STRINGISE_BITFIELD_BIT(ResourceUsageRead);
+    MTL_STRINGISE_BITFIELD_BIT(ResourceUsageWrite);
+    MTL_STRINGISE_BITFIELD_BIT(ResourceUsageSample);
+  }
+  END_BITFIELD_STRINGISE()
+}
+
+template <>
 rdcstr DoStringise(const MetalResourceType &el)
 {
-  RDCCOMPILE_ASSERT((uint32_t)MetalResourceType::eResMax == 11, "MetalResourceType changed");
+  RDCCOMPILE_ASSERT((uint32_t)MetalResourceType::eResMax == 18, "MetalResourceType changed");
   BEGIN_ENUM_STRINGISE(MetalResourceType);
   {
     STRINGISE_ENUM(eResUnknown);
@@ -1246,6 +1384,13 @@ rdcstr DoStringise(const MetalResourceType &el)
     STRINGISE_ENUM(eResTexture);
     STRINGISE_ENUM(eResRenderCommandEncoder);
     STRINGISE_ENUM(eResBlitCommandEncoder);
+    STRINGISE_ENUM(eResDepthStencilState);
+    STRINGISE_ENUM(eResSamplerState);
+    STRINGISE_ENUM(eResComputePipelineState);
+    STRINGISE_ENUM(eResComputeCommandEncoder);
+    STRINGISE_ENUM(eResFence);
+    STRINGISE_ENUM(eResEvent);
+    STRINGISE_ENUM(eResResidencySet);
   }
   END_ENUM_STRINGISE();
 }

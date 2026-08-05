@@ -23,6 +23,7 @@
  ******************************************************************************/
 
 #include "metal_device.h"
+#include "metal_residency_set.h"
 #include <Availability.h>
 #include "metal_command_queue.h"
 #include "metal_library.h"
@@ -254,8 +255,9 @@
 - (nullable id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:
     (MTLDepthStencilDescriptor *)descriptor
 {
-  METAL_NOT_HOOKED();
-  return [self.real newDepthStencilStateWithDescriptor:descriptor];
+  RDMTL::DepthStencilDescriptor rdDescriptor((MTL::DepthStencilDescriptor *)descriptor);
+  return id<MTLDepthStencilState>(
+      GetWrapped(self)->newDepthStencilStateWithDescriptor(rdDescriptor));
 }
 
 - (nullable id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor
@@ -289,8 +291,8 @@
 
 - (nullable id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor *)descriptor
 {
-  METAL_NOT_HOOKED();
-  return [self.real newSamplerStateWithDescriptor:descriptor];
+  RDMTL::SamplerDescriptor rdDescriptor((MTL::SamplerDescriptor *)descriptor);
+  return id<MTLSamplerState>(GetWrapped(self)->newSamplerStateWithDescriptor(rdDescriptor));
 }
 
 - (nullable id<MTLLibrary>)newDefaultLibrary
@@ -408,8 +410,8 @@
     newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction
                                   error:(__autoreleasing NSError **)error
 {
-  METAL_NOT_HOOKED();
-  return [self.real newComputePipelineStateWithFunction:computeFunction error:error];
+  return id<MTLComputePipelineState>(GetWrapped(self)->newComputePipelineStateWithFunction(
+      GetWrapped(computeFunction), (NS::Error **)error));
 }
 
 - (nullable id<MTLComputePipelineState>)
@@ -418,11 +420,12 @@
                              reflection:(MTLAutoreleasedComputePipelineReflection *__nullable)reflection
                                   error:(__autoreleasing NSError **)error
 {
-  METAL_NOT_HOOKED();
-  return [self.real newComputePipelineStateWithFunction:computeFunction
-                                                options:options
-                                             reflection:reflection
-                                                  error:error];
+  if(reflection)
+    *reflection = nil;
+  // The native replay surface currently preserves the executable function; reflection output is
+  // intentionally deferred until public compute pipeline state is populated.
+  return id<MTLComputePipelineState>(GetWrapped(self)->newComputePipelineStateWithFunction(
+      GetWrapped(computeFunction), (NS::Error **)error));
 }
 
 - (void)newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction
@@ -451,11 +454,12 @@
                                     error:(__autoreleasing NSError **)error
     API_AVAILABLE(macos(10.11), ios(9.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real newComputePipelineStateWithDescriptor:descriptor
-                                                  options:options
-                                               reflection:reflection
-                                                    error:error];
+  WrappedMTLDevice *device = GetWrapped(self);
+  RDMTL::ComputePipelineDescriptor rdDescriptor((MTL::ComputePipelineDescriptor *)descriptor);
+  if(reflection)
+    *reflection = nil;
+  return id<MTLComputePipelineState>(device->newComputePipelineStateWithDescriptor(
+      rdDescriptor, (MTL::PipelineOption)options, (NS::Error **)error));
 }
 
 - (void)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)descriptor
@@ -472,8 +476,23 @@
 
 - (nullable id<MTLFence>)newFence API_AVAILABLE(macos(10.13), ios(10.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real newFence];
+  return id<MTLFence>(GetWrapped(self)->newFence());
+}
+
+- (nullable id<MTLResidencySet>)newResidencySetWithDescriptor:
+    (MTLResidencySetDescriptor *)descriptor
+                                                        error:(NSError **)error
+    API_AVAILABLE(macos(15.0), ios(18.0))
+{
+  id<MTLResidencySet> real =
+      [self.real newResidencySetWithDescriptor:descriptor error:error];
+  if(real == nil)
+    return nil;
+  WrappedMTLResidencySet *wrapped = NULL;
+  GetWrapped(self)->GetResourceManager()->WrapResidencySet(
+      ResourceId(), (__bridge void *)real, wrapped);
+  GetWrapped(self)->GetResourceManager()->AddResourceRecord(wrapped);
+  return (id<MTLResidencySet>)wrapped;
 }
 
 - (BOOL)supportsFeatureSet:(MTLFeatureSet)featureSet
@@ -619,8 +638,7 @@
 
 - (nullable id<MTLEvent>)newEvent API_AVAILABLE(macos(10.14), ios(12.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real newEvent];
+  return id<MTLEvent>(GetWrapped(self)->newEvent());
 }
 
 - (nullable id<MTLSharedEvent>)newSharedEvent API_AVAILABLE(macos(10.14), ios(12.0))
@@ -935,7 +953,7 @@
 #endif
 
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_13_3
-- (NSUInteger)maximumConcurrentCompilationTaskCount API_AVAILABLE(macos(13.3))API_UNAVAILABLE(ios)
+- (NSUInteger)maximumConcurrentCompilationTaskCount API_AVAILABLE(macos(13.3), ios(26.0))
 {
   return GetWrapped(self)->maximumConcurrentCompilationTaskCount();
 }

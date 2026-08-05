@@ -306,13 +306,13 @@
           bytesPerRow:(NSUInteger)bytesPerRow
         bytesPerImage:(NSUInteger)bytesPerImage
 {
-  METAL_NOT_HOOKED();
   [self.real replaceRegion:region
                mipmapLevel:level
                      slice:slice
                  withBytes:pixelBytes
                bytesPerRow:bytesPerRow
              bytesPerImage:bytesPerImage];
+  GetWrapped(self)->MarkDirty();
 }
 
 - (void)getBytes:(void *)pixelBytes
@@ -329,14 +329,14 @@
             withBytes:(const void *)pixelBytes
           bytesPerRow:(NSUInteger)bytesPerRow
 {
-  METAL_NOT_HOOKED();
   [self.real replaceRegion:region mipmapLevel:level withBytes:pixelBytes bytesPerRow:bytesPerRow];
+  GetWrapped(self)->MarkDirty();
 }
 
 - (nullable id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat
 {
-  METAL_NOT_HOOKED();
-  return [self.real newTextureViewWithPixelFormat:pixelFormat];
+  return id<MTLTexture>(
+      GetWrapped(self)->newTextureViewWithPixelFormat((MTL::PixelFormat)pixelFormat));
 }
 
 - (nullable id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat
@@ -345,11 +345,10 @@
                                                   slices:(NSRange)sliceRange
     API_AVAILABLE(macos(10.11), ios(9.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real newTextureViewWithPixelFormat:pixelFormat
-                                      textureType:textureType
-                                           levels:levelRange
-                                           slices:sliceRange];
+  return id<MTLTexture>(GetWrapped(self)->newTextureViewWithPixelFormat(
+      (MTL::PixelFormat)pixelFormat, (MTL::TextureType)textureType,
+      NS::Range::Make(levelRange.location, levelRange.length),
+      NS::Range::Make(sliceRange.location, sliceRange.length)));
 }
 
 - (nullable MTLSharedTextureHandle *)newSharedTextureHandle API_AVAILABLE(macos(10.14), ios(13.0))
@@ -383,12 +382,16 @@
                                                  swizzle:(MTLTextureSwizzleChannels)swizzle
     API_AVAILABLE(macos(10.15), ios(13.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real newTextureViewWithPixelFormat:pixelFormat
-                                      textureType:textureType
-                                           levels:levelRange
-                                           slices:sliceRange
-                                          swizzle:swizzle];
+  MTL::TextureSwizzleChannels channels = {
+      (MTL::TextureSwizzle)swizzle.red,
+      (MTL::TextureSwizzle)swizzle.green,
+      (MTL::TextureSwizzle)swizzle.blue,
+      (MTL::TextureSwizzle)swizzle.alpha,
+  };
+  return id<MTLTexture>(GetWrapped(self)->newTextureViewWithPixelFormat(
+      (MTL::PixelFormat)pixelFormat, (MTL::TextureType)textureType,
+      NS::Range::Make(levelRange.location, levelRange.length),
+      NS::Range::Make(sliceRange.location, sliceRange.length), channels));
 }
 
 @end

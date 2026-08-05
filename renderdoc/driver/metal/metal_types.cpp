@@ -27,12 +27,18 @@
 #include "metal_buffer.h"
 #include "metal_command_buffer.h"
 #include "metal_command_queue.h"
+#include "metal_compute_command_encoder.h"
+#include "metal_compute_pipeline_state.h"
 #include "metal_device.h"
+#include "metal_depth_stencil_state.h"
+#include "metal_event.h"
 #include "metal_function.h"
+#include "metal_fence.h"
 #include "metal_library.h"
 #include "metal_manager.h"
 #include "metal_render_command_encoder.h"
 #include "metal_render_pipeline_state.h"
+#include "metal_sampler_state.h"
 #include "metal_resources.h"
 #include "metal_texture.h"
 
@@ -62,11 +68,13 @@ RDCCOMPILE_ASSERT(sizeof(NS::UInteger) == sizeof(std::uintptr_t),
     if(real)                                                                                      \
     {                                                                                             \
       objc_setAssociatedObject((id)real, objc, objc, OBJC_ASSOCIATION_RETAIN);                    \
-      ((MTL::CPPTYPE *)objc)->release();                                                          \
+      /* The association supplies the sole owning reference for this embedded proxy. */           \
+      wrappedCPP->m_ObjCBridgeAssociated = true;                                                  \
     }                                                                                             \
   }                                                                                               \
   void DeallocateObjCBridge(WrappedMTL##CPPTYPE *wrappedCPP)                                      \
   {                                                                                               \
+    wrappedCPP->m_ObjCBridgeAssociated = false;                                                   \
     wrappedCPP->m_ObjcBridge = NULL;                                                              \
     wrappedCPP->m_Real = NULL;                                                                    \
     wrappedCPP->GetResourceManager()->ReleaseWrappedResource(wrappedCPP);                         \
@@ -96,7 +104,7 @@ TrackedCAMetalLayer::TrackedCAMetalLayer(CA::MetalLayer *mtlLayer, WrappedMTLDev
     RDCFATAL("'%s' objc != m_ObjcBridge %p != %p", className, objc, &m_ObjcBridge);
   }
   objc_setAssociatedObject((id)m_mtlLayer, objc, objc, OBJC_ASSOCIATION_RETAIN);
-  ((NS::Object *)objc)->release();
+  // The association supplies the sole owning reference for this embedded proxy.
 }
 
 void TrackedCAMetalLayer::StopTracking()
@@ -107,6 +115,112 @@ void TrackedCAMetalLayer::StopTracking()
 
 namespace RDMTL
 {
+StencilDescriptor::StencilDescriptor(MTL::StencilDescriptor *objc)
+{
+  if(objc == NULL)
+    return;
+  stencilCompareFunction = objc->stencilCompareFunction();
+  stencilFailureOperation = objc->stencilFailureOperation();
+  depthFailureOperation = objc->depthFailureOperation();
+  depthStencilPassOperation = objc->depthStencilPassOperation();
+  readMask = objc->readMask();
+  writeMask = objc->writeMask();
+}
+
+void StencilDescriptor::CopyTo(MTL::StencilDescriptor *objc) const
+{
+  objc->setStencilCompareFunction(stencilCompareFunction);
+  objc->setStencilFailureOperation(stencilFailureOperation);
+  objc->setDepthFailureOperation(depthFailureOperation);
+  objc->setDepthStencilPassOperation(depthStencilPassOperation);
+  objc->setReadMask(readMask);
+  objc->setWriteMask(writeMask);
+}
+
+DepthStencilDescriptor::DepthStencilDescriptor(MTL::DepthStencilDescriptor *objc)
+{
+  if(objc == NULL)
+    return;
+  if(objc->label())
+    label = objc->label()->utf8String();
+  depthCompareFunction = objc->depthCompareFunction();
+  depthWriteEnabled = objc->depthWriteEnabled();
+  hasFrontFaceStencil = objc->frontFaceStencil() != NULL;
+  if(hasFrontFaceStencil)
+    frontFaceStencil = StencilDescriptor(objc->frontFaceStencil());
+  hasBackFaceStencil = objc->backFaceStencil() != NULL;
+  if(hasBackFaceStencil)
+    backFaceStencil = StencilDescriptor(objc->backFaceStencil());
+}
+
+DepthStencilDescriptor::operator MTL::DepthStencilDescriptor *() const
+{
+  MTL::DepthStencilDescriptor *objc = MTL::DepthStencilDescriptor::alloc()->init();
+  if(!label.empty())
+    objc->setLabel(NS::String::string(label.c_str(), NS::UTF8StringEncoding));
+  objc->setDepthCompareFunction(depthCompareFunction);
+  objc->setDepthWriteEnabled(depthWriteEnabled);
+  if(hasFrontFaceStencil)
+  {
+    MTL::StencilDescriptor *stencil = MTL::StencilDescriptor::alloc()->init();
+    frontFaceStencil.CopyTo(stencil);
+    objc->setFrontFaceStencil(stencil);
+    stencil->release();
+  }
+  if(hasBackFaceStencil)
+  {
+    MTL::StencilDescriptor *stencil = MTL::StencilDescriptor::alloc()->init();
+    backFaceStencil.CopyTo(stencil);
+    objc->setBackFaceStencil(stencil);
+    stencil->release();
+  }
+  return objc;
+}
+
+SamplerDescriptor::SamplerDescriptor(MTL::SamplerDescriptor *objc)
+{
+  if(objc == NULL)
+    return;
+  if(objc->label())
+    label = objc->label()->utf8String();
+  minFilter = objc->minFilter();
+  magFilter = objc->magFilter();
+  mipFilter = objc->mipFilter();
+  maxAnisotropy = objc->maxAnisotropy();
+  sAddressMode = objc->sAddressMode();
+  tAddressMode = objc->tAddressMode();
+  rAddressMode = objc->rAddressMode();
+  borderColor = objc->borderColor();
+  normalizedCoordinates = objc->normalizedCoordinates();
+  lodMinClamp = objc->lodMinClamp();
+  lodMaxClamp = objc->lodMaxClamp();
+  lodAverage = objc->lodAverage();
+  compareFunction = objc->compareFunction();
+  supportArgumentBuffers = objc->supportArgumentBuffers();
+}
+
+SamplerDescriptor::operator MTL::SamplerDescriptor *() const
+{
+  MTL::SamplerDescriptor *objc = MTL::SamplerDescriptor::alloc()->init();
+  if(!label.empty())
+    objc->setLabel(NS::String::string(label.c_str(), NS::UTF8StringEncoding));
+  objc->setMinFilter(minFilter);
+  objc->setMagFilter(magFilter);
+  objc->setMipFilter(mipFilter);
+  objc->setMaxAnisotropy(maxAnisotropy);
+  objc->setSAddressMode(sAddressMode);
+  objc->setTAddressMode(tAddressMode);
+  objc->setRAddressMode(rAddressMode);
+  objc->setBorderColor(borderColor);
+  objc->setNormalizedCoordinates(normalizedCoordinates);
+  objc->setLodMinClamp(lodMinClamp);
+  objc->setLodMaxClamp(lodMaxClamp);
+  objc->setLodAverage(lodAverage);
+  objc->setCompareFunction(compareFunction);
+  objc->setSupportArgumentBuffers(supportArgumentBuffers);
+  return objc;
+}
+
 static bool ValidData(MTL::VertexAttributeDescriptor *attribute)
 {
   if(attribute->format() == MTL::VertexFormatInvalid)
@@ -231,6 +345,25 @@ static void CopyToObjcArray(MTLARRAY_TYPE *to, rdcarray<RDMTL_TYPE> &from)
   CopyToObjcArray<MTL::TYPE##Array, RDMTL::TYPE>(objc->NAME(), NAME)
 
 TextureDescriptor::TextureDescriptor(MTL::TextureDescriptor *objc)
+{
+  textureType = objc->textureType();
+  pixelFormat = objc->pixelFormat();
+  width = objc->width();
+  height = objc->height();
+  depth = objc->depth();
+  mipmapLevelCount = objc->mipmapLevelCount();
+  sampleCount = objc->sampleCount();
+  arrayLength = objc->arrayLength();
+  resourceOptions = objc->resourceOptions();
+  cpuCacheMode = objc->cpuCacheMode();
+  storageMode = objc->storageMode();
+  hazardTrackingMode = objc->hazardTrackingMode();
+  usage = objc->usage();
+  allowGPUOptimizedContents = objc->allowGPUOptimizedContents();
+  swizzle = objc->swizzle();
+}
+
+TextureDescriptor::TextureDescriptor(MTL::Texture *objc)
 {
   textureType = objc->textureType();
   pixelFormat = objc->pixelFormat();
@@ -529,11 +662,18 @@ RenderPipelineDescriptor::operator MTL::RenderPipelineDescriptor *()
 }
 
 RenderPassAttachmentDescriptor::RenderPassAttachmentDescriptor(MTL::RenderPassAttachmentDescriptor *objc)
-    : texture(GetWrapped(objc->texture())),
+    : RenderPassAttachmentDescriptor(objc, NULL)
+{
+}
+
+RenderPassAttachmentDescriptor::RenderPassAttachmentDescriptor(
+    MTL::RenderPassAttachmentDescriptor *objc, WrappedMTLDevice *device)
+    : texture(device ? device->ResolveTexture(objc->texture()) : GetWrapped(objc->texture())),
       level(objc->level()),
       slice(objc->slice()),
       depthPlane(objc->depthPlane()),
-      resolveTexture(GetWrapped(objc->resolveTexture())),
+      resolveTexture(device ? device->ResolveTexture(objc->resolveTexture())
+                            : GetWrapped(objc->resolveTexture())),
       resolveLevel(objc->resolveLevel()),
       resolveSlice(objc->resolveSlice()),
       resolveDepthPlane(objc->resolveDepthPlane()),
@@ -560,7 +700,13 @@ void RenderPassAttachmentDescriptor::CopyTo(MTL::RenderPassAttachmentDescriptor 
 
 RenderPassColorAttachmentDescriptor::RenderPassColorAttachmentDescriptor(
     MTL::RenderPassColorAttachmentDescriptor *objc)
-    : RenderPassAttachmentDescriptor((MTL::RenderPassAttachmentDescriptor *)objc),
+    : RenderPassColorAttachmentDescriptor(objc, NULL)
+{
+}
+
+RenderPassColorAttachmentDescriptor::RenderPassColorAttachmentDescriptor(
+    MTL::RenderPassColorAttachmentDescriptor *objc, WrappedMTLDevice *device)
+    : RenderPassAttachmentDescriptor((MTL::RenderPassAttachmentDescriptor *)objc, device),
       clearColor(objc->clearColor())
 {
 }
@@ -573,7 +719,13 @@ void RenderPassColorAttachmentDescriptor::CopyTo(MTL::RenderPassColorAttachmentD
 
 RenderPassDepthAttachmentDescriptor::RenderPassDepthAttachmentDescriptor(
     MTL::RenderPassDepthAttachmentDescriptor *objc)
-    : RenderPassAttachmentDescriptor((MTL::RenderPassAttachmentDescriptor *)objc),
+    : RenderPassDepthAttachmentDescriptor(objc, NULL)
+{
+}
+
+RenderPassDepthAttachmentDescriptor::RenderPassDepthAttachmentDescriptor(
+    MTL::RenderPassDepthAttachmentDescriptor *objc, WrappedMTLDevice *device)
+    : RenderPassAttachmentDescriptor((MTL::RenderPassAttachmentDescriptor *)objc, device),
       clearDepth(objc->clearDepth()),
       depthResolveFilter(objc->depthResolveFilter())
 {
@@ -588,7 +740,13 @@ void RenderPassDepthAttachmentDescriptor::CopyTo(MTL::RenderPassDepthAttachmentD
 
 RenderPassStencilAttachmentDescriptor::RenderPassStencilAttachmentDescriptor(
     MTL::RenderPassStencilAttachmentDescriptor *objc)
-    : RenderPassAttachmentDescriptor((MTL::RenderPassAttachmentDescriptor *)objc),
+    : RenderPassStencilAttachmentDescriptor(objc, NULL)
+{
+}
+
+RenderPassStencilAttachmentDescriptor::RenderPassStencilAttachmentDescriptor(
+    MTL::RenderPassStencilAttachmentDescriptor *objc, WrappedMTLDevice *device)
+    : RenderPassAttachmentDescriptor((MTL::RenderPassAttachmentDescriptor *)objc, device),
       clearStencil(objc->clearStencil()),
       stencilResolveFilter(objc->stencilResolveFilter())
 {
@@ -624,8 +782,14 @@ void RenderPassSampleBufferAttachmentDescriptor::CopyTo(
 }
 
 RenderPassDescriptor::RenderPassDescriptor(MTL::RenderPassDescriptor *objc)
-    : depthAttachment(objc->depthAttachment()),
-      stencilAttachment(objc->stencilAttachment()),
+    : RenderPassDescriptor(objc, NULL)
+{
+}
+
+RenderPassDescriptor::RenderPassDescriptor(MTL::RenderPassDescriptor *objc,
+                                           WrappedMTLDevice *device)
+    : depthAttachment(objc->depthAttachment(), device),
+      stencilAttachment(objc->stencilAttachment(), device),
       visibilityResultBuffer(GetWrapped(objc->visibilityResultBuffer())),
       renderTargetArrayLength(objc->renderTargetArrayLength()),
       imageblockSampleLength(objc->imageblockSampleLength()),
@@ -638,8 +802,16 @@ RenderPassDescriptor::RenderPassDescriptor(MTL::RenderPassDescriptor *objc)
 // TODO: when WrappedRasterizationRateMap exists
 // rasterizationRateMap(objc->rasterizationRateMap())
 {
-  GETOBJCARRAY(RenderPassColorAttachmentDescriptor, MAX_RENDER_PASS_COLOR_ATTACHMENTS,
-               colorAttachments, ValidData);
+  MTL::RenderPassColorAttachmentDescriptorArray *attachments = objc->colorAttachments();
+  for(uint32_t i = 0; i < MAX_RENDER_PASS_COLOR_ATTACHMENTS; ++i)
+  {
+    MTL::RenderPassColorAttachmentDescriptor *attachment = attachments->object(i);
+    if(attachment && ValidData(attachment))
+    {
+      colorAttachments.resize_for_index(i);
+      colorAttachments[i] = RenderPassColorAttachmentDescriptor(attachment, device);
+    }
+  }
   size_t count = objc->getSamplePositions(NULL, 0);
   if(count)
   {

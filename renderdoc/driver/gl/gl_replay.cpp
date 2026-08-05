@@ -3759,6 +3759,14 @@ ResourceId GLReplay::CreateProxyTexture(const TextureDescription &templateTex)
   MakeCurrentReplayContext(m_DebugCtx);
 
   GLenum intFormat = MakeGLFormat(templateTex.format);
+
+  // GL_BGRA8_EXT is a GLES texture-storage format, not a valid desktop GL internal format.
+  // Store desktop BGRA proxies as RGBA8 and let the existing upload/swizzle path preserve their
+  // component order. Using GL_BGRA8_EXT here makes macOS reject both allocation and upload with
+  // GL_INVALID_ENUM, leaving an otherwise valid proxy permanently black.
+  if(!IsGLES && intFormat == eGL_BGRA8_EXT)
+    intFormat = eGL_RGBA8;
+
   bool isCompressed = IsCompressedFormat(intFormat);
 
   GLenum baseFormat = eGL_RGBA;
@@ -3917,6 +3925,10 @@ void GLReplay::SetProxyTextureData(ResourceId texid, const Subresource &sub, byt
                                    size_t dataSize)
 {
   WrappedOpenGL &drv = *m_pDriver;
+
+  // Proxy texture uploads can be driven by a non-OpenGL replay provider (for example Metal's
+  // local preview bridge), so don't rely on its caller having left one of our contexts current.
+  MakeCurrentReplayContext(m_DebugCtx);
 
   GLuint tex = m_pDriver->GetResourceManager()->GetResource(texid).name;
 

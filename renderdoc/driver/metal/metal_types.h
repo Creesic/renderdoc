@@ -28,6 +28,8 @@
 #include "official/metal-cpp.h"
 #include "serialise/serialiser.h"
 
+class WrappedMTLDevice;
+
 // TODO: use Metal Feature sets to determine these values at capture time
 const uint32_t MAX_RENDER_PASS_COLOR_ATTACHMENTS = 8;
 const uint32_t MAX_RENDER_PASS_BUFFER_ATTACHMENTS = 31;
@@ -48,10 +50,16 @@ const uint32_t MAX_COMPUTE_PASS_SAMPLE_BUFFER_ATTACHMENTS = 4;
   FUNC(Device);                          \
   FUNC(Function);                        \
   FUNC(Library);                         \
+  FUNC(DepthStencilState);               \
   FUNC(RenderPipelineState);             \
+  FUNC(SamplerState);                    \
+  FUNC(Fence);                           \
+  FUNC(Event);                           \
   FUNC(Texture);                         \
   FUNC(RenderCommandEncoder);            \
-  FUNC(BlitCommandEncoder);
+  FUNC(BlitCommandEncoder);              \
+  FUNC(ComputePipelineState);            \
+  FUNC(ComputeCommandEncoder);
 
 // These serialise overloads will fetch the ID during capture, serialise the ID
 // directly as-if it were the original type, then on replay load up the resource if available.
@@ -83,7 +91,6 @@ METALCPP_WRAPPED_PROTOCOLS(DECLARE_OBJC_HELPERS)
 
 // TODO: Wrapped types that need implementing
 #define METALCPP_UNIMPLEMENTED_WRAPPED_PROTOCOLS(FUNC) \
-  FUNC(Fence);                                         \
   FUNC(IndirectCommandBuffer);                         \
   FUNC(CounterSampleBuffer);
 
@@ -152,6 +159,7 @@ MTL_DECLARE_REFLECTION_TYPE(LoadAction);
 MTL_DECLARE_REFLECTION_TYPE(StoreAction);
 MTL_DECLARE_REFLECTION_TYPE(ClearColor);
 MTL_DECLARE_REFLECTION_TYPE(Viewport);
+MTL_DECLARE_REFLECTION_TYPE(ScissorRect);
 MTL_DECLARE_REFLECTION_TYPE(MultisampleDepthResolveFilter);
 MTL_DECLARE_REFLECTION_TYPE(MultisampleStencilResolveFilter);
 MTL_DECLARE_REFLECTION_TYPE(SamplePosition);
@@ -168,6 +176,14 @@ MTL_DECLARE_REFLECTION_TYPE(IndexType);
 MTL_DECLARE_REFLECTION_TYPE(StepFunction);
 MTL_DECLARE_REFLECTION_TYPE(AttributeFormat);
 MTL_DECLARE_REFLECTION_TYPE(DispatchType);
+MTL_DECLARE_REFLECTION_TYPE(PipelineOption);
+MTL_DECLARE_REFLECTION_TYPE(ResourceUsage);
+MTL_DECLARE_REFLECTION_TYPE(CompareFunction);
+MTL_DECLARE_REFLECTION_TYPE(StencilOperation);
+MTL_DECLARE_REFLECTION_TYPE(SamplerMinMagFilter);
+MTL_DECLARE_REFLECTION_TYPE(SamplerMipFilter);
+MTL_DECLARE_REFLECTION_TYPE(SamplerAddressMode);
+MTL_DECLARE_REFLECTION_TYPE(SamplerBorderColor);
 
 template <>
 inline rdcliteral TypeName<NS::Range>()
@@ -179,12 +195,62 @@ void DoSerialise(SerialiserType &ser, NS::Range &el);
 
 namespace RDMTL
 {
+struct StencilDescriptor
+{
+  StencilDescriptor() = default;
+  StencilDescriptor(MTL::StencilDescriptor *objc);
+  void CopyTo(MTL::StencilDescriptor *objc) const;
+  MTL::CompareFunction stencilCompareFunction = MTL::CompareFunctionAlways;
+  MTL::StencilOperation stencilFailureOperation = MTL::StencilOperationKeep;
+  MTL::StencilOperation depthFailureOperation = MTL::StencilOperationKeep;
+  MTL::StencilOperation depthStencilPassOperation = MTL::StencilOperationKeep;
+  uint32_t readMask = ~0U;
+  uint32_t writeMask = ~0U;
+};
+
+struct DepthStencilDescriptor
+{
+  DepthStencilDescriptor() = default;
+  DepthStencilDescriptor(MTL::DepthStencilDescriptor *objc);
+  explicit operator MTL::DepthStencilDescriptor *() const;
+  rdcstr label;
+  MTL::CompareFunction depthCompareFunction = MTL::CompareFunctionAlways;
+  bool depthWriteEnabled = false;
+  bool hasFrontFaceStencil = false;
+  StencilDescriptor frontFaceStencil;
+  bool hasBackFaceStencil = false;
+  StencilDescriptor backFaceStencil;
+};
+
+struct SamplerDescriptor
+{
+  SamplerDescriptor() = default;
+  SamplerDescriptor(MTL::SamplerDescriptor *objc);
+  explicit operator MTL::SamplerDescriptor *() const;
+  rdcstr label;
+  MTL::SamplerMinMagFilter minFilter = MTL::SamplerMinMagFilterNearest;
+  MTL::SamplerMinMagFilter magFilter = MTL::SamplerMinMagFilterNearest;
+  MTL::SamplerMipFilter mipFilter = MTL::SamplerMipFilterNotMipmapped;
+  NS::UInteger maxAnisotropy = 1;
+  MTL::SamplerAddressMode sAddressMode = MTL::SamplerAddressModeClampToEdge;
+  MTL::SamplerAddressMode tAddressMode = MTL::SamplerAddressModeClampToEdge;
+  MTL::SamplerAddressMode rAddressMode = MTL::SamplerAddressModeClampToEdge;
+  MTL::SamplerBorderColor borderColor = MTL::SamplerBorderColorTransparentBlack;
+  bool normalizedCoordinates = true;
+  float lodMinClamp = 0.0f;
+  float lodMaxClamp = FLT_MAX;
+  bool lodAverage = false;
+  MTL::CompareFunction compareFunction = MTL::CompareFunctionNever;
+  bool supportArgumentBuffers = false;
+};
+
 // MTLTextureDescriptor : based on the interface defined in
 // Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX12.1.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLTexture.h
 struct TextureDescriptor
 {
   TextureDescriptor() = default;
   TextureDescriptor(MTL::TextureDescriptor *objc);
+  TextureDescriptor(MTL::Texture *objc);
   explicit operator MTL::TextureDescriptor *();
   MTL::TextureType textureType = MTL::TextureType2D;
   MTL::PixelFormat pixelFormat = MTL::PixelFormatRGBA8Unorm;
@@ -380,6 +446,8 @@ struct RenderPassAttachmentDescriptor
   {
   }
   RenderPassAttachmentDescriptor(MTL::RenderPassAttachmentDescriptor *objc);
+  RenderPassAttachmentDescriptor(MTL::RenderPassAttachmentDescriptor *objc,
+                                 WrappedMTLDevice *device);
   void CopyTo(MTL::RenderPassAttachmentDescriptor *objc);
   WrappedMTLTexture *texture = NULL;
   NS::UInteger level = 0;
@@ -403,6 +471,8 @@ struct RenderPassColorAttachmentDescriptor : RenderPassAttachmentDescriptor
   {
   }
   RenderPassColorAttachmentDescriptor(MTL::RenderPassColorAttachmentDescriptor *objc);
+  RenderPassColorAttachmentDescriptor(MTL::RenderPassColorAttachmentDescriptor *objc,
+                                      WrappedMTLDevice *device);
   void CopyTo(MTL::RenderPassColorAttachmentDescriptor *objc);
   MTL::ClearColor clearColor = MTL::ClearColor::Make(0.0, 0.0, 0.0, 1.0);
 };
@@ -416,6 +486,8 @@ struct RenderPassDepthAttachmentDescriptor : RenderPassAttachmentDescriptor
   {
   }
   RenderPassDepthAttachmentDescriptor(MTL::RenderPassDepthAttachmentDescriptor *objc);
+  RenderPassDepthAttachmentDescriptor(MTL::RenderPassDepthAttachmentDescriptor *objc,
+                                      WrappedMTLDevice *device);
   void CopyTo(MTL::RenderPassDepthAttachmentDescriptor *objc);
   double clearDepth = 1.0;
   MTL::MultisampleDepthResolveFilter depthResolveFilter = MTL::MultisampleDepthResolveFilterSample0;
@@ -430,6 +502,8 @@ struct RenderPassStencilAttachmentDescriptor : RenderPassAttachmentDescriptor
   {
   }
   RenderPassStencilAttachmentDescriptor(MTL::RenderPassStencilAttachmentDescriptor *objc);
+  RenderPassStencilAttachmentDescriptor(MTL::RenderPassStencilAttachmentDescriptor *objc,
+                                        WrappedMTLDevice *device);
   void CopyTo(MTL::RenderPassStencilAttachmentDescriptor *objc);
   uint32_t clearStencil = 0;
   MTL::MultisampleStencilResolveFilter stencilResolveFilter =
@@ -457,6 +531,7 @@ struct RenderPassDescriptor
 {
   RenderPassDescriptor() = default;
   RenderPassDescriptor(MTL::RenderPassDescriptor *objc);
+  RenderPassDescriptor(MTL::RenderPassDescriptor *objc, WrappedMTLDevice *device);
   explicit operator MTL::RenderPassDescriptor *();
   rdcarray<RenderPassColorAttachmentDescriptor> colorAttachments;
   RenderPassDepthAttachmentDescriptor depthAttachment;
@@ -545,6 +620,9 @@ void DoSerialise(SerialiserType &ser, NS::String *&el);
   void DoSerialise(SerialiserType &ser, RDMTL::TYPE &el);
 
 RDMTL_DECLARE_REFLECTION_STRUCT(TextureDescriptor);
+RDMTL_DECLARE_REFLECTION_STRUCT(StencilDescriptor);
+RDMTL_DECLARE_REFLECTION_STRUCT(DepthStencilDescriptor);
+RDMTL_DECLARE_REFLECTION_STRUCT(SamplerDescriptor);
 RDMTL_DECLARE_REFLECTION_STRUCT(RenderPipelineColorAttachmentDescriptor);
 RDMTL_DECLARE_REFLECTION_STRUCT(PipelineBufferDescriptor);
 RDMTL_DECLARE_REFLECTION_STRUCT(VertexAttributeDescriptor);

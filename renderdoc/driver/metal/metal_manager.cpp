@@ -24,6 +24,18 @@
 
 #include "metal_manager.h"
 #include "metal_device.h"
+#include "metal_residency_set.h"
+
+ResourceId MetalResourceManager::WrapResidencySet(ResourceId id, void *obj,
+                                                  WrappedMTLResidencySet *&wrapped)
+{
+  RDCASSERT(obj != NULL);
+  if(id == ResourceId())
+    id = ResourceIDGen::GetNewUniqueID();
+  wrapped = new WrappedMTLResidencySet(obj, id, m_Device);
+  AddResource(id, wrapped);
+  return id;
+}
 
 bool MetalResourceManager::ResourceTypeRelease(WrappedResourceType res)
 {
@@ -56,4 +68,52 @@ void MetalResourceManager::Create_InitialState(ResourceId id, WrappedMTLObject *
 void MetalResourceManager::Apply_InitialState(WrappedMTLObject *live, MetalInitialContents &initial)
 {
   return m_Device->Apply_InitialState(live, initial);
+}
+
+rdcarray<ResourceId> MetalResourceManager::GetLiveBufferResourceIDs()
+{
+  rdcarray<ResourceId> buffers;
+
+  SCOPED_READLOCK(m_ResourceRecordLock);
+  buffers.reserve(m_ResourceRecords.size());
+  for(const auto &entry : m_ResourceRecords)
+  {
+    const MetalResourceRecord *record = entry.second;
+    if(record != NULL && !record->InternalResource && record->m_Type == eResBuffer)
+      buffers.push_back(entry.first);
+  }
+
+  return buffers;
+}
+
+rdcarray<ResourceId> MetalResourceManager::GetLiveTextureResourceIDs()
+{
+  rdcarray<ResourceId> textures;
+
+  SCOPED_READLOCK(m_ResourceRecordLock);
+  textures.reserve(m_ResourceRecords.size());
+  for(const auto &entry : m_ResourceRecords)
+  {
+    const MetalResourceRecord *record = entry.second;
+    if(record != NULL && !record->InternalResource && record->m_Type == eResTexture)
+      textures.push_back(entry.first);
+  }
+
+  return textures;
+}
+
+rdcarray<ResourceId> MetalResourceManager::GetLiveSamplerResourceIDs()
+{
+  rdcarray<ResourceId> samplers;
+
+  SCOPED_READLOCK(m_ResourceRecordLock);
+  samplers.reserve(m_ResourceRecords.size());
+  for(const auto &entry : m_ResourceRecords)
+  {
+    const MetalResourceRecord *record = entry.second;
+    if(record != NULL && !record->InternalResource && record->m_Type == eResSamplerState)
+      samplers.push_back(entry.first);
+  }
+
+  return samplers;
 }

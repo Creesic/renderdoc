@@ -61,6 +61,7 @@ enum class Capability : uint64_t
   Resources = 1ULL << 1,
   BufferFetch = 1ULL << 2,
   ExecutableReplay = 1ULL << 3,
+  WholeStreamExecution = 1ULL << 4,
 };
 
 constexpr Capability operator|(Capability a, Capability b)
@@ -124,6 +125,7 @@ enum class NodeKind : uint32_t
   CommandQueue,
   ResidencySet,
   Binding,
+  Present,
 };
 
 struct Node

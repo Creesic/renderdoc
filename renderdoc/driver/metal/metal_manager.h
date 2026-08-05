@@ -27,6 +27,8 @@
 #include "core/resource_manager.h"
 #include "metal_resources.h"
 
+class WrappedMTLResidencySet;
+
 struct MetalInitialContents
 {
   MetalInitialContents()
@@ -49,12 +51,23 @@ struct MetalInitialContents
     resourceContents = data;
   }
 
+  MetalInitialContents(MetalResourceType t, bytebuf data, uint64_t row, uint64_t image)
+  {
+    memset(this, 0, sizeof(*this));
+    type = t;
+    resourceContents = data;
+    rowPitch = row;
+    imagePitch = image;
+  }
+
   template <typename Configuration>
   void Free(ResourceManager<Configuration> *rm)
   {
-    RDCASSERT(false);
+    resourceContents.clear();
   }
   bytebuf resourceContents;
+  uint64_t rowPitch;
+  uint64_t imagePitch;
 
   // for plain resources, we store the resource type
   MetalResourceType type;
@@ -78,6 +91,7 @@ public:
   void SetState(CaptureState state) { m_State = state; }
   CaptureState GetState() { return m_State; }
   ~MetalResourceManager() {}
+  ResourceId WrapResidencySet(ResourceId id, void *obj, WrappedMTLResidencySet *&wrapped);
   void ClearWithoutReleasing()
   {
     // if any objects leaked past, it's no longer safe to delete them as we would
@@ -157,6 +171,14 @@ public:
     ret->m_Type = (MetalResourceType)wrappedtype::TypeEnum;
     return ret;
   }
+
+  // Metal argument buffers contain GPU addresses and resource IDs instead of wrapper object
+  // references. Until capture-time argument-buffer decoding can precisely mark those indirect
+  // dependencies, retain every live buffer, texture, and sampler for the captured frame so shader
+  // inputs aren't silently omitted.
+  rdcarray<ResourceId> GetLiveBufferResourceIDs();
+  rdcarray<ResourceId> GetLiveTextureResourceIDs();
+  rdcarray<ResourceId> GetLiveSamplerResourceIDs();
 
   // ResourceRecordHandler interface implemented in ResourceManager
   //  void MarkDirtyResource(ResourceId id);

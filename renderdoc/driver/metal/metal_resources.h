@@ -45,6 +45,13 @@ enum MetalResourceType
   eResTexture,
   eResRenderCommandEncoder,
   eResBlitCommandEncoder,
+  eResDepthStencilState,
+  eResSamplerState,
+  eResComputePipelineState,
+  eResComputeCommandEncoder,
+  eResFence,
+  eResEvent,
+  eResResidencySet,
   eResMax
 };
 
@@ -65,12 +72,18 @@ struct WrappedMTLObject
   ~WrappedMTLObject() = default;
 
   MTL::Device *GetDevice() { return (MTL::Device *)m_Device; }
+  WrappedMTLDevice *GetWrappedDevice() { return m_Device; }
   MetalResourceManager *GetResourceManager();
   void AddEvent();
   void AddAction(const ActionDescription &a);
 
   void *m_ObjcBridge = NULL;
   void *m_Real;
+  // Command buffers and command encoders are returned autoreleased by Metal. Their bridge objects
+  // need to mirror application retain/release calls to the real object so a short-lived
+  // autorelease pool cannot leave the bridge pointing at a destroyed Metal object.
+  bool m_ObjCBridgeMirrorsRealOwnership = false;
+  bool m_ObjCBridgeAssociated = false;
   ResourceId m_ID;
   MetalResourceRecord *m_Record = NULL;
   WrappedMTLDevice *m_Device;

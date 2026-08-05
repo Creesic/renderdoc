@@ -23,13 +23,64 @@
  ******************************************************************************/
 
 #include "metal_device.h"
+#include "metal_blit_command_encoder.h"
 #include "metal_buffer.h"
+#include "metal_command_buffer.h"
 #include "metal_command_queue.h"
+#include "metal_compute_pipeline_state.h"
+#include "metal_compute_command_encoder.h"
+#include "metal_depth_stencil_state.h"
+#include "metal_event.h"
 #include "metal_function.h"
+#include "metal_fence.h"
 #include "metal_library.h"
 #include "metal_manager.h"
+#include "metal_render_command_encoder.h"
 #include "metal_render_pipeline_state.h"
+#include "metal_sampler_state.h"
+#include "metal_replay.h"
 #include "metal_texture.h"
+
+WrappedMTLDevice::WrappedMTLDevice()
+    : WrappedMTLObject(NULL, ResourceId(), this, GetStateRef()), m_Capturer(*this)
+{
+  m_Device = this;
+  m_State = CaptureState::StructuredExport;
+  m_SectionVersion = MetalInitParams::CurrentVersion;
+  m_ResourceManager = new MetalResourceManager(m_State, this);
+  m_StoredStructuredData = m_StructuredFile = new SDFile;
+
+  // These objects are only dispatch targets for the existing serialisation functions. Their real
+  // Metal handles stay null and StructuredExport ensures that no API calls are executed.
+  m_DummyBuffer = new WrappedMTLBuffer(NULL, ResourceId(), this);
+  m_DummyTexture = new WrappedMTLTexture(NULL, ResourceId(), this);
+  m_DummyReplayCommandBuffer = new WrappedMTLCommandBuffer(NULL, ResourceId(), this);
+  m_DummyReplayCommandQueue = new WrappedMTLCommandQueue(NULL, ResourceId(), this);
+  m_DummyReplayLibrary = new WrappedMTLLibrary(NULL, ResourceId(), this);
+  m_DummyReplayRenderCommandEncoder =
+      new WrappedMTLRenderCommandEncoder(NULL, ResourceId(), this);
+  m_DummyReplayBlitCommandEncoder = new WrappedMTLBlitCommandEncoder(NULL, ResourceId(), this);
+  m_DummyReplayComputeCommandEncoder =
+      new WrappedMTLComputeCommandEncoder(NULL, ResourceId(), this);
+}
+
+WrappedMTLDevice::~WrappedMTLDevice()
+{
+  if(IsStructuredExporting(m_State))
+  {
+    delete m_DummyReplayBlitCommandEncoder;
+    delete m_DummyReplayComputeCommandEncoder;
+    delete m_DummyReplayRenderCommandEncoder;
+    delete m_DummyReplayLibrary;
+    delete m_DummyReplayCommandQueue;
+    delete m_DummyReplayCommandBuffer;
+    delete m_DummyTexture;
+    delete m_DummyBuffer;
+    delete m_Replay;
+    delete m_ResourceManager;
+    delete m_StoredStructuredData;
+  }
+}
 
 WrappedMTLDevice::WrappedMTLDevice(MTL::Device *realMTLDevice, ResourceId objId)
     : WrappedMTLObject(realMTLDevice, objId, this, GetStateRef()), m_Capturer(*this)
@@ -95,14 +146,103 @@ WrappedMTLDevice::WrappedMTLDevice(MTL::Device *realMTLDevice, ResourceId objId)
 }
 
 IMP WrappedMTLDevice::g_real_CAMetalLayer_nextDrawable;
+IMP WrappedMTLDevice::g_real_CAMetalLayer_setDevice;
 uint64_t WrappedMTLDevice::g_nextDrawableTLSSlot;
+uint64_t WrappedMTLDevice::g_scheduledCommandBufferTLSSlot;
+
+static Threading::CriticalSection &DrawablePresentHookLock()
+{
+  static Threading::CriticalSection *lock = new Threading::CriticalSection();
+  return *lock;
+}
+
+static rdcflatmap<Class, IMP> &DrawablePresentHooks()
+{
+  static rdcflatmap<Class, IMP> *hooks = new rdcflatmap<Class, IMP>();
+  return *hooks;
+}
+
+void hooked_CAMetalDrawable_present(id self, SEL _cmd)
+{
+  IMP original = NULL;
+  {
+    SCOPED_LOCK(DrawablePresentHookLock());
+    auto it = DrawablePresentHooks().find(object_getClass(self));
+    if(it != DrawablePresentHooks().end())
+      original = it->second;
+  }
+
+  if(original != NULL)
+    ((void (*)(id, SEL))original)(self, _cmd);
+  else
+    RDCERR("Could not call the original CAMetalDrawable present implementation");
+
+  WrappedMTLCommandBuffer *commandBuffer = (WrappedMTLCommandBuffer *)Threading::GetTLSValue(
+      WrappedMTLDevice::g_scheduledCommandBufferTLSSlot);
+  if(commandBuffer != NULL)
+    commandBuffer->ScheduledDrawablePresented((MTL::Drawable *)self);
+}
+
+void HookCAMetalDrawablePresent(CA::MetalDrawable *drawable)
+{
+  if(drawable == NULL)
+    return;
+
+  Class klass = object_getClass((id)drawable);
+  SCOPED_LOCK(DrawablePresentHookLock());
+  if(DrawablePresentHooks().find(klass) != DrawablePresentHooks().end())
+    return;
+
+  SEL selector = sel_registerName("present");
+  Method method = class_getInstanceMethod(klass, selector);
+  if(method == NULL)
+  {
+    RDCERR("Could not hook CAMetalDrawable present on class %s", class_getName(klass));
+    return;
+  }
+
+  IMP original = method_getImplementation(method);
+  const char *types = method_getTypeEncoding(method);
+  // If the implementation is inherited, add an override to this concrete private drawable class.
+  // Otherwise replace the class's own implementation.
+  if(!class_addMethod(klass, selector, (IMP)hooked_CAMetalDrawable_present, types))
+    original = method_setImplementation(method, (IMP)hooked_CAMetalDrawable_present);
+  DrawablePresentHooks()[klass] = original;
+}
+
+static uint8_t s_RenderDocWrappedMetalDeviceKey;
+
+void hooked_CAMetalLayer_setDevice(id self, SEL _cmd, id device)
+{
+  id realDevice = device;
+  if(device != nil && object_getClass(device) == objc_getClass("ObjCBridgeMTLDevice"))
+  {
+    WrappedMTLDevice *wrapped = GetWrapped((MTL::Device *)device);
+    realDevice = (id)Unwrap(wrapped);
+    objc_setAssociatedObject(self, &s_RenderDocWrappedMetalDeviceKey, device,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+  else
+  {
+    objc_setAssociatedObject(self, &s_RenderDocWrappedMetalDeviceKey, nil,
+                             OBJC_ASSOCIATION_ASSIGN);
+  }
+
+  ((void (*)(id, SEL, id))WrappedMTLDevice::g_real_CAMetalLayer_setDevice)(self, _cmd, realDevice);
+}
 
 CA::MetalDrawable *hooked_CAMetalLayer_nextDrawable(id self, SEL _cmd)
 {
   CA::MetalLayer *mtlLayer = (CA::MetalLayer *)self;
-  MTL::Device *mtlDevice = mtlLayer->device();
-  WrappedMTLDevice *device = GetWrapped(mtlDevice);
-  RDCASSERT(object_getClass(mtlDevice) == objc_getClass("ObjCBridgeMTLDevice"));
+  id proxyDevice = objc_getAssociatedObject(self, &s_RenderDocWrappedMetalDeviceKey);
+  if(proxyDevice == nil)
+  {
+    RDCWARN("CAMetalLayer nextDrawable called without a RenderDoc-wrapped Metal device");
+    return ((CA::MetalDrawable * (*)(id, SEL))WrappedMTLDevice::g_real_CAMetalLayer_nextDrawable)(
+        self, _cmd);
+  }
+
+  WrappedMTLDevice *device = GetWrapped((MTL::Device *)proxyDevice);
   device->RegisterMetalLayer(mtlLayer);
   mtlLayer->setFramebufferOnly(false);
 
@@ -124,11 +264,16 @@ void WrappedMTLDevice::MTLHookObjcMethods()
 
   g_nextDrawableTLSSlot = Threading::AllocateTLSSlot();
   Threading::SetTLSValue(WrappedMTLDevice::g_nextDrawableTLSSlot, (void *)(uintptr_t) false);
+  g_scheduledCommandBufferTLSSlot = Threading::AllocateTLSSlot();
+  Threading::SetTLSValue(WrappedMTLDevice::g_scheduledCommandBufferTLSSlot, NULL);
 
   Method m =
       class_getInstanceMethod(objc_lookUpClass("CAMetalLayer"), sel_registerName("nextDrawable"));
   g_real_CAMetalLayer_nextDrawable =
       method_setImplementation(m, (IMP)hooked_CAMetalLayer_nextDrawable);
+
+  m = class_getInstanceMethod(objc_lookUpClass("CAMetalLayer"), sel_registerName("setDevice:"));
+  g_real_CAMetalLayer_setDevice = method_setImplementation(m, (IMP)hooked_CAMetalLayer_setDevice);
   s_hookObjcMethods = true;
 }
 
@@ -170,6 +315,20 @@ WrappedMTLDevice *WrappedMTLDevice::MTLCreateSystemDefaultDevice(MTL::Device *re
   WrappedMTLDevice *wrappedMTLDevice = new WrappedMTLDevice(realMTLDevice, objId);
 
   return wrappedMTLDevice;
+}
+
+template <typename SerialiserType>
+bool WrappedMTLDevice::Serialise_ResourceIdentity(SerialiserType &ser, ResourceId resource,
+                                                   MetalResourceType type, uint64_t gpuAddress,
+                                                   uint64_t byteLength, uint64_t gpuResourceID)
+{
+  SERIALISE_ELEMENT(resource).TypedAs("MTLResource"_lit).Important();
+  SERIALISE_ELEMENT(type);
+  SERIALISE_ELEMENT(gpuAddress);
+  SERIALISE_ELEMENT(byteLength);
+  SERIALISE_ELEMENT(gpuResourceID);
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
 }
 
 template <typename SerialiserType>
@@ -396,6 +555,162 @@ WrappedMTLBuffer *WrappedMTLDevice::newBufferWithLength(NS::UInteger length,
 }
 
 template <typename SerialiserType>
+bool WrappedMTLDevice::Serialise_newDepthStencilStateWithDescriptor(
+    SerialiserType &ser, WrappedMTLDepthStencilState *depthStencilState,
+    RDMTL::DepthStencilDescriptor &descriptor)
+{
+  SERIALISE_ELEMENT_LOCAL(DepthStencilState, GetResID(depthStencilState))
+      .TypedAs("MTLDepthStencilState"_lit);
+  SERIALISE_ELEMENT(descriptor).Important();
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    MTL::DepthStencilDescriptor *mtlDescriptor(descriptor);
+    MTL::DepthStencilState *real = Unwrap(this)->newDepthStencilState(mtlDescriptor);
+    mtlDescriptor->release();
+    WrappedMTLDepthStencilState *wrapped;
+    GetResourceManager()->WrapResource(DepthStencilState, real, wrapped);
+    AddResource(DepthStencilState, ResourceType::PipelineState, "Depth Stencil State");
+    DerivedResource(this, DepthStencilState);
+  }
+  return true;
+}
+
+WrappedMTLDepthStencilState *WrappedMTLDevice::newDepthStencilStateWithDescriptor(
+    RDMTL::DepthStencilDescriptor &descriptor)
+{
+  MTL::DepthStencilDescriptor *mtlDescriptor(descriptor);
+  MTL::DepthStencilState *real;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->newDepthStencilState(mtlDescriptor));
+  mtlDescriptor->release();
+
+  WrappedMTLDepthStencilState *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLDevice_newDepthStencilStateWithDescriptor);
+    Serialise_newDepthStencilStateWithDescriptor(ser, wrapped, descriptor);
+    GetResourceManager()->AddResourceRecord(wrapped)->AddChunk(scope.Get());
+  }
+  return wrapped;
+}
+
+template <typename SerialiserType>
+bool WrappedMTLDevice::Serialise_newSamplerStateWithDescriptor(
+    SerialiserType &ser, WrappedMTLSamplerState *samplerState,
+    RDMTL::SamplerDescriptor &descriptor)
+{
+  SERIALISE_ELEMENT_LOCAL(SamplerState, GetResID(samplerState)).TypedAs("MTLSamplerState"_lit);
+  SERIALISE_ELEMENT(descriptor).Important();
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    MTL::SamplerDescriptor *mtlDescriptor(descriptor);
+    MTL::SamplerState *real = Unwrap(this)->newSamplerState(mtlDescriptor);
+    mtlDescriptor->release();
+    WrappedMTLSamplerState *wrapped;
+    GetResourceManager()->WrapResource(SamplerState, real, wrapped);
+    AddResource(SamplerState, ResourceType::Sampler, "Sampler State");
+    DerivedResource(this, SamplerState);
+  }
+  return true;
+}
+
+WrappedMTLSamplerState *WrappedMTLDevice::newSamplerStateWithDescriptor(
+    RDMTL::SamplerDescriptor &descriptor)
+{
+  MTL::SamplerDescriptor *mtlDescriptor(descriptor);
+  MTL::SamplerState *real;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->newSamplerState(mtlDescriptor));
+  mtlDescriptor->release();
+
+  WrappedMTLSamplerState *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  if(IsCaptureMode(m_State))
+  {
+    MetalResourceRecord *record = GetResourceManager()->AddResourceRecord(wrapped);
+    {
+      CACHE_THREAD_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(MetalChunk::MTLDevice_newSamplerStateWithDescriptor);
+      Serialise_newSamplerStateWithDescriptor(ser, wrapped, descriptor);
+      record->AddChunk(scope.Get());
+    }
+    {
+      CACHE_THREAD_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(MetalChunk::MTLResource_captureIdentity);
+      const uint64_t gpuResourceID = Unwrap(this)->supportsFamily(MTL::GPUFamilyMetal3)
+                                         ? real->gpuResourceID()._impl
+                                         : 0;
+      Serialise_ResourceIdentity(ser, GetResID(wrapped), eResSamplerState, 0, 0,
+                                 gpuResourceID);
+      record->AddChunk(scope.Get());
+    }
+  }
+  return wrapped;
+}
+
+template <typename SerialiserType>
+bool WrappedMTLDevice::Serialise_newFence(SerialiserType &ser, WrappedMTLFence *fence)
+{
+  SERIALISE_ELEMENT_LOCAL(Fence, GetResID(fence)).TypedAs("MTLFence"_lit);
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+WrappedMTLFence *WrappedMTLDevice::newFence()
+{
+  MTL::Fence *real;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->newFence());
+  if(real == NULL)
+    return NULL;
+
+  WrappedMTLFence *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  if(IsCaptureMode(m_State))
+  {
+    MetalResourceRecord *record = GetResourceManager()->AddResourceRecord(wrapped);
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLDevice_newFence);
+    Serialise_newFence(ser, wrapped);
+    record->AddChunk(scope.Get());
+  }
+  return wrapped;
+}
+
+template <typename SerialiserType>
+bool WrappedMTLDevice::Serialise_newEvent(SerialiserType &ser, WrappedMTLEvent *event)
+{
+  SERIALISE_ELEMENT_LOCAL(Event, GetResID(event)).TypedAs("MTLEvent"_lit);
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+WrappedMTLEvent *WrappedMTLDevice::newEvent()
+{
+  MTL::Event *real;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->newEvent());
+  if(real == NULL)
+    return NULL;
+
+  WrappedMTLEvent *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  if(IsCaptureMode(m_State))
+  {
+    MetalResourceRecord *record = GetResourceManager()->AddResourceRecord(wrapped);
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLDevice_newEvent);
+    Serialise_newEvent(ser, wrapped);
+    record->AddChunk(scope.Get());
+  }
+  return wrapped;
+}
+
+template <typename SerialiserType>
 bool WrappedMTLDevice::Serialise_newRenderPipelineStateWithDescriptor(
     SerialiserType &ser, WrappedMTLRenderPipelineState *pipelineState,
     RDMTL::RenderPipelineDescriptor &descriptor, NS::Error **error)
@@ -465,6 +780,79 @@ WrappedMTLRenderPipelineState *WrappedMTLDevice::newRenderPipelineStateWithDescr
     //     GetResourceManager()->AddLiveResource(id, *wrappedMTLRenderPipelineState);
   }
   return wrappedMTLRenderPipelineState;
+}
+
+template <typename SerialiserType>
+bool WrappedMTLDevice::Serialise_newComputePipelineStateWithFunction(
+    SerialiserType &ser, WrappedMTLComputePipelineState *pipeline, WrappedMTLFunction *function,
+    NS::Error **error)
+{
+  SERIALISE_ELEMENT_LOCAL(ComputePipelineState, GetResID(pipeline))
+      .TypedAs("MTLComputePipelineState"_lit);
+  SERIALISE_ELEMENT(function).Important();
+  (void)error;
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+WrappedMTLComputePipelineState *WrappedMTLDevice::newComputePipelineStateWithFunction(
+    WrappedMTLFunction *function, NS::Error **error)
+{
+  MTL::ComputePipelineState *real;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->newComputePipelineState(Unwrap(function), error));
+  if(real == NULL)
+    return NULL;
+  WrappedMTLComputePipelineState *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  if(IsCaptureMode(m_State))
+  {
+    MetalResourceRecord *record = GetResourceManager()->AddResourceRecord(wrapped);
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLDevice_newComputePipelineStateWithFunction);
+    Serialise_newComputePipelineStateWithFunction(ser, wrapped, function, error);
+    record->AddChunk(scope.Get());
+    record->AddParent(GetRecord(function));
+  }
+  return wrapped;
+}
+
+template <typename SerialiserType>
+bool WrappedMTLDevice::Serialise_newComputePipelineStateWithDescriptor(
+    SerialiserType &ser, WrappedMTLComputePipelineState *pipeline,
+    RDMTL::ComputePipelineDescriptor &descriptor, MTL::PipelineOption options, NS::Error **error)
+{
+  SERIALISE_ELEMENT_LOCAL(ComputePipelineState, GetResID(pipeline))
+      .TypedAs("MTLComputePipelineState"_lit);
+  SERIALISE_ELEMENT(descriptor).Important();
+  SERIALISE_ELEMENT(options);
+  (void)error;
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+WrappedMTLComputePipelineState *WrappedMTLDevice::newComputePipelineStateWithDescriptor(
+    RDMTL::ComputePipelineDescriptor &descriptor, MTL::PipelineOption options, NS::Error **error)
+{
+  MTL::ComputePipelineDescriptor *mtlDescriptor(descriptor);
+  MTL::ComputePipelineState *real;
+  SERIALISE_TIME_CALL(real = Unwrap(this)->newComputePipelineState(mtlDescriptor, options, NULL,
+                                                                   error));
+  mtlDescriptor->release();
+  if(real == NULL)
+    return NULL;
+  WrappedMTLComputePipelineState *wrapped;
+  GetResourceManager()->WrapResource(ResourceId(), real, wrapped);
+  if(IsCaptureMode(m_State))
+  {
+    MetalResourceRecord *record = GetResourceManager()->AddResourceRecord(wrapped);
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLDevice_newComputePipelineStateWithDescriptor);
+    Serialise_newComputePipelineStateWithDescriptor(ser, wrapped, descriptor, options, error);
+    record->AddChunk(scope.Get());
+    if(descriptor.computeFunction)
+      record->AddParent(GetRecord(descriptor.computeFunction));
+  }
+  return wrapped;
 }
 
 template <typename SerialiserType>
@@ -685,6 +1073,23 @@ WrappedMTLTexture *WrappedMTLDevice::Common_NewTexture(RDMTL::TextureDescriptor 
     }
     MetalResourceRecord *textureRecord = GetResourceManager()->AddResourceRecord(wrappedMTLTexture);
     textureRecord->AddChunk(chunk);
+    {
+      CACHE_THREAD_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(MetalChunk::MTLResource_captureIdentity);
+      const uint64_t gpuResourceID = Unwrap(this)->supportsFamily(MTL::GPUFamilyMetal3)
+                                         ? realMTLTexture->gpuResourceID()._impl
+                                         : 0;
+      Serialise_ResourceIdentity(ser, GetResID(wrappedMTLTexture), eResTexture, 0, 0,
+                                 gpuResourceID);
+      textureRecord->AddChunk(scope.Get());
+    }
+
+    // A texture's contents are not described by its creation chunk. Treat every non-memoryless
+    // texture as dirty from birth so resources populated before the captured frame receive an
+    // initial-state snapshot. Render targets fully overwritten in-frame can still be discarded by
+    // the resource manager's normal complete-write tracking.
+    if(realMTLTexture->storageMode() != MTL::StorageModeMemoryless)
+      GetResourceManager()->MarkDirtyResource(id);
   }
   if(ioSurfaceTexture)
   {
@@ -723,6 +1128,17 @@ WrappedMTLBuffer *WrappedMTLDevice::Common_NewBuffer(bool withBytes, const void 
     MetalResourceRecord *record = GetResourceManager()->AddResourceRecord(wrappedMTLBuffer);
     record->AddChunk(chunk);
 
+    {
+      CACHE_THREAD_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(MetalChunk::MTLResource_captureIdentity);
+      const uint64_t gpuAddress = Unwrap(this)->supportsFamily(MTL::GPUFamilyMetal3)
+                                      ? realMTLBuffer->gpuAddress()
+                                      : 0;
+      Serialise_ResourceIdentity(ser, GetResID(wrappedMTLBuffer), eResBuffer, gpuAddress, length,
+                                 0);
+      record->AddChunk(scope.Get());
+    }
+
     MTL::StorageMode mode = realMTLBuffer->storageMode();
     record->bufInfo = new MetalBufferInfo(mode);
 
@@ -746,17 +1162,46 @@ WrappedMTLBuffer *WrappedMTLDevice::Common_NewBuffer(bool withBytes, const void 
 }
 
 INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLDevice, bool, MTLCreateSystemDefaultDevice);
+template bool WrappedMTLDevice::Serialise_ResourceIdentity(ReadSerialiser &ser,
+                                                            ResourceId resource,
+                                                            MetalResourceType type,
+                                                            uint64_t gpuAddress,
+                                                            uint64_t byteLength,
+                                                            uint64_t gpuResourceID);
+template bool WrappedMTLDevice::Serialise_ResourceIdentity(WriteSerialiser &ser,
+                                                            ResourceId resource,
+                                                            MetalResourceType type,
+                                                            uint64_t gpuAddress,
+                                                            uint64_t byteLength,
+                                                            uint64_t gpuResourceID);
 INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice, WrappedMTLCommandQueue *,
                                             newCommandQueue);
 INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice, WrappedMTLLibrary *, newDefaultLibrary);
 INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice, WrappedMTLLibrary *,
                                             newLibraryWithSource, NS::String *source,
                                             MTL::CompileOptions *options, NS::Error **error);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice, WrappedMTLDepthStencilState *,
+                                            newDepthStencilStateWithDescriptor,
+                                            RDMTL::DepthStencilDescriptor &descriptor);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice, WrappedMTLSamplerState *,
+                                            newSamplerStateWithDescriptor,
+                                            RDMTL::SamplerDescriptor &descriptor);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice, WrappedMTLFence *, newFence);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice, WrappedMTLEvent *, newEvent);
 INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice,
                                             WrappedMTLRenderPipelineState *renderPipelineState,
                                             newRenderPipelineStateWithDescriptor,
                                             RDMTL::RenderPipelineDescriptor &descriptor,
                                             NS::Error **error);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice,
+                                            WrappedMTLComputePipelineState *computePipelineState,
+                                            newComputePipelineStateWithFunction,
+                                            WrappedMTLFunction *function, NS::Error **error);
+INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice,
+                                            WrappedMTLComputePipelineState *computePipelineState,
+                                            newComputePipelineStateWithDescriptor,
+                                            RDMTL::ComputePipelineDescriptor &descriptor,
+                                            MTL::PipelineOption options, NS::Error **error);
 INSTANTIATE_FUNCTION_WITH_RETURN_SERIALISED(WrappedMTLDevice, WrappedMTLTexture *,
                                             newTextureWithDescriptor,
                                             RDMTL::TextureDescriptor &descriptor);

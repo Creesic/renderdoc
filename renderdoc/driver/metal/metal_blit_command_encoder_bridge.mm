@@ -23,7 +23,14 @@
  ******************************************************************************/
 
 #include "metal_blit_command_encoder.h"
+#include "metal_device.h"
 #include "metal_types_bridge.h"
+
+static WrappedMTLTexture *ResolveTexture(ObjCBridgeMTLBlitCommandEncoder *encoder,
+                                         id<MTLTexture> texture)
+{
+  return GetWrapped(encoder)->GetWrappedDevice()->ResolveTexture((MTL::Texture *)texture);
+}
 
 // Wrapper for MTLBlitCommandEncoder
 @implementation ObjCBridgeMTLBlitCommandEncoder
@@ -114,7 +121,7 @@
                      level:(NSUInteger)level API_AVAILABLE(macos(10.11), macCatalyst(13.0))
                                API_UNAVAILABLE(ios)
 {
-  GetWrapped(self)->synchronizeTexture(GetWrapped(texture), slice, level);
+  GetWrapped(self)->synchronizeTexture(ResolveTexture(self, texture), slice, level);
 }
 
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture
@@ -127,9 +134,9 @@
        destinationLevel:(NSUInteger)destinationLevel
       destinationOrigin:(MTLOrigin)destinationOrigin
 {
-  GetWrapped(self)->copyFromTexture(GetWrapped(sourceTexture), sourceSlice, sourceSlice,
+  GetWrapped(self)->copyFromTexture(ResolveTexture(self, sourceTexture), sourceSlice, sourceLevel,
                                     (MTL::Origin &)sourceOrigin, (MTL::Size &)sourceSize,
-                                    GetWrapped(destinationTexture), destinationSlice,
+                                    ResolveTexture(self, destinationTexture), destinationSlice,
                                     destinationLevel, (MTL::Origin &)destinationOrigin);
 }
 
@@ -145,7 +152,8 @@
 {
   GetWrapped(self)->copyFromBuffer(
       GetWrapped(sourceBuffer), sourceOffset, sourceBytesPerRow, sourceBytesPerImage,
-      (MTL::Size &)sourceSize, GetWrapped(destinationTexture), destinationSlice, destinationLevel,
+      (MTL::Size &)sourceSize, ResolveTexture(self, destinationTexture), destinationSlice,
+      destinationLevel,
       (MTL::Origin &)destinationOrigin, MTL::BlitOptionNone);
 }
 
@@ -162,7 +170,8 @@
 {
   GetWrapped(self)->copyFromBuffer(
       GetWrapped(sourceBuffer), sourceOffset, sourceBytesPerRow, sourceBytesPerImage,
-      (MTL::Size &)sourceSize, GetWrapped(destinationTexture), destinationSlice, destinationLevel,
+      (MTL::Size &)sourceSize, ResolveTexture(self, destinationTexture), destinationSlice,
+      destinationLevel,
       (MTL::Origin &)destinationOrigin, (MTL::BlitOption)options);
 }
 
@@ -177,7 +186,7 @@
     destinationBytesPerImage:(NSUInteger)destinationBytesPerImage
 {
   GetWrapped(self)->copyFromTexture(
-      GetWrapped(sourceTexture), sourceSlice, sourceLevel, (MTL::Origin &)sourceOrigin,
+      ResolveTexture(self, sourceTexture), sourceSlice, sourceLevel, (MTL::Origin &)sourceOrigin,
       (MTL::Size &)sourceSize, GetWrapped(destinationBuffer), destinationOffset,
       destinationBytesPerRow, destinationBytesPerImage, MTL::BlitOptionNone);
 }
@@ -194,14 +203,14 @@
                      options:(MTLBlitOption)options API_AVAILABLE(macos(10.11), ios(9.0))
 {
   GetWrapped(self)->copyFromTexture(
-      GetWrapped(sourceTexture), sourceSlice, sourceLevel, (MTL::Origin &)sourceOrigin,
+      ResolveTexture(self, sourceTexture), sourceSlice, sourceLevel, (MTL::Origin &)sourceOrigin,
       (MTL::Size &)sourceSize, GetWrapped(destinationBuffer), destinationOffset,
       destinationBytesPerRow, destinationBytesPerImage, (MTL::BlitOption)options);
 }
 
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture
 {
-  GetWrapped(self)->generateMipmapsForTexture(GetWrapped(texture));
+  GetWrapped(self)->generateMipmapsForTexture(ResolveTexture(self, texture));
 }
 
 - (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value
@@ -218,15 +227,16 @@
              sliceCount:(NSUInteger)sliceCount
              levelCount:(NSUInteger)levelCount API_AVAILABLE(macos(10.15), ios(13.0))
 {
-  GetWrapped(self)->copyFromTexture(GetWrapped(sourceTexture), sourceSlice, sourceLevel,
-                                    GetWrapped(destinationTexture), destinationSlice,
+  GetWrapped(self)->copyFromTexture(ResolveTexture(self, sourceTexture), sourceSlice, sourceLevel,
+                                    ResolveTexture(self, destinationTexture), destinationSlice,
                                     destinationLevel, sliceCount, levelCount);
 }
 
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture
               toTexture:(id<MTLTexture>)destinationTexture API_AVAILABLE(macos(10.15), ios(13.0))
 {
-  GetWrapped(self)->copyFromTexture(GetWrapped(sourceTexture), GetWrapped(destinationTexture));
+  GetWrapped(self)->copyFromTexture(ResolveTexture(self, sourceTexture),
+                                    ResolveTexture(self, destinationTexture));
 }
 
 - (void)copyFromBuffer:(id<MTLBuffer>)sourceBuffer
@@ -258,9 +268,9 @@
             countersBufferOffset:(NSUInteger)countersBufferOffset
     API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0))
 {
-  GetWrapped(self)->getTextureAccessCounters(GetWrapped(texture), (MTL::Region &)region, mipLevel,
-                                             slice, resetCounters, GetWrapped(countersBuffer),
-                                             countersBufferOffset);
+  GetWrapped(self)->getTextureAccessCounters(ResolveTexture(self, texture),
+                                             (MTL::Region &)region, mipLevel, slice, resetCounters,
+                                             GetWrapped(countersBuffer), countersBufferOffset);
 }
 
 - (void)resetTextureAccessCounters:(id<MTLTexture>)texture
@@ -269,32 +279,32 @@
                              slice:(NSUInteger)slice
     API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0))
 {
-  GetWrapped(self)->resetTextureAccessCounters(GetWrapped(texture), (MTL::Region &)region, mipLevel,
-                                               slice);
+  GetWrapped(self)->resetTextureAccessCounters(ResolveTexture(self, texture),
+                                               (MTL::Region &)region, mipLevel, slice);
 }
 
 - (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture API_AVAILABLE(macos(10.14), ios(12.0))
 {
-  GetWrapped(self)->optimizeContentsForGPUAccess(GetWrapped(texture));
+  GetWrapped(self)->optimizeContentsForGPUAccess(ResolveTexture(self, texture));
 }
 
 - (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture
                                slice:(NSUInteger)slice
                                level:(NSUInteger)level API_AVAILABLE(macos(10.14), ios(12.0))
 {
-  GetWrapped(self)->optimizeContentsForGPUAccess(GetWrapped(texture), slice, level);
+  GetWrapped(self)->optimizeContentsForGPUAccess(ResolveTexture(self, texture), slice, level);
 }
 
 - (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture API_AVAILABLE(macos(10.14), ios(12.0))
 {
-  GetWrapped(self)->optimizeContentsForCPUAccess(GetWrapped(texture));
+  GetWrapped(self)->optimizeContentsForCPUAccess(ResolveTexture(self, texture));
 }
 
 - (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture
                                slice:(NSUInteger)slice
                                level:(NSUInteger)level API_AVAILABLE(macos(10.14), ios(12.0))
 {
-  GetWrapped(self)->optimizeContentsForCPUAccess(GetWrapped(texture), slice, level);
+  GetWrapped(self)->optimizeContentsForCPUAccess(ResolveTexture(self, texture), slice, level);
 }
 
 - (void)resetCommandsInBuffer:(id<MTLIndirectCommandBuffer>)buffer

@@ -1846,6 +1846,14 @@ void WrappedOpenGL::FreeTargetResource(ResourceId id)
 
     switch(resource.Namespace)
     {
+      case eResTexture:
+        glDeleteTextures(1, &resource.name);
+        m_Textures.erase(id);
+        break;
+      case eResBuffer:
+        glDeleteBuffers(1, &resource.name);
+        m_Buffers.erase(id);
+        break;
       case eResShader: glDeleteShader(resource.name); break;
       // a compiled shader could have been promoted to a program if it were a glCreateShaderProgramv
       case eResProgram: glDeleteProgram(resource.name); break;

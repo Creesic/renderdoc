@@ -28,9 +28,12 @@
 
 #import <Metal/Metal.h>
 
+@interface ObjCBridgeMTLObject : NSObject
+@end
+
 // clang-format off
 #define DECLARE_OBJC_WRAPPED_INTERFACES(CPPTYPE)                              \
-  @interface ObjCBridgeMTL##CPPTYPE : NSObject<MTL##CPPTYPE>                  \
+  @interface ObjCBridgeMTL##CPPTYPE : ObjCBridgeMTLObject<MTL##CPPTYPE>       \
   @end                                                                        \
   inline WrappedMTL##CPPTYPE *GetWrapped(ObjCBridgeMTL##CPPTYPE *objCWrapped) \
   {                                                                           \

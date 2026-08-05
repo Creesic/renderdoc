@@ -118,7 +118,7 @@ static bool ReadNode(StreamReader &reader, Node &node)
                  reader.Read(node.canGo) && reader.Read(node.canInfo) &&
                  reader.Read(node.canFetch) && reader.Read(node.byteSize);
   node.kind = (NodeKind)kind;
-  return success && kind <= (uint32_t)NodeKind::Binding && node.stableId != 0;
+  return success && kind <= (uint32_t)NodeKind::Present && node.stableId != 0;
 }
 
 static bool WriteIndexV2(StreamWriter &writer, const Index &index)

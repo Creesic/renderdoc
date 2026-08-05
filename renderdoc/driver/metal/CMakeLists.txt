@@ -29,6 +29,23 @@ set(sources
     metal_render_pipeline_state.cpp
     metal_render_pipeline_state.h
     metal_render_pipeline_state_bridge.mm
+    metal_compute_pipeline_state.cpp
+    metal_compute_pipeline_state.h
+    metal_compute_pipeline_state_bridge.mm
+    metal_depth_stencil_state.cpp
+    metal_depth_stencil_state.h
+    metal_depth_stencil_state_bridge.mm
+    metal_sampler_state.cpp
+    metal_sampler_state.h
+    metal_sampler_state_bridge.mm
+    metal_fence.cpp
+    metal_fence.h
+    metal_fence_bridge.mm
+    metal_event.cpp
+    metal_event.h
+    metal_event_bridge.mm
+    metal_residency_set.h
+    metal_residency_set_bridge.mm
     metal_texture.cpp
     metal_texture.h
     metal_texture_bridge.mm
@@ -38,6 +55,9 @@ set(sources
     metal_blit_command_encoder.cpp
     metal_blit_command_encoder.h
     metal_blit_command_encoder_bridge.mm
+    metal_compute_command_encoder.cpp
+    metal_compute_command_encoder.h
+    metal_compute_command_encoder_bridge.mm
     metal_render_command_encoder.cpp
     metal_render_command_encoder.h
     metal_render_command_encoder_bridge.mm
@@ -61,6 +81,10 @@ set(sources
     apple_trace_replay.cpp
     metal_native_replay.h
     metal_native_replay.cpp
+    metal_native_execute.h
+    metal_native_execute.cpp
+    metal_native_residency.h
+    metal_native_residency.mm
     metal_replay_provider.cpp
     official/metal-cpp.h
     official/metal-cpp.cpp)
@@ -76,3 +100,11 @@ endif ()
 add_library(rdoc_metal OBJECT ${sources})
 target_compile_definitions(rdoc_metal ${RDOC_DEFINITIONS})
 target_include_directories(rdoc_metal ${RDOC_INCLUDES})
+
+# The Objective-C protocol bridge deliberately forwards Metal methods that don't yet have explicit
+# capture wrappers. New SDKs add required protocol methods before this bridge can grow first-class
+# interception for them, so don't turn those completeness diagnostics into build failures. The
+# wrapped C++ objects also deliberately place their Objective-C bridge pointer first even though
+# the wrapper classes are not standard-layout types.
+target_compile_options(rdoc_metal PRIVATE -Wno-protocol -Wno-objc-protocol-property-synthesis
+                                         -Wno-invalid-offsetof)

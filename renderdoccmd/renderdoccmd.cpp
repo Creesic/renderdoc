@@ -124,6 +124,367 @@ void DisplayRendererPreview(IReplayController *renderer, uint32_t width, uint32_
   DisplayRendererPreview(renderer, d, width, height, numLoops);
 }
 
+bool ValidateCapture(IReplayController *renderer, bool strictMetalFixture = false)
+{
+  uint32_t actionCount = 0;
+  uint32_t drawCount = 0;
+  uint32_t dispatchCount = 0;
+  uint32_t presentCount = 0;
+  rdcarray<uint32_t> drawEvents;
+  rdcarray<ResourceId> drawOutputs;
+  rdcarray<rdcstr> actionNames;
+  std::function<void(const rdcarray<ActionDescription> &)> countActions =
+      [&actionCount, &drawCount, &dispatchCount, &presentCount, &drawEvents, &drawOutputs,
+       &actionNames, &countActions](const rdcarray<ActionDescription> &actions) {
+        for(const ActionDescription &action : actions)
+        {
+          actionCount++;
+          actionNames.push_back(action.customName);
+          if(action.flags & ActionFlags::Drawcall)
+          {
+            drawCount++;
+            drawEvents.push_back(action.eventId);
+            drawOutputs.push_back(action.outputs[0]);
+          }
+          if(action.flags & ActionFlags::Dispatch)
+            dispatchCount++;
+          if(action.flags & ActionFlags::Present)
+            presentCount++;
+          std::cout << "  event " << action.eventId << ": " << action.customName << std::endl;
+          countActions(action.children);
+        }
+      };
+  countActions(renderer->GetRootActions());
+
+  uint64_t bufferBytes = 0;
+  for(const BufferDescription &buffer : renderer->GetBuffers())
+    bufferBytes += renderer->GetBufferData(buffer.resourceId, 0, 0).size();
+
+  uint32_t textureSnapshots = 0;
+  uint64_t textureBytes = 0;
+  std::map<ResourceId, bytebuf> textureData;
+  for(const TextureDescription &texture : renderer->GetTextures())
+  {
+    bytebuf data = renderer->GetTextureData(texture.resourceId, Subresource());
+    if(!data.empty())
+    {
+      textureSnapshots++;
+      textureBytes += data.size();
+      textureData[texture.resourceId] = std::move(data);
+    }
+  }
+
+  APIProperties api = renderer->GetAPIProperties();
+  std::cout << "Capture decoded: " << actionCount << " actions (" << drawCount << " draws, "
+            << dispatchCount << " dispatches), " << renderer->GetResources().size() << " resources, "
+            << renderer->GetBuffers().size() << " buffers, " << renderer->GetTextures().size()
+            << " textures; fetched " << bufferBytes << " buffer bytes and " << textureBytes
+            << " bytes from " << textureSnapshots << " texture snapshots." << std::endl;
+  if(!api.HasFeature(ReplayFeature::TextureFetch))
+    std::cout << "Texture fetch unavailable: "
+              << api.FeatureUnavailableReason(ReplayFeature::TextureFetch) << std::endl;
+  for(const DebugMessage &message : renderer->GetDebugMessages())
+    std::cout << "  replay message: " << message.description << std::endl;
+
+  if(!strictMetalFixture)
+    return true;
+
+  rdcarray<rdcstr> failures;
+  auto Require = [&failures](bool condition, const rdcstr &message) {
+    if(!condition)
+      failures.push_back(message);
+  };
+  auto HasAction = [&actionNames](const char *name) {
+    for(const rdcstr &action : actionNames)
+      if(action == name)
+        return true;
+    return false;
+  };
+  auto HasResource = [renderer](const char *name, ResourceType type) {
+    for(const ResourceDescription &resource : renderer->GetResources())
+      if(resource.name == name && resource.type == type)
+        return true;
+    return false;
+  };
+  auto IsNonUniform = [](const bytebuf &data) {
+    if(data.empty())
+      return false;
+    const byte first = data[0];
+    for(byte value : data)
+      if(value != first)
+        return true;
+    return false;
+  };
+
+  Require(drawCount == 2, "expected exactly two fixture draws");
+  Require(dispatchCount == 1, "expected exactly one fixture compute dispatch");
+  Require(presentCount == 1, "expected exactly one fixture present");
+  Require(actionCount == 16,
+          "expected event signal plus compute, blit, two render passes, and present");
+  Require(textureSnapshots >= 7,
+          "expected the private BC1 input, blit source/destination, and rendered output snapshots");
+  Require(api.HasFeature(ReplayFeature::ExecutableReplay),
+          "native Metal event-selective replay is unavailable");
+  Require(HasAction("RenderDoc Metal Fixture Frame"), "missing command-buffer debug group");
+  Require(HasAction("Generate Checkerboard With Compute"), "missing compute debug group");
+  Require(HasAction("dispatchThreadgroups"), "missing compute dispatch action");
+  Require(HasAction("Offscreen Render To Texture"), "missing offscreen debug group");
+  Require(HasAction("Fixture Direct Draw"), "missing direct-draw debug group");
+  Require(HasAction("Sample Offscreen Texture And Present"), "missing present debug group");
+  Require(HasAction("Fixture Indexed Draw"), "missing indexed-draw debug group");
+  Require(HasResource("Fixture Less Depth State", ResourceType::PipelineState),
+          "missing depth-stencil resource");
+  Require(HasResource("Fixture Linear Clamp Sampler", ResourceType::Sampler),
+          "missing sampler resource");
+  Require(HasResource("Fixture Indirect Argument Sampler", ResourceType::Sampler),
+          "missing sampler referenced only through an argument buffer identity");
+  Require(HasResource("Fixture Checkerboard Compute Pipeline", ResourceType::PipelineState),
+          "missing compute pipeline resource");
+  Require(HasResource("fixtureCompute", ResourceType::Shader),
+          "missing specialized compute shader function");
+  Require(renderer->GetTextures().size() == 9,
+          "expected the private BC1, buffer-backed, blit, and sampled textures to be exposed");
+  Require(
+      renderer->GetBuffers().size() == 7 && bufferBytes == 2484,
+      "live, residency-only, and texture-backing buffers were not retained with captured bytes");
+
+  std::map<rdcstr, uint32_t> expectedChunks = {
+      {"MTLDevice::newDepthStencilStateWithDescriptor", 1},
+      {"MTLDevice::newSamplerStateWithDescriptor", 2},
+      {"MTLCommandQueue::commandBufferWithUnretainedReferences", 2},
+      {"MTLCommandBuffer::enqueue", 2},
+      {"MTLDevice::newEvent", 1},
+      {"MTLCommandBuffer::encodeSignalEvent", 1},
+      {"MTLCommandBuffer::encodeWaitForEvent", 1},
+      {"MTLDevice::newComputePipelineStateWithDescriptor", 1},
+      {"MTLLibrary::newFunctionWithName", 5},
+      {"MTLDevice::newFence", 1},
+      {"MTLBuffer::newTextureWithDescriptor", 1},
+      {"MTLCommandBuffer::computeCommandEncoderWithDescriptor", 1},
+      {"MTLComputeCommandEncoder::setLabel", 1},
+      {"MTLComputeCommandEncoder::pushDebugGroup", 1},
+      {"MTLComputeCommandEncoder::popDebugGroup", 1},
+      {"MTLComputeCommandEncoder::setComputePipelineState", 1},
+      {"MTLComputeCommandEncoder::setBytes", 1},
+      {"MTLComputeCommandEncoder::setBuffer", 1},
+      {"MTLComputeCommandEncoder::setTexture", 2},
+      {"MTLComputeCommandEncoder::useResource", 1},
+      {"MTLComputeCommandEncoder::dispatchThreadgroups", 1},
+      {"MTLComputeCommandEncoder::updateFence", 1},
+      {"MTLComputeCommandEncoder::endEncoding", 1},
+      {"MTLResource::captureIdentity", 18},
+      {"MTLTexture::newTextureViewWithPixelFormat", 1},
+      {"MTLCommandBuffer::blitCommandEncoderWithDescriptor", 1},
+      {"MTLBlitCommandEncoder::setLabel", 1},
+      {"MTLBlitCommandEncoder::pushDebugGroup", 1},
+      {"MTLBlitCommandEncoder::popDebugGroup", 1},
+      {"MTLBlitCommandEncoder::copyFromTexture_toTexture", 1},
+      {"MTLBlitCommandEncoder::waitForFence", 1},
+      {"MTLBlitCommandEncoder::updateFence", 1},
+      {"MTLBlitCommandEncoder::endEncoding", 1},
+      {"MTLCommandBuffer::pushDebugGroup", 1},
+      {"MTLCommandBuffer::popDebugGroup", 1},
+      {"MTLRenderCommandEncoder::pushDebugGroup", 4},
+      {"MTLRenderCommandEncoder::popDebugGroup", 4},
+      {"MTLRenderCommandEncoder::setFragmentBytes", 1},
+      {"MTLRenderCommandEncoder::setFragmentBuffer", 1},
+      {"MTLRenderCommandEncoder::setVertexBytes", 1},
+      {"MTLRenderCommandEncoder::setViewports", 1},
+      {"MTLRenderCommandEncoder::setScissorRects", 1},
+      {"MTLRenderCommandEncoder::setFrontFacingWinding", 1},
+      {"MTLRenderCommandEncoder::setCullMode", 1},
+      {"MTLRenderCommandEncoder::setDepthClipMode", 1},
+      {"MTLRenderCommandEncoder::setDepthBias", 1},
+      {"MTLRenderCommandEncoder::setTriangleFillMode", 1},
+      {"MTLRenderCommandEncoder::setStencilReferenceValue", 1},
+      {"MTLRenderCommandEncoder::setFragmentSamplerState", 2},
+      {"MTLRenderCommandEncoder::setDepthStencilState", 1},
+      {"MTLRenderCommandEncoder::waitForFence", 2},
+      {"MTLRenderCommandEncoder::updateFence", 1},
+      {"MTLRenderCommandEncoder::useResource", 2},
+  };
+  std::map<rdcstr, uint32_t> actualChunks;
+  const SDFile &structured = renderer->GetStructuredFile();
+  bool validInlineBytes = false;
+  bool validVertexInlineBytes = false;
+  bool validComputeInlineBytes = false;
+  uint64_t argumentIdentityBuffer = 0;
+  std::map<uint64_t, bytebuf> bufferInitialData;
+  rdcarray<std::pair<uint64_t, uint64_t>> capturedBufferRanges;
+  rdcarray<uint64_t> capturedResourceIDs;
+  for(const SDChunk *chunk : structured.chunks)
+  {
+    actualChunks[chunk->name]++;
+    if(chunk->name == "MTLRenderCommandEncoder::setFragmentBytes")
+    {
+      const SDObject *bytes = chunk->FindChild("bytes");
+      validInlineBytes = bytes != NULL && bytes->IsBuffer() &&
+                         bytes->data.basic.u < structured.buffers.size() &&
+                         structured.buffers[(size_t)bytes->data.basic.u]->size() == 16;
+    }
+    else if(chunk->name == "MTLRenderCommandEncoder::setVertexBytes")
+    {
+      const SDObject *bytes = chunk->FindChild("bytes");
+      validVertexInlineBytes = bytes != NULL && bytes->IsBuffer() &&
+                               bytes->data.basic.u < structured.buffers.size() &&
+                               structured.buffers[(size_t)bytes->data.basic.u]->size() == 16;
+    }
+    else if(chunk->name == "MTLComputeCommandEncoder::setBytes")
+    {
+      const SDObject *bytes = chunk->FindChild("bytes");
+      validComputeInlineBytes = bytes != NULL && bytes->IsBuffer() &&
+                                bytes->data.basic.u < structured.buffers.size() &&
+                                structured.buffers[(size_t)bytes->data.basic.u]->size() == 4;
+    }
+    else if(chunk->name == "MTLRenderCommandEncoder::setFragmentBuffer")
+    {
+      const SDObject *buffer = chunk->FindChild("buffer");
+      argumentIdentityBuffer = buffer ? buffer->data.basic.u : 0;
+    }
+    else if(chunk->name == "MTLDevice::newBufferWithBytes")
+    {
+      const SDObject *buffer = chunk->FindChild("Buffer");
+      const SDObject *data = chunk->FindChild("initialData");
+      if(buffer != NULL && data != NULL && data->IsBuffer() &&
+         data->data.basic.u < structured.buffers.size())
+        bufferInitialData[buffer->data.basic.u] = *structured.buffers[(size_t)data->data.basic.u];
+    }
+    else if(chunk->name == "MTLResource::captureIdentity")
+    {
+      const SDObject *address = chunk->FindChild("gpuAddress");
+      const SDObject *length = chunk->FindChild("byteLength");
+      const SDObject *resourceID = chunk->FindChild("gpuResourceID");
+      if(address != NULL && address->data.basic.u != 0 && length != NULL)
+        capturedBufferRanges.push_back({address->data.basic.u, length->data.basic.u});
+      if(resourceID != NULL && resourceID->data.basic.u != 0)
+        capturedResourceIDs.push_back(resourceID->data.basic.u);
+    }
+  }
+  for(const auto &expected : expectedChunks)
+  {
+    std::ostringstream message;
+    message << "expected " << expected.second << " " << expected.first << " chunks, found "
+            << actualChunks[expected.first];
+    Require(actualChunks[expected.first] == expected.second, conv(message.str()));
+  }
+  Require(validInlineBytes, "fragment inline-byte payload is missing or not 16 bytes");
+  Require(validVertexInlineBytes, "vertex inline-byte payload is missing or not 16 bytes");
+  Require(validComputeInlineBytes, "compute inline-byte payload is missing or not 4 bytes");
+  uint32_t nonUniformSnapshots = 0;
+  for(const auto &snapshot : textureData)
+    if(IsNonUniform(snapshot.second))
+      nonUniformSnapshots++;
+  Require(nonUniformSnapshots >= 7,
+          "private initial contents and compute/descriptor-blit replay did not preserve textures");
+  ResourceId privateBCTexture;
+  for(const TextureDescription &texture : renderer->GetTextures())
+    if(texture.format.type == ResourceFormatType::BC1)
+      privateBCTexture = texture.resourceId;
+  const auto privateBCData = textureData.find(privateBCTexture);
+  Require(privateBCTexture != ResourceId() && privateBCData != textureData.end() &&
+              privateBCData->second.size() == 32 && IsNonUniform(privateBCData->second),
+          "private BC1 base mip was not captured and replayed byte-for-byte");
+  const auto argumentData = bufferInitialData.find(argumentIdentityBuffer);
+  Require(argumentData != bufferInitialData.end() && argumentData->second.size() == 24,
+          "argument identity buffer is missing or not three 64-bit words");
+  if(argumentData != bufferInitialData.end() && argumentData->second.size() == 24)
+  {
+    uint32_t matchedAddresses = 0;
+    uint32_t matchedResourceIDs = 0;
+    for(size_t offset = 0; offset < argumentData->second.size(); offset += sizeof(uint64_t))
+    {
+      uint64_t word = 0;
+      memcpy(&word, argumentData->second.data() + offset, sizeof(word));
+      for(const auto &range : capturedBufferRanges)
+        if(word >= range.first && word - range.first < range.second)
+          matchedAddresses++;
+      for(uint64_t resourceID : capturedResourceIDs)
+        if(word == resourceID)
+          matchedResourceIDs++;
+    }
+    Require(matchedAddresses == 1,
+            "argument identity buffer does not contain one captured buffer GPU address");
+    Require(matchedResourceIDs == 2,
+            "argument identity buffer does not contain captured texture and sampler IDs");
+  }
+
+  if(drawOutputs.size() == 2)
+  {
+    for(size_t i = 0; i < drawOutputs.size(); i++)
+    {
+      std::ostringstream missing;
+      missing << "draw " << i << " has no fetchable rendered color output";
+      const auto output = textureData.find(drawOutputs[i]);
+      Require(drawOutputs[i] != ResourceId() && output != textureData.end(), conv(missing.str()));
+      if(output != textureData.end() && !output->second.empty())
+      {
+        std::ostringstream uniform;
+        uniform << "draw " << i << " rendered a uniform output texture";
+        Require(IsNonUniform(output->second), conv(uniform.str()));
+      }
+    }
+  }
+
+  if(drawEvents.size() == 2)
+  {
+    renderer->SetFrameEvent(drawEvents[0], true);
+    bytebuf firstDrawOutput = renderer->GetTextureData(drawOutputs[0], Subresource());
+    bytebuf prematureSecondOutput = renderer->GetTextureData(drawOutputs[1], Subresource());
+    Require(IsNonUniform(firstDrawOutput),
+            "event replay through the first draw did not produce its color output");
+    Require(prematureSecondOutput.empty(),
+            "event replay through the first draw also executed the second draw");
+    const MetalPipe::State *offscreen = renderer->GetMetalPipelineState();
+    Require(offscreen != NULL, "offscreen draw has no Metal pipeline state");
+    if(offscreen != NULL)
+    {
+      Require(offscreen->depthStencil.resourceId != ResourceId(),
+              "offscreen draw has no depth-stencil binding");
+      Require(offscreen->depthStencil.depthWriteEnable,
+              "offscreen draw did not preserve depth-write state");
+      Require(offscreen->depthStencil.depthFunction == CompareFunction::Less,
+              "offscreen draw did not preserve less depth comparison");
+      Require(offscreen->fragmentShader.textures.size() == 2,
+              "offscreen draw should have sampled and private BC1 fragment textures");
+      Require(offscreen->fragmentShader.samplers.size() == 2,
+              "offscreen draw should expose its direct and argument-buffer samplers");
+      Require(offscreen->vertexInput.vertexBuffers.size() >= 2,
+              "offscreen draw should have two vertex buffers");
+    }
+
+    renderer->SetFrameEvent(drawEvents[1], true);
+    bytebuf secondDrawOutput = renderer->GetTextureData(drawOutputs[1], Subresource());
+    Require(IsNonUniform(secondDrawOutput),
+            "event replay through the second draw did not produce its color output");
+    const MetalPipe::State *present = renderer->GetMetalPipelineState();
+    Require(present != NULL, "present draw has no Metal pipeline state");
+    if(present != NULL)
+    {
+      Require(present->fragmentShader.textures.size() == 1,
+              "present draw should have one fragment texture");
+      Require(present->fragmentShader.samplers.size() == 1,
+              "present draw should have one fragment sampler");
+      Require(present->vertexInput.indexBuffer.resourceId != ResourceId(),
+              "present draw has no index buffer");
+      Require(present->vertexInput.indexBuffer.byteStride == 2,
+              "present draw index type was not preserved as UInt16");
+    }
+  }
+
+  if(!failures.empty())
+  {
+    std::cerr << "Metal fixture validation failed:" << std::endl;
+    for(const rdcstr &failure : failures)
+      std::cerr << "  - " << failure << std::endl;
+    return false;
+  }
+
+  std::cout << "Metal fixture validation passed: required chunks, payloads, bindings, and draw "
+               "state are complete."
+            << std::endl;
+  return true;
+}
+
 static std::vector<std::string> version_lines;
 
 struct VersionCommand : public Command
@@ -513,8 +874,7 @@ public:
     if(DisplayRemoteServerPreview(false, {}).system != WindowingSystem::Unknown)
       previewWindow = &DisplayRemoteServerPreview;
 
-    RENDERDOC_BecomeRemoteServer(
-        conv(host), port, []() { return killSignal; }, previewWindow);
+    RENDERDOC_BecomeRemoteServer(conv(host), port, []() { return killSignal; }, previewWindow);
 
     std::cerr << std::endl << "Cleaning up from replay hosting." << std::endl;
 
@@ -530,6 +890,8 @@ private:
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t loops = 0;
+  bool validate = false;
+  bool validateMetalFixture = false;
 
 public:
   ReplayCommand() : Command() {}
@@ -540,6 +902,10 @@ public:
     parser.add<uint32_t>("height", 'h', "The preview window height.", false, 720);
     parser.add<uint32_t>("loops", 'l', "How many times to loop the replay, or 0 for indefinite.",
                          false, 0);
+    parser.add("validate", 0,
+               "Open the capture and report decoded actions/resources without creating a window.");
+    parser.add("validate-metal-fixture", 0,
+               "Strictly validate the native Metal fixture command stream and draw state.");
     parser.add<std::string>("remote-host", 0,
                             "Instead of replaying locally, replay on this host over the network.",
                             false);
@@ -573,6 +939,9 @@ public:
     width = parser.get<uint32_t>("width");
     height = parser.get<uint32_t>("height");
     loops = parser.get<uint32_t>("loops");
+    validate = parser.exist("validate");
+    validateMetalFixture = parser.exist("validate-metal-fixture");
+    validate |= validateMetalFixture;
 
     return true;
   }
@@ -603,9 +972,18 @@ public:
 
       if(result.OK())
       {
-        DisplayRendererPreview(renderer, width, height, loops);
+        bool validationOK = true;
+        if(validate)
+          validationOK = ValidateCapture(renderer, validateMetalFixture);
+        else
+          DisplayRendererPreview(renderer, width, height, loops);
 
         remote->CloseCapture(renderer);
+        if(!validationOK)
+        {
+          remote->ShutdownConnection();
+          return 1;
+        }
       }
       else
       {
@@ -637,9 +1015,15 @@ public:
 
       if(result.OK())
       {
-        DisplayRendererPreview(renderer, width, height, loops);
+        bool validationOK = true;
+        if(validate)
+          validationOK = ValidateCapture(renderer, validateMetalFixture);
+        else
+          DisplayRendererPreview(renderer, width, height, loops);
 
         renderer->Shutdown();
+        if(!validationOK)
+          return 1;
       }
       else
       {

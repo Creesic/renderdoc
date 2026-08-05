@@ -90,7 +90,7 @@
   return self.real.label;
 }
 
-- (void)setLabel:value
+- (void)setLabel:(NSString *)value
 {
   self.real.label = value;
 }
@@ -132,8 +132,29 @@
 
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block
 {
-  METAL_NOT_HOOKED();
-  return [self.real addScheduledHandler:block];
+  WrappedMTLCommandBuffer *wrapped = GetWrapped(self);
+  [self.real addScheduledHandler:^(id<MTLCommandBuffer> commandBuffer) {
+    void *previous = Threading::GetTLSValue(WrappedMTLDevice::g_scheduledCommandBufferTLSSlot);
+    Threading::SetTLSValue(WrappedMTLDevice::g_scheduledCommandBufferTLSSlot, wrapped);
+    @try
+    {
+      block(commandBuffer);
+    }
+    @finally
+    {
+      Threading::SetTLSValue(WrappedMTLDevice::g_scheduledCommandBufferTLSSlot, previous);
+    }
+
+    // EndFrameCapture waits for every submitted command buffer. Running it directly in a Metal
+    // scheduled/completed callback deadlocks because the command buffer is not fully complete
+    // until the callback returns. Retain the real buffer (and therefore its associated wrapper)
+    // and finish capture on another queue after this callback can unwind.
+    id<MTLCommandBuffer> retainedCommandBuffer = [commandBuffer retain];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      wrapped->CompleteScheduledPresent();
+      [retainedCommandBuffer release];
+    });
+  }];
 }
 
 - (void)presentDrawable:(id<MTLDrawable>)drawable
@@ -190,50 +211,50 @@
 - (nullable id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:
     (MTLRenderPassDescriptor *)renderPassDescriptor
 {
-  RDMTL::RenderPassDescriptor rdDescriptor((MTL::RenderPassDescriptor *)renderPassDescriptor);
+  WrappedMTLCommandBuffer *commandBuffer = GetWrapped(self);
+  RDMTL::RenderPassDescriptor rdDescriptor((MTL::RenderPassDescriptor *)renderPassDescriptor,
+                                           commandBuffer->GetWrappedDevice());
   return id<MTLRenderCommandEncoder>(
-      GetWrapped(self)->renderCommandEncoderWithDescriptor(rdDescriptor));
+      commandBuffer->renderCommandEncoderWithDescriptor(rdDescriptor));
 }
 
 - (nullable id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor:
     (MTLComputePassDescriptor *)computePassDescriptor API_AVAILABLE(macos(11.0), ios(14.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real computeCommandEncoderWithDescriptor:computePassDescriptor];
+  RDMTL::ComputePassDescriptor descriptor((MTL::ComputePassDescriptor *)computePassDescriptor);
+  return id<MTLComputeCommandEncoder>(
+      GetWrapped(self)->computeCommandEncoderWithDescriptor(descriptor));
 }
 
 - (nullable id<MTLBlitCommandEncoder>)blitCommandEncoderWithDescriptor:
     (MTLBlitPassDescriptor *)blitPassDescriptor API_AVAILABLE(macos(11.0), ios(14.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real blitCommandEncoderWithDescriptor:blitPassDescriptor];
+  return id<MTLBlitCommandEncoder>(GetWrapped(self)->blitCommandEncoderWithDescriptor(
+      (MTL::BlitPassDescriptor *)blitPassDescriptor));
 }
 
 - (nullable id<MTLComputeCommandEncoder>)computeCommandEncoder
 {
-  METAL_NOT_HOOKED();
-  return [self.real computeCommandEncoder];
+  return id<MTLComputeCommandEncoder>(GetWrapped(self)->computeCommandEncoder());
 }
 
 - (nullable id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType:
     (MTLDispatchType)dispatchType API_AVAILABLE(macos(10.14), ios(12.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real computeCommandEncoderWithDispatchType:dispatchType];
+  return id<MTLComputeCommandEncoder>(GetWrapped(self)->computeCommandEncoderWithDispatchType(
+      (MTL::DispatchType)dispatchType));
 }
 
 - (void)encodeWaitForEvent:(id<MTLEvent>)event
                      value:(uint64_t)value API_AVAILABLE(macos(10.14), ios(12.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real encodeWaitForEvent:event value:value];
+  GetWrapped(self)->encodeWaitForEvent(GetWrapped(event), value);
 }
 
 - (void)encodeSignalEvent:(id<MTLEvent>)event
                     value:(uint64_t)value API_AVAILABLE(macos(10.14), ios(12.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real encodeSignalEvent:event value:value];
+  GetWrapped(self)->encodeSignalEvent(GetWrapped(event), value);
 }
 
 - (nullable id<MTLParallelRenderCommandEncoder>)parallelRenderCommandEncoderWithDescriptor:
@@ -276,14 +297,12 @@
 
 - (void)pushDebugGroup:(NSString *)string API_AVAILABLE(macos(10.13), ios(11.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real pushDebugGroup:string];
+  GetWrapped(self)->pushDebugGroup((NS::String *)string);
 }
 
 - (void)popDebugGroup API_AVAILABLE(macos(10.13), ios(11.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real popDebugGroup];
+  GetWrapped(self)->popDebugGroup();
 }
 
 @end
