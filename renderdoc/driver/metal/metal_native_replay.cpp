@@ -824,8 +824,8 @@ struct NativeIndexBuilder
         present.stableId = presentedImage;
         present.kind = MetalTrace::NodeKind::Present;
         present.path = CommandPath(commandBuffer) + "/present";
-        present.name = StringFormat::Fmt("presentDrawable(%s)",
-                                         ResourceObjectName(presentedImage).c_str());
+        present.name =
+            StringFormat::Fmt("presentDrawable(%s)", ResourceObjectName(presentedImage).c_str());
         present.objectName = present.name;
         index.nodes.push_back(std::move(present));
         break;
@@ -1144,8 +1144,10 @@ RDResult NativeMetalReplayDriver::Create(RDCFile *rdc, const ReplayOptions &opts
   manifest.capabilities = MetalTrace::Capability::Actions | MetalTrace::Capability::Resources |
                           MetalTrace::Capability::BufferFetch;
 
+  NativeMetalReplayCache *replayCache = Metal_CreateNativeReplayCache();
   NativeMetalExecutionResult execution;
-  RDResult executionResult = Metal_ExecuteNativeCapture(structured, execution);
+  RDResult executionResult =
+      Metal_ExecuteNativeCapture(structured, execution, UINT32_MAX, NULL, replayCache);
   if(executionResult == ResultCode::Succeeded)
   {
     manifest.capabilities = manifest.capabilities | MetalTrace::Capability::WholeStreamExecution |
@@ -1164,12 +1166,14 @@ RDResult NativeMetalReplayDriver::Create(RDCFile *rdc, const ReplayOptions &opts
   }
   else
   {
+    Metal_DestroyNativeReplayCache(replayCache);
+    replayCache = NULL;
     builder.index.bufferFetchUnavailableReason =
         "Native Metal whole-stream replay failed: " + executionResult.message;
     RDCWARN("Native Metal whole-stream replay unavailable: %s", executionResult.message.c_str());
   }
 
   *driver = new AppleTraceReplayDriver(manifest, std::move(builder.index), std::move(builder.buffers),
-                                       std::move(builder.textures), structured);
+                                       std::move(builder.textures), structured, replayCache);
   return ResultCode::Succeeded;
 }

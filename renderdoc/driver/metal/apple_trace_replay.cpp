@@ -30,6 +30,7 @@
 #include <functional>
 #include "api/replay/resourceid.h"
 #include "common/formatting.h"
+#include "common/timing.h"
 #include "core/core.h"
 #include "os/os_specific.h"
 #include "serialise/rdcfile.h"
@@ -43,9 +44,9 @@ static bool IsActionNode(MetalTrace::NodeKind kind)
 {
   return kind == MetalTrace::NodeKind::CommandBuffer || kind == MetalTrace::NodeKind::DebugGroup ||
          kind == MetalTrace::NodeKind::RenderEncoder ||
-         kind == MetalTrace::NodeKind::ComputeEncoder || kind == MetalTrace::NodeKind::BlitEncoder ||
-         kind == MetalTrace::NodeKind::Draw || kind == MetalTrace::NodeKind::Dispatch ||
-         kind == MetalTrace::NodeKind::Present;
+         kind == MetalTrace::NodeKind::ComputeEncoder ||
+         kind == MetalTrace::NodeKind::BlitEncoder || kind == MetalTrace::NodeKind::Draw ||
+         kind == MetalTrace::NodeKind::Dispatch || kind == MetalTrace::NodeKind::Present;
 }
 
 static bool IsSnapshotTextureNode(const MetalTrace::Node &node)
@@ -382,8 +383,7 @@ static void FillTextureDimensions(const MetalTrace::Node &node, TextureDescripti
       texture.format.compType = value.contains("_sRGB") ? CompType::UNormSRGB : CompType::UNorm;
       texture.format.SetBGRAOrder(value.contains("BGRA8Unorm"));
     }
-    else if(value.contains("BC1_RGBA") || value.contains("BC2_RGBA") ||
-            value.contains("BC3_RGBA"))
+    else if(value.contains("BC1_RGBA") || value.contains("BC2_RGBA") || value.contains("BC3_RGBA"))
     {
       texture.format.type = value.contains("BC1_RGBA")   ? ResourceFormatType::BC1
                             : value.contains("BC2_RGBA") ? ResourceFormatType::BC2
@@ -417,13 +417,10 @@ static size_t BaseTextureDataSize(const TextureDescription &texture)
   const size_t height = RDCMAX(texture.height, 1U);
   switch(texture.format.type)
   {
-    case ResourceFormatType::BC1:
-      return ((width + 3) / 4) * ((height + 3) / 4) * 8;
+    case ResourceFormatType::BC1: return ((width + 3) / 4) * ((height + 3) / 4) * 8;
     case ResourceFormatType::BC2:
-    case ResourceFormatType::BC3:
-      return ((width + 3) / 4) * ((height + 3) / 4) * 16;
-    default:
-      return width * height * texture.format.compCount * texture.format.compByteWidth;
+    case ResourceFormatType::BC3: return ((width + 3) / 4) * ((height + 3) / 4) * 16;
+    default: return width * height * texture.format.compCount * texture.format.compByteWidth;
   }
 }
 
@@ -523,12 +520,14 @@ AppleTraceReplayDriver::AppleTraceReplayDriver(const MetalTrace::Manifest &manif
                                                MetalTrace::Index &&index,
                                                std::map<uint64_t, bytebuf> &&nativeBufferData,
                                                std::map<uint64_t, bytebuf> &&nativeTextureData,
-                                               SDFile &structuredFile)
+                                               SDFile &structuredFile,
+                                               NativeMetalReplayCache *nativeReplayCache)
     : m_Manifest(manifest),
       m_Index(std::move(index)),
       m_IndexPreloaded(true),
       m_NativeBufferData(std::move(nativeBufferData)),
-      m_NativeTextureData(std::move(nativeTextureData))
+      m_NativeTextureData(std::move(nativeTextureData)),
+      m_NativeReplayCache(nativeReplayCache)
 {
   m_StructuredFile = new SDFile;
   structuredFile.Swap(*m_StructuredFile);
@@ -549,6 +548,7 @@ AppleTraceReplayDriver::~AppleTraceReplayDriver()
     m_Session->Shutdown();
     delete m_Session;
   }
+  Metal_DestroyNativeReplayCache(m_NativeReplayCache);
   delete m_StructuredFile;
 }
 
@@ -919,6 +919,8 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
   m_DebugMessages.clear();
   m_TexturePreviewReportedErrors.clear();
   m_LastNativeReplayDrawCount = ~0U;
+  m_NativeReplayTextureCache.clear();
+  m_NativeReplayTextureCacheOrder.clear();
   ClearTexturePreviews();
   ClearBufferProxies();
   m_TextureFetchUnavailableReason.clear();
@@ -1203,6 +1205,15 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
       hasFetchableTexture |= m_Index.nodes[textureNode.second].canFetch;
     if(hasFetchableTexture && (native || m_Session != NULL))
       InitialiseTextureRenderer();
+    if(native &&
+       MetalTrace::HasCapability(m_Manifest.capabilities, MetalTrace::Capability::ExecutableReplay) &&
+       !m_NativeTextureData.empty())
+    {
+      const uint32_t fullDrawCount = CountDrawsThroughEvent(m_FrameRecord.actionList, ~0U, true);
+      m_LastNativeReplayDrawCount = fullDrawCount;
+      m_NativeReplayTextureCache[fullDrawCount] = m_NativeTextureData;
+      m_NativeReplayTextureCacheOrder.push_back(fullDrawCount);
+    }
     m_SessionCancelled = false;
     return ResultCode::Succeeded;
   }
@@ -1247,8 +1258,57 @@ void AppleTraceReplayDriver::ReplayLog(uint32_t endEventID, ReplayLogType replay
   if(drawCount == m_LastNativeReplayDrawCount)
     return;
 
+  rdcarray<uint64_t> requestedTextures;
+  auto AddTexture = [this, &requestedTextures](ResourceId resource) {
+    auto node = m_TextureNodes.find(resource);
+    if(node == m_TextureNodes.end())
+      return;
+    const uint64_t stableId = m_Index.nodes[node->second].stableId;
+    if(stableId != 0 && !requestedTextures.contains(stableId))
+      requestedTextures.push_back(stableId);
+  };
+
+  if(selectedAction != NULL)
+  {
+    for(ResourceId output : selectedAction->outputs)
+      AddTexture(output);
+    AddTexture(selectedAction->depthOut);
+    AddTexture(selectedAction->copyDestination);
+  }
+
+  auto descriptors = m_EventDescriptors.find(endEventID);
+  if(descriptors != m_EventDescriptors.end())
+    for(const Descriptor &descriptor : descriptors->second.descriptors)
+      if(descriptor.type == DescriptorType::Image)
+        AddTexture(descriptor.resource);
+
+  // Keep explicitly opened or pinned texture views current while the event changes.
+  for(const auto &preview : m_ProxyTextures)
+    AddTexture(preview.first);
+
+  PerformanceTimer replayTimer;
   NativeMetalExecutionResult execution;
-  RDResult result = Metal_ExecuteNativeCapture(*m_StructuredFile, execution, drawCount);
+  bool cacheHit = false;
+  auto cachedReplay = m_NativeReplayTextureCache.find(drawCount);
+  if(cachedReplay != m_NativeReplayTextureCache.end())
+  {
+    cacheHit = true;
+    for(uint64_t texture : requestedTextures)
+      if(cachedReplay->second.find(texture) == cachedReplay->second.end())
+      {
+        cacheHit = false;
+        break;
+      }
+    if(cacheHit)
+      execution.textures = cachedReplay->second;
+  }
+
+  RDResult result = ResultCode::Succeeded;
+  if(!cacheHit)
+  {
+    result = Metal_ExecuteNativeCapture(*m_StructuredFile, execution, drawCount, &requestedTextures,
+                                        m_NativeReplayCache);
+  }
   if(result != ResultCode::Succeeded)
   {
     if(m_NativeReplayError != result.message)
@@ -1267,6 +1327,17 @@ void AppleTraceReplayDriver::ReplayLog(uint32_t endEventID, ReplayLogType replay
 
   m_NativeReplayError.clear();
   m_LastNativeReplayDrawCount = drawCount;
+  if(!cacheHit)
+  {
+    m_NativeReplayTextureCache[drawCount] = execution.textures;
+    m_NativeReplayTextureCacheOrder.removeOne(drawCount);
+    m_NativeReplayTextureCacheOrder.push_back(drawCount);
+    while(m_NativeReplayTextureCacheOrder.size() > 16)
+    {
+      m_NativeReplayTextureCache.erase(m_NativeReplayTextureCacheOrder.front());
+      m_NativeReplayTextureCacheOrder.erase(0);
+    }
+  }
   m_NativeTextureData = std::move(execution.textures);
   for(MetalTrace::Node &node : m_Index.nodes)
     if(node.kind == MetalTrace::NodeKind::Texture)
@@ -1313,6 +1384,12 @@ void AppleTraceReplayDriver::ReplayLog(uint32_t endEventID, ReplayLogType replay
       }
     }
   }
+
+  RDCLOG(
+      "Native Metal event replay through EID %u (%u draws, %zu requested textures, %s) took "
+      "%.1f ms",
+      endEventID, drawCount, requestedTextures.size(), cacheHit ? "cache hit" : "executed",
+      replayTimer.GetMilliseconds());
 }
 
 void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,

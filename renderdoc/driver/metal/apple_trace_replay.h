@@ -29,6 +29,8 @@
 #include "apple_trace_session.h"
 #include "metal_trace_model.h"
 
+struct NativeMetalReplayCache;
+
 class AppleTraceReplayDriver final : public IReplayDriver
 {
 public:
@@ -36,8 +38,8 @@ public:
                                   AppleTraceSession *ownedSession = NULL);
   AppleTraceReplayDriver(const MetalTrace::Manifest &manifest, MetalTrace::Index &&index,
                          std::map<uint64_t, bytebuf> &&nativeBufferData,
-                         std::map<uint64_t, bytebuf> &&nativeTextureData,
-                         SDFile &structuredFile);
+                         std::map<uint64_t, bytebuf> &&nativeTextureData, SDFile &structuredFile,
+                         NativeMetalReplayCache *nativeReplayCache);
 
   void CancelReplayWork();
 
@@ -90,9 +92,10 @@ public:
                               MeshDataStage stage) override
   {
     MeshFormat ret;
-    ret.status = m_Manifest.header.sourceKind == MetalTrace::SourceKind::NativeMetal
-                     ? rdcstr("Post-VS data is unavailable until native Metal replay is implemented")
-                     : rdcstr("Post-VS data is unavailable for read-only Apple GPU Trace inspection");
+    ret.status =
+        m_Manifest.header.sourceKind == MetalTrace::SourceKind::NativeMetal
+            ? rdcstr("Post-VS data is unavailable until native Metal replay is implemented")
+            : rdcstr("Post-VS data is unavailable for read-only Apple GPU Trace inspection");
     return ret;
   }
   void GetBufferData(ResourceId buff, uint64_t offset, uint64_t len, bytebuf &retData) override;
@@ -248,6 +251,9 @@ private:
   std::map<uint32_t, MetalPipe::DepthStencil> m_EventDepthStencil;
   rdcstr m_NativeReplayError;
   uint32_t m_LastNativeReplayDrawCount = ~0U;
+  std::map<uint32_t, std::map<uint64_t, bytebuf>> m_NativeReplayTextureCache;
+  rdcarray<uint32_t> m_NativeReplayTextureCacheOrder;
+  NativeMetalReplayCache *m_NativeReplayCache = NULL;
   FrameRecord m_FrameRecord;
   SDFile *m_StructuredFile = NULL;
   AppleTraceSession *m_Session = NULL;

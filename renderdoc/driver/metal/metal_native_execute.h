@@ -31,6 +31,7 @@
 #include "common/result.h"
 
 struct SDFile;
+struct NativeMetalReplayCache;
 
 struct NativeMetalExecutionResult
 {
@@ -40,5 +41,10 @@ struct NativeMetalExecutionResult
   rdcstr status;
 };
 
+NativeMetalReplayCache *Metal_CreateNativeReplayCache();
+void Metal_DestroyNativeReplayCache(NativeMetalReplayCache *cache);
+
 RDResult Metal_ExecuteNativeCapture(const SDFile &file, NativeMetalExecutionResult &result,
-                                    uint32_t maxDrawCount = UINT32_MAX);
+                                    uint32_t maxDrawCount = UINT32_MAX,
+                                    const rdcarray<uint64_t> *requestedTextureIds = NULL,
+                                    NativeMetalReplayCache *cache = NULL);

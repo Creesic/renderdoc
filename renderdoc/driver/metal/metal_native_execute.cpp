@@ -166,6 +166,50 @@ struct PipelineArgumentBufferLayouts
   std::map<uint64_t, ArgumentBufferLayout> fragment;
 };
 
+}    // namespace
+
+struct NativeMetalReplayCache
+{
+  ~NativeMetalReplayCache()
+  {
+    Metal_DestroyNativeReplayResidencySet(residencySet);
+    for(size_t i = retained.size(); i > 0; i--)
+      retained[i - 1]->release();
+    if(device)
+      device->release();
+  }
+
+  MTL::Device *device = NULL;
+  void *residencySet = NULL;
+  bool residencyCommitted = false;
+  rdcarray<NS::Object *> retained;
+  bool populated = false;
+  size_t frameStartChunk = 0;
+  uint64_t lastQueueId = 0;
+  bool requiresArgumentBufferSamplers = false;
+  std::map<uint64_t, MTL::CommandQueue *> queues;
+  std::map<uint64_t, MTL::Buffer *> buffers;
+  std::map<uint64_t, bytebuf> bufferInitialData;
+  std::map<uint64_t, TextureInfo> textures;
+  std::map<uint64_t, uint64_t> textureParents;
+  std::set<uint64_t> initializedTextures;
+  std::set<uint64_t> dirtyTextures;
+  std::map<uint64_t, MTL::Library *> libraries;
+  std::map<uint64_t, MTL::Function *> functions;
+  std::map<uint64_t, MTL::RenderPipelineState *> pipelines;
+  std::map<uint64_t, PipelineArgumentBufferLayouts> pipelineArgumentBufferLayouts;
+  std::map<uint64_t, MTL::ComputePipelineState *> computePipelines;
+  std::map<uint64_t, MTL::DepthStencilState *> depthStates;
+  std::map<uint64_t, MTL::SamplerState *> samplers;
+  std::map<uint64_t, MTL::Fence *> fences;
+  std::map<uint64_t, std::pair<uint64_t, uint64_t>> capturedBufferAddresses;
+  std::map<uint64_t, uint64_t> capturedResourceIDs;
+  rdcarray<const SDChunk *> initialTextureChunks;
+};
+
+namespace
+{
+
 void CollectArgumentBufferLayouts(NS::Array *arguments,
                                   std::map<uint64_t, ArgumentBufferLayout> &layouts)
 {
@@ -204,7 +248,7 @@ void CollectArgumentBufferLayouts(NS::Array *arguments,
 uint32_t RebaseArgumentBufferWords(
     byte *contents, uint64_t byteLength, const std::map<uint64_t, uint64_t> &textureReplacements,
     const std::map<uint64_t, uint64_t> &samplerReplacements, const ArgumentBufferLayout *layout,
-    const rdcarray<ArgumentBufferAddressReplacement> &addressReplacements)
+    const std::map<uint64_t, ArgumentBufferAddressReplacement> &addressReplacements)
 {
   if(contents == NULL)
     return 0;
@@ -257,13 +301,16 @@ uint32_t RebaseArgumentBufferWords(
 
     if(!resolved)
     {
-      for(const ArgumentBufferAddressReplacement &buffer : addressReplacements)
+      auto address = addressReplacements.upper_bound(value);
+      if(address != addressReplacements.begin())
       {
-        if(value < buffer.capturedStart || value - buffer.capturedStart >= buffer.byteLength)
-          continue;
-        replacement = buffer.replayStart + (value - buffer.capturedStart);
-        resolved = true;
-        break;
+        --address;
+        const ArgumentBufferAddressReplacement &buffer = address->second;
+        if(value >= buffer.capturedStart && value - buffer.capturedStart < buffer.byteLength)
+        {
+          replacement = buffer.replayStart + (value - buffer.capturedStart);
+          resolved = true;
+        }
       }
     }
 
@@ -279,14 +326,22 @@ uint32_t RebaseArgumentBufferWords(
 
 struct Executor
 {
-  Executor(const SDFile &structured, NativeMetalExecutionResult &execution, uint32_t drawLimit)
-      : file(structured), result(execution), maxDrawCount(drawLimit)
+  Executor(const SDFile &structured, NativeMetalExecutionResult &execution, uint32_t drawLimit,
+           const rdcarray<uint64_t> *requestedTextures, NativeMetalReplayCache *replayCache)
+      : file(structured),
+        result(execution),
+        maxDrawCount(drawLimit),
+        filterReadbacks(requestedTextures != NULL),
+        cache(replayCache)
   {
+    if(requestedTextures != NULL)
+      requestedReadbackTextureIds.insert(requestedTextures->begin(), requestedTextures->end());
   }
 
   ~Executor()
   {
-    Metal_DestroyNativeReplayResidencySet(residencySet);
+    if(ownsResidencySet)
+      Metal_DestroyNativeReplayResidencySet(residencySet);
     for(size_t i = retained.size(); i > 0; i--)
       retained[i - 1]->release();
     if(pool)
@@ -296,18 +351,65 @@ struct Executor
   RDResult Run()
   {
     pool = NS::AutoreleasePool::alloc()->init();
-    device = MTL::CreateSystemDefaultDevice();
+    device = cache ? cache->device : NULL;
+    if(device == NULL)
+      device = MTL::CreateSystemDefaultDevice();
     if(device == NULL)
       RETURN_ERROR_RESULT(ResultCode::APIHardwareUnsupported,
                           "Metal system device is unavailable for native replay");
-    RetainAutoreleased(device, retained);
-    residencySet = Metal_CreateNativeReplayResidencySet(device, 1024);
-
-    for(const SDChunk *chunk : file.chunks)
+    if(cache != NULL && cache->device == NULL)
     {
+      device->retain();
+      cache->device = device;
+    }
+    else if(cache == NULL)
+    {
+      RetainAutoreleased(device, retained);
+    }
+    residencySet = cache ? cache->residencySet : NULL;
+    if(residencySet == NULL)
+    {
+      residencySet = Metal_CreateNativeReplayResidencySet(device, 1024);
+      if(cache != NULL)
+        cache->residencySet = residencySet;
+      else
+        ownsResidencySet = true;
+    }
+
+    size_t firstChunk = 0;
+    if(cache != NULL && cache->populated)
+    {
+      RDResult seeded = SeedFromCache();
+      if(seeded != ResultCode::Succeeded)
+        return seeded;
+      firstChunk = cache->frameStartChunk;
+    }
+
+    PerformanceTimer processTimer;
+    for(size_t chunkIndex = firstChunk; chunkIndex < file.chunks.size(); chunkIndex++)
+    {
+      const SDChunk *chunk = file.chunks[chunkIndex];
       RDResult processed = Process(chunk);
       if(processed != ResultCode::Succeeded)
         return processed;
+      if(cache != NULL && !cache->populated &&
+         (SystemChunk)chunk->metadata.chunkID == SystemChunk::CaptureBegin)
+        cache->frameStartChunk = chunkIndex + 1;
+      if(executionComplete)
+        break;
+    }
+    processMilliseconds = processTimer.GetMilliseconds();
+
+    RDResult submitted = WaitForSubmittedCommandBuffers();
+    if(submitted != ResultCode::Succeeded)
+      return submitted;
+
+    if(cache != NULL && !cache->populated)
+    {
+      cache->requiresArgumentBufferSamplers = requiresArgumentBufferSamplers;
+      cache->capturedBufferAddresses = capturedBufferAddresses;
+      cache->capturedResourceIDs = capturedResourceIDs;
+      cache->populated = true;
     }
 
     if(lastQueue == NULL)
@@ -322,8 +424,10 @@ struct Executor
       RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
                           "Native Metal execution encountered no draw commands");
 
+    PerformanceTimer readbackTimer;
     ReadbackTextures();
-    if(result.textures.empty())
+    readbackMilliseconds = readbackTimer.GetMilliseconds();
+    if(!filterReadbacks && result.textures.empty())
       RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
                           "Native Metal execution produced no readable color textures "
                           "(%zu marked IDs, %zu existing candidates, %zu compatible candidates, "
@@ -339,6 +443,116 @@ struct Executor
         "using %zu reflected resource slots",
         result.drawCount, result.textures.size(), result.rebasedArgumentWordCount,
         reflectedArgumentSlots);
+    if(filterReadbacks)
+    {
+      RDCLOG(
+          "Native Metal replay timing: process %.1f ms (command waits %.1f ms, initial uploads "
+          "%.1f ms), readback %.1f ms",
+          processMilliseconds, commandWaitMilliseconds, initialUploadMilliseconds,
+          readbackMilliseconds);
+    }
+    return ResultCode::Succeeded;
+  }
+
+  template <typename MetalType>
+  void TrackPersistent(MetalType *object)
+  {
+    if(cache != NULL)
+      TrackOwned(object, cache->retained);
+    else
+      TrackOwned(object, retained);
+  }
+
+  template <typename MetalType>
+  void AddResidencyAllocation(MetalType *object)
+  {
+    Metal_AddNativeReplayResidencyAllocation(residencySet, object);
+    if(cache != NULL)
+      cache->residencyCommitted = false;
+  }
+
+  void CommitResidencySet()
+  {
+    if(cache != NULL && cache->residencyCommitted)
+      return;
+    Metal_CommitNativeReplayResidencySet(residencySet);
+    if(cache != NULL)
+      cache->residencyCommitted = true;
+  }
+
+  RDResult CheckCommandBuffer(uint64_t commandBufferId, MTL::CommandBuffer *buffer)
+  {
+    if(buffer->status() == MTL::CommandBufferStatusError)
+    {
+      NS::Error *error = buffer->error();
+      RETURN_ERROR_RESULT(ResultCode::APIHardwareUnsupported,
+                          "Captured Metal command buffer %llu failed after %u draws and %u "
+                          "argument-buffer replacements: %s",
+                          commandBufferId, result.drawCount, result.rebasedArgumentWordCount,
+                          error && error->localizedDescription()
+                              ? error->localizedDescription()->utf8String()
+                              : "unknown Metal error");
+    }
+    return ResultCode::Succeeded;
+  }
+
+  RDResult WaitForSubmittedCommandBuffers()
+  {
+    if(submittedCommandBuffers.empty())
+      return ResultCode::Succeeded;
+
+    PerformanceTimer commandTimer;
+    submittedCommandBuffers.back().second->waitUntilCompleted();
+    commandWaitMilliseconds += commandTimer.GetMilliseconds();
+    for(const auto &submitted : submittedCommandBuffers)
+    {
+      RDResult status = CheckCommandBuffer(submitted.first, submitted.second);
+      if(status != ResultCode::Succeeded)
+        return status;
+    }
+    submittedCommandBuffers.clear();
+    submittedQueueId = 0;
+    return ResultCode::Succeeded;
+  }
+
+  RDResult SeedFromCache()
+  {
+    queues = cache->queues;
+    buffers = cache->buffers;
+    textures = cache->textures;
+    libraries = cache->libraries;
+    functions = cache->functions;
+    pipelines = cache->pipelines;
+    pipelineArgumentBufferLayouts = cache->pipelineArgumentBufferLayouts;
+    computePipelines = cache->computePipelines;
+    depthStates = cache->depthStates;
+    samplers = cache->samplers;
+    fences = cache->fences;
+    capturedBufferAddresses = cache->capturedBufferAddresses;
+    capturedResourceIDs = cache->capturedResourceIDs;
+    requiresArgumentBufferSamplers = cache->requiresArgumentBufferSamplers;
+    auto last = queues.find(cache->lastQueueId);
+    lastQueue = last == queues.end() ? NULL : last->second;
+
+    for(const auto &initial : cache->bufferInitialData)
+    {
+      auto buffer = buffers.find(initial.first);
+      if(buffer == buffers.end() || buffer->second == NULL || buffer->second->contents() == NULL)
+        continue;
+      const size_t copyLength = RDCMIN(initial.second.size(), (size_t)buffer->second->length());
+      if(copyLength > 0)
+        memcpy(buffer->second->contents(), initial.second.data(), copyLength);
+      normalisedArgumentBuffers.erase(initial.first);
+    }
+
+    for(uint64_t texture : cache->initializedTextures)
+      readbackTextureIds.insert(texture);
+    for(const SDChunk *chunk : cache->initialTextureChunks)
+    {
+      RDResult initial = ApplyInitialContents(chunk);
+      if(initial != ResultCode::Succeeded)
+        return initial;
+    }
     return ResultCode::Succeeded;
   }
 
@@ -386,12 +600,27 @@ struct Executor
       case MetalChunk::MTLDevice_newCommandQueue:
       {
         uint64_t id = UInt(Child(chunk, "CommandQueue"));
+        if(cache != NULL)
+        {
+          auto cached = cache->queues.find(id);
+          if(cached != cache->queues.end())
+          {
+            queues[id] = lastQueue = cached->second;
+            cache->lastQueueId = id;
+            return ResultCode::Succeeded;
+          }
+        }
         MTL::CommandQueue *queue = device->newCommandQueue();
         if(queue == NULL)
           RETURN_ERROR_RESULT(ResultCode::APIHardwareUnsupported,
                               "Could not create replay Metal command queue");
         queues[id] = lastQueue = queue;
-        TrackOwned(queue, retained);
+        if(cache != NULL)
+        {
+          cache->queues[id] = queue;
+          cache->lastQueueId = id;
+        }
+        TrackPersistent(queue);
         Metal_AttachNativeReplayResidencySet(queue, residencySet);
         return ResultCode::Succeeded;
       }
@@ -402,14 +631,41 @@ struct Executor
         NS::UInteger length = (NS::UInteger)UInt(Child(chunk, "length"));
         MTL::ResourceOptions options = (MTL::ResourceOptions)UInt(Child(chunk, "options"));
         bytebuf data = Buffer(file, Child(chunk, "initialData"));
+        if(cache != NULL)
+        {
+          auto cached = cache->buffers.find(id);
+          if(cached != cache->buffers.end())
+          {
+            MTL::Buffer *buffer = cached->second;
+            buffers[id] = buffer;
+            byte *contents = (byte *)buffer->contents();
+            if(contents != NULL)
+            {
+              const size_t copyLength = RDCMIN((size_t)length, data.size());
+              if(copyLength > 0)
+                memcpy(contents, data.data(), copyLength);
+              if(copyLength < length)
+                memset(contents + copyLength, 0, length - copyLength);
+            }
+            return ResultCode::Succeeded;
+          }
+        }
         MTL::Buffer *buffer = data.empty() ? device->newBuffer(length, options)
                                            : device->newBuffer(data.data(), length, options);
         if(buffer == NULL)
           RETURN_ERROR_RESULT(ResultCode::APIHardwareUnsupported,
                               "Could not create replay Metal buffer %llu", id);
         buffers[id] = buffer;
-        TrackOwned(buffer, retained);
-        Metal_AddNativeReplayResidencyAllocation(residencySet, buffer);
+        if(cache != NULL)
+        {
+          cache->buffers[id] = buffer;
+          bytebuf &initial = cache->bufferInitialData[id];
+          initial.resize((size_t)length);
+          if(!data.empty())
+            memcpy(initial.data(), data.data(), RDCMIN(initial.size(), data.size()));
+        }
+        TrackPersistent(buffer);
+        AddResidencyAllocation(buffer);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLDevice_newTextureWithDescriptor:
@@ -425,6 +681,15 @@ struct Executor
         uint64_t id = UInt(Child(chunk, "Library"));
         rdcstr source = String(Child(chunk, "source"));
         requiresArgumentBufferSamplers |= source.contains("sampler ") && source.contains("[[id(");
+        if(cache != NULL)
+        {
+          auto cached = cache->libraries.find(id);
+          if(cached != cache->libraries.end())
+          {
+            libraries[id] = cached->second;
+            return ResultCode::Succeeded;
+          }
+        }
         NS::Error *error = NULL;
         MTL::Library *library = device->newLibrary(
             NS::String::string(source.c_str(), NS::UTF8StringEncoding), NULL, &error);
@@ -434,7 +699,9 @@ struct Executor
               error && error->localizedDescription() ? error->localizedDescription()->utf8String()
                                                      : "unknown compiler error");
         libraries[id] = library;
-        TrackOwned(library, retained);
+        if(cache != NULL)
+          cache->libraries[id] = library;
+        TrackPersistent(library);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLLibrary_newFunctionWithName:
@@ -450,6 +717,15 @@ struct Executor
               "Captured Metal function '%s' uses specialization constants that are not yet "
               "serialised",
               name.c_str());
+        if(cache != NULL)
+        {
+          auto cached = cache->functions.find(functionId);
+          if(cached != cache->functions.end())
+          {
+            functions[functionId] = cached->second;
+            return ResultCode::Succeeded;
+          }
+        }
         MTL::Library *library = libraries[libraryId];
         MTL::Function *function =
             library ? library->newFunction(NS::String::string(name.c_str(), NS::UTF8StringEncoding))
@@ -458,7 +734,9 @@ struct Executor
           RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
                               "Could not create captured Metal function '%s'", name.c_str());
         functions[functionId] = function;
-        TrackOwned(function, retained);
+        if(cache != NULL)
+          cache->functions[functionId] = function;
+        TrackPersistent(function);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLDevice_newRenderPipelineStateWithDescriptor: return CreatePipeline(chunk);
@@ -470,12 +748,24 @@ struct Executor
       case MetalChunk::MTLDevice_newSamplerStateWithDescriptor: return CreateSampler(chunk);
       case MetalChunk::MTLDevice_newFence:
       {
+        const uint64_t id = UInt(Child(chunk, "Fence"));
+        if(cache != NULL)
+        {
+          auto cached = cache->fences.find(id);
+          if(cached != cache->fences.end())
+          {
+            fences[id] = cached->second;
+            return ResultCode::Succeeded;
+          }
+        }
         MTL::Fence *fence = device->newFence();
         if(fence == NULL)
           RETURN_ERROR_RESULT(ResultCode::APIHardwareUnsupported,
                               "Could not create captured Metal fence");
-        fences[UInt(Child(chunk, "Fence"))] = fence;
-        TrackOwned(fence, retained);
+        fences[id] = fence;
+        if(cache != NULL)
+          cache->fences[id] = fence;
+        TrackPersistent(fence);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLDevice_newEvent:
@@ -514,13 +804,16 @@ struct Executor
           capturedResourceIDs[id] = gpuResourceID;
         // A buffer may have been inspected before the identity of one of its indirect resources
         // was serialised. Revisit known argument buffers after the identity table grows.
+        argumentReplacementTablesValid = false;
         normalisedArgumentBuffers.clear();
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLCommandQueue_commandBuffer:
       case MetalChunk::MTLCommandQueue_commandBufferWithUnretainedReferences:
       {
-        MTL::CommandQueue *queue = queues[UInt(Child(chunk, "CommandQueue"))];
+        const uint64_t queueId = UInt(Child(chunk, "CommandQueue"));
+        const uint64_t commandBufferId = UInt(Child(chunk, "CommandBuffer"));
+        MTL::CommandQueue *queue = queues[queueId];
         MTL::CommandBuffer *buffer =
             queue ? type == MetalChunk::MTLCommandQueue_commandBufferWithUnretainedReferences
                         ? queue->commandBufferWithUnretainedReferences()
@@ -529,7 +822,8 @@ struct Executor
         if(buffer == NULL)
           RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
                               "Could not create captured Metal command buffer");
-        commandBuffers[UInt(Child(chunk, "CommandBuffer"))] = buffer;
+        commandBuffers[commandBufferId] = buffer;
+        commandBufferQueues[commandBufferId] = queueId;
         RetainAutoreleased(buffer, retained);
         return ResultCode::Succeeded;
       }
@@ -907,7 +1201,7 @@ struct Executor
                                   (NS::UInteger)UInt(Child(chunk, "destinationLevel")),
                                   Origin(Child(chunk, "destinationOrigin")),
                                   (MTL::BlitOption)UInt(Child(chunk, "options")));
-        readbackTextureIds.insert(destination);
+        MarkTextureWritten(destination);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLBlitCommandEncoder_copyFromTexture_toTexture:
@@ -917,7 +1211,7 @@ struct Executor
         if(encoder)
           encoder->copyFromTexture(textures[UInt(Child(chunk, "sourceTexture"))].texture,
                                    textures[destination].texture);
-        readbackTextureIds.insert(destination);
+        MarkTextureWritten(destination);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLBlitCommandEncoder_copyFromTexture_toTexture_slice_level_origin:
@@ -933,7 +1227,7 @@ struct Executor
                                    (NS::UInteger)UInt(Child(chunk, "destinationSlice")),
                                    (NS::UInteger)UInt(Child(chunk, "destinationLevel")),
                                    Origin(Child(chunk, "destinationOrigin")));
-        readbackTextureIds.insert(destination);
+        MarkTextureWritten(destination);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLBlitCommandEncoder_copyFromTexture_toTexture_slice_level_count:
@@ -949,7 +1243,7 @@ struct Executor
                                    (NS::UInteger)UInt(Child(chunk, "destinationLevel")),
                                    (NS::UInteger)UInt(Child(chunk, "sliceCount")),
                                    (NS::UInteger)UInt(Child(chunk, "levelCount")));
-        readbackTextureIds.insert(destination);
+        MarkTextureWritten(destination);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLBlitCommandEncoder_copyFromTexture_toBuffer:
@@ -976,7 +1270,7 @@ struct Executor
         const uint64_t texture = UInt(Child(chunk, "texture"));
         if(encoder)
           encoder->generateMipmaps(textures[texture].texture);
-        readbackTextureIds.insert(texture);
+        MarkTextureWritten(texture);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLBlitCommandEncoder_fillBuffer:
@@ -1104,7 +1398,7 @@ struct Executor
           encoder->dispatchThreads(Size(Child(chunk, "threadsPerGrid")),
                                    Size(Child(chunk, "threadsPerThreadgroup")));
         for(uint64_t texture : computeEncoderTextures[UInt(Child(chunk, "ComputeCommandEncoder"))])
-          readbackTextureIds.insert(texture);
+          MarkTextureWritten(texture);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLComputeCommandEncoder_endEncoding:
@@ -1153,21 +1447,23 @@ struct Executor
         // Captured Plume workloads use a queue-level MTLResidencySet for resources referenced
         // indirectly through argument buffers. Mirror that contract before every submission;
         // otherwise reconstructed GPU addresses can fault even though the objects are alive.
-        Metal_CommitNativeReplayResidencySet(residencySet);
+        CommitResidencySet();
 
-        buffer->commit();
-        buffer->waitUntilCompleted();
-        if(buffer->status() == MTL::CommandBufferStatusError)
+        const uint64_t queueId = commandBufferQueues[commandBufferId];
+        if(!submittedCommandBuffers.empty() && submittedQueueId != queueId)
         {
-          NS::Error *error = buffer->error();
-          RETURN_ERROR_RESULT(ResultCode::APIHardwareUnsupported,
-                              "Captured Metal command buffer %llu failed after %u draws and %u "
-                              "argument-buffer replacements: %s",
-                              commandBufferId, result.drawCount, result.rebasedArgumentWordCount,
-                              error && error->localizedDescription()
-                                  ? error->localizedDescription()->utf8String()
-                                  : "unknown Metal error");
+          RDResult submitted = WaitForSubmittedCommandBuffers();
+          if(submitted != ResultCode::Succeeded)
+            return submitted;
         }
+
+        PerformanceTimer commandTimer;
+        buffer->commit();
+        commandWaitMilliseconds += commandTimer.GetMilliseconds();
+        submittedQueueId = queueId;
+        submittedCommandBuffers.push_back({commandBufferId, buffer});
+        if(drawLimitReached)
+          executionComplete = true;
         return ResultCode::Succeeded;
       }
       default: break;
@@ -1206,18 +1502,31 @@ struct Executor
 
   RDResult CreateTexture(const SDChunk *chunk)
   {
+    const uint64_t id = UInt(Child(chunk, "Texture"));
+    if(cache != NULL)
+    {
+      auto cached = cache->textures.find(id);
+      if(cached != cache->textures.end())
+      {
+        textures[id] = cached->second;
+        if(cached->second.texture->storageMode() != MTL::StorageModeMemoryless)
+          return ResultCode::Succeeded;
+      }
+    }
+
     MTL::TextureDescriptor *mtl = TextureDescriptor(Child(chunk, "descriptor"));
     MTL::Texture *texture = device->newTexture(mtl);
     mtl->release();
-    uint64_t id = UInt(Child(chunk, "Texture"));
     if(texture == NULL)
       RETURN_ERROR_RESULT(ResultCode::APIHardwareUnsupported,
                           "Could not create replay Metal texture %llu", id);
     textures[id] = {(MTL::Texture *)texture, (uint32_t)texture->width(),
                     (uint32_t)texture->height(), texture->pixelFormat()};
-    TrackOwned(texture, retained);
+    if(cache != NULL)
+      cache->textures[id] = textures[id];
+    TrackPersistent(texture);
     if(texture->storageMode() != MTL::StorageModeMemoryless)
-      Metal_AddNativeReplayResidencyAllocation(residencySet, texture);
+      AddResidencyAllocation(texture);
     return ResultCode::Succeeded;
   }
 
@@ -1225,6 +1534,17 @@ struct Executor
   {
     const uint64_t bufferId = UInt(Child(chunk, "Buffer"));
     const uint64_t textureId = UInt(Child(chunk, "Texture"));
+    if(cache != NULL)
+    {
+      auto cached = cache->textures.find(textureId);
+      if(cached != cache->textures.end())
+      {
+        textures[textureId] = cached->second;
+        if(cached->second.texture->storageMode() != MTL::StorageModeMemoryless)
+          return ResultCode::Succeeded;
+      }
+    }
+
     MTL::Buffer *buffer = buffers[bufferId];
     if(buffer == NULL)
       RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
@@ -1241,14 +1561,28 @@ struct Executor
 
     textures[textureId] = {texture, (uint32_t)texture->width(), (uint32_t)texture->height(),
                            texture->pixelFormat()};
-    TrackOwned(texture, retained);
+    if(cache != NULL)
+      cache->textures[textureId] = textures[textureId];
+    TrackPersistent(texture);
     if(texture->storageMode() != MTL::StorageModeMemoryless)
-      Metal_AddNativeReplayResidencyAllocation(residencySet, texture);
+      AddResidencyAllocation(texture);
     return ResultCode::Succeeded;
   }
 
   RDResult CreatePipeline(const SDChunk *chunk)
   {
+    const uint64_t id = UInt(Child(chunk, "RenderPipelineState"));
+    if(cache != NULL)
+    {
+      auto cached = cache->pipelines.find(id);
+      if(cached != cache->pipelines.end())
+      {
+        pipelines[id] = cached->second;
+        pipelineArgumentBufferLayouts[id] = cache->pipelineArgumentBufferLayouts[id];
+        return ResultCode::Succeeded;
+      }
+    }
+
     const SDObject *descriptor = Child(chunk, "descriptor");
     MTL::RenderPipelineDescriptor *mtl = MTL::RenderPipelineDescriptor::alloc()->init();
     rdcstr label = String(Child(descriptor, "label"));
@@ -1322,7 +1656,6 @@ struct Executor
       }
     }
 
-    uint64_t id = UInt(Child(chunk, "RenderPipelineState"));
     NS::Error *error = NULL;
     MTL::AutoreleasedRenderPipelineReflection reflection = NULL;
     MTL::RenderPipelineState *pipeline = device->newRenderPipelineState(
@@ -1343,12 +1676,28 @@ struct Executor
       CollectArgumentBufferLayouts(reflection->fragmentArguments(),
                                    pipelineArgumentBufferLayouts[id].fragment);
     }
-    TrackOwned(pipeline, retained);
+    if(cache != NULL)
+    {
+      cache->pipelines[id] = pipeline;
+      cache->pipelineArgumentBufferLayouts[id] = pipelineArgumentBufferLayouts[id];
+    }
+    TrackPersistent(pipeline);
     return ResultCode::Succeeded;
   }
 
   RDResult CreateComputePipeline(const SDChunk *chunk, MetalChunk variant)
   {
+    const uint64_t id = UInt(Child(chunk, "ComputePipelineState"));
+    if(cache != NULL)
+    {
+      auto cached = cache->computePipelines.find(id);
+      if(cached != cache->computePipelines.end())
+      {
+        computePipelines[id] = cached->second;
+        return ResultCode::Succeeded;
+      }
+    }
+
     NS::Error *error = NULL;
     MTL::ComputePipelineState *pipeline = NULL;
 
@@ -1380,19 +1729,31 @@ struct Executor
       mtl->release();
     }
 
-    const uint64_t id = UInt(Child(chunk, "ComputePipelineState"));
     if(pipeline == NULL)
       RETURN_ERROR_RESULT(
           ResultCode::APIUnsupported, "Could not create replay compute pipeline %llu: %s", id,
           error && error->localizedDescription() ? error->localizedDescription()->utf8String()
                                                  : "unknown pipeline error");
     computePipelines[id] = pipeline;
-    TrackOwned(pipeline, retained);
+    if(cache != NULL)
+      cache->computePipelines[id] = pipeline;
+    TrackPersistent(pipeline);
     return ResultCode::Succeeded;
   }
 
   RDResult CreateDepthStencil(const SDChunk *chunk)
   {
+    const uint64_t id = UInt(Child(chunk, "DepthStencilState"));
+    if(cache != NULL)
+    {
+      auto cached = cache->depthStates.find(id);
+      if(cached != cache->depthStates.end())
+      {
+        depthStates[id] = cached->second;
+        return ResultCode::Succeeded;
+      }
+    }
+
     const SDObject *descriptor = Child(chunk, "descriptor");
     MTL::DepthStencilDescriptor *mtl = MTL::DepthStencilDescriptor::alloc()->init();
     rdcstr label = String(Child(descriptor, "label"));
@@ -1406,13 +1767,26 @@ struct Executor
     if(state == NULL)
       RETURN_ERROR_RESULT(ResultCode::APIUnsupported,
                           "Could not create captured Metal depth-stencil state");
-    depthStates[UInt(Child(chunk, "DepthStencilState"))] = state;
-    TrackOwned(state, retained);
+    depthStates[id] = state;
+    if(cache != NULL)
+      cache->depthStates[id] = state;
+    TrackPersistent(state);
     return ResultCode::Succeeded;
   }
 
   RDResult CreateSampler(const SDChunk *chunk)
   {
+    const uint64_t id = UInt(Child(chunk, "SamplerState"));
+    if(cache != NULL)
+    {
+      auto cached = cache->samplers.find(id);
+      if(cached != cache->samplers.end())
+      {
+        samplers[id] = cached->second;
+        return ResultCode::Succeeded;
+      }
+    }
+
     const SDObject *descriptor = Child(chunk, "descriptor");
     MTL::SamplerDescriptor *mtl = MTL::SamplerDescriptor::alloc()->init();
     rdcstr label = String(Child(descriptor, "label"));
@@ -1437,8 +1811,10 @@ struct Executor
     if(sampler == NULL)
       RETURN_ERROR_RESULT(ResultCode::APIUnsupported,
                           "Could not create captured Metal sampler state");
-    samplers[UInt(Child(chunk, "SamplerState"))] = sampler;
-    TrackOwned(sampler, retained);
+    samplers[id] = sampler;
+    if(cache != NULL)
+      cache->samplers[id] = sampler;
+    TrackPersistent(sampler);
     return ResultCode::Succeeded;
   }
 
@@ -1506,6 +1882,17 @@ struct Executor
   {
     const uint64_t parentId = UInt(Child(chunk, "Texture"));
     const uint64_t viewId = UInt(Child(chunk, "TextureView"));
+    if(cache != NULL)
+    {
+      auto cached = cache->textures.find(viewId);
+      if(cached != cache->textures.end())
+      {
+        textures[viewId] = cached->second;
+        if(cached->second.texture->storageMode() != MTL::StorageModeMemoryless)
+          return ResultCode::Succeeded;
+      }
+    }
+
     TextureInfo parent = textures[parentId];
     if(parent.texture == NULL)
       RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
@@ -1528,9 +1915,14 @@ struct Executor
       RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
                           "Could not create captured Metal texture view");
     textures[viewId] = {view, (uint32_t)view->width(), (uint32_t)view->height(), view->pixelFormat()};
-    TrackOwned(view, retained);
+    if(cache != NULL)
+    {
+      cache->textures[viewId] = textures[viewId];
+      cache->textureParents[viewId] = parentId;
+    }
+    TrackPersistent(view);
     if(view->storageMode() != MTL::StorageModeMemoryless)
-      Metal_AddNativeReplayResidencyAllocation(residencySet, view);
+      AddResidencyAllocation(view);
     return ResultCode::Succeeded;
   }
 
@@ -1547,10 +1939,27 @@ struct Executor
                             "Captured initial buffer contents do not fit replay resource");
       if(!contents.empty())
         memcpy(buffer->contents(), contents.data(), contents.size());
+      if(cache != NULL && !cache->populated)
+      {
+        bytebuf &initial = cache->bufferInitialData[id];
+        if(initial.size() < buffer->length())
+          initial.resize((size_t)buffer->length());
+        if(!contents.empty())
+          memcpy(initial.data(), contents.data(), contents.size());
+      }
       normalisedArgumentBuffers.erase(id);
     }
     else if(type == eResTexture)
     {
+      if(cache != NULL && !cache->populated)
+        cache->initialTextureChunks.push_back(chunk);
+      if(cache != NULL && cache->initializedTextures.find(id) != cache->initializedTextures.end() &&
+         cache->dirtyTextures.find(id) == cache->dirtyTextures.end())
+      {
+        readbackTextureIds.insert(id);
+        return ResultCode::Succeeded;
+      }
+
       TextureInfo texture = textures[id];
       uint64_t rowPitch = UInt(Child(chunk, "rowPitch"));
       uint64_t imagePitch = UInt(Child(chunk, "imagePitch"));
@@ -1634,8 +2043,10 @@ struct Executor
                                layout.mipLevel, MTL::Origin(0, 0, 0));
         }
         blit->endEncoding();
+        PerformanceTimer uploadTimer;
         command->commit();
         command->waitUntilCompleted();
+        initialUploadMilliseconds += uploadTimer.GetMilliseconds();
 
         if(command->status() == MTL::CommandBufferStatusError)
         {
@@ -1661,6 +2072,14 @@ struct Executor
         }
       }
       readbackTextureIds.insert(id);
+      if(cache != NULL)
+      {
+        cache->initializedTextures.insert(id);
+        cache->dirtyTextures.erase(id);
+        for(const auto &view : cache->textureParents)
+          if(view.second == id)
+            cache->dirtyTextures.erase(view.first);
+      }
     }
     return ResultCode::Succeeded;
   }
@@ -1670,7 +2089,21 @@ struct Executor
     auto attachments = encoderColorAttachments.find(encoderId);
     if(attachments != encoderColorAttachments.end())
       for(uint64_t texture : attachments->second)
-        readbackTextureIds.insert(texture);
+        MarkTextureWritten(texture);
+  }
+
+  void MarkTextureWritten(uint64_t texture)
+  {
+    if(texture == 0)
+      return;
+    readbackTextureIds.insert(texture);
+    if(cache != NULL)
+    {
+      cache->dirtyTextures.insert(texture);
+      auto parent = cache->textureParents.find(texture);
+      if(parent != cache->textureParents.end())
+        cache->dirtyTextures.insert(parent->second);
+    }
   }
 
   MTL::RenderCommandEncoder *Encoder(const SDChunk *chunk)
@@ -1729,27 +2162,7 @@ struct Executor
       return;
     }
 
-    std::map<uint64_t, uint64_t> textureReplacements;
-    std::map<uint64_t, uint64_t> samplerReplacements;
-    std::map<uint64_t, uint64_t> textureIDs;
-    for(const auto &resource : capturedResourceIDs)
-    {
-      auto texture = textures.find(resource.first);
-      if(texture != textures.end() && texture->second.texture)
-      {
-        textureReplacements[resource.second] = texture->second.texture->gpuResourceID()._impl;
-        textureIDs[resource.second] = resource.first;
-        textureIDs[texture->second.texture->gpuResourceID()._impl] = resource.first;
-      }
-      auto sampler = samplers.find(resource.first);
-      if(sampler != samplers.end() && sampler->second)
-        samplerReplacements[resource.second] = sampler->second->gpuResourceID()._impl;
-    }
-
-    std::map<uint64_t, uint64_t> capturedAddressResources;
-    for(const auto &captured : capturedBufferAddresses)
-      if(captured.second.first != 0 && captured.second.second != 0)
-        capturedAddressResources[captured.second.first] = captured.first;
+    BuildArgumentReplacementTables();
 
     // Textures referenced only through an argument buffer never pass through
     // setFragmentTexture:/setTexture:. Discover them before replacing the captured identities so
@@ -1761,12 +2174,12 @@ struct Executor
     {
       uint64_t value = 0;
       memcpy(&value, contents + offset, sizeof(value));
-      auto texture = textureIDs.find(value);
-      if(texture != textureIDs.end())
+      auto texture = argumentTextureIDs.find(value);
+      if(texture != argumentTextureIDs.end())
         readbackTextureIds.insert(texture->second);
 
-      auto address = capturedAddressResources.upper_bound(value);
-      if(address != capturedAddressResources.begin())
+      auto address = argumentCapturedAddressResources.upper_bound(value);
+      if(address != argumentCapturedAddressResources.begin())
       {
         --address;
         const auto captured = capturedBufferAddresses.find(address->second);
@@ -1780,34 +2193,84 @@ struct Executor
       }
     }
 
-    rdcarray<ArgumentBufferAddressReplacement> addressReplacements;
-    for(const auto &captured : capturedBufferAddresses)
-    {
-      MTL::Buffer *replay = buffers[captured.first];
-      if(replay)
-        addressReplacements.push_back(
-            {captured.second.first, captured.second.second, replay->gpuAddress()});
-    }
-
     const auto reflectedLayout = argumentBufferLayouts.find(id);
     const ArgumentBufferLayout *layout =
         reflectedLayout == argumentBufferLayouts.end() ? NULL : &reflectedLayout->second;
     const uint32_t replacements =
-        RebaseArgumentBufferWords(contents, buffer->length(), textureReplacements,
-                                  samplerReplacements, layout, addressReplacements);
+        RebaseArgumentBufferWords(contents, buffer->length(), argumentTextureReplacements,
+                                  argumentSamplerReplacements, layout, argumentAddressReplacements);
     result.rebasedArgumentWordCount += replacements;
 
     normalisedArgumentBuffers.insert(id);
     normalisingArgumentBuffers.erase(id);
   }
 
+  void BuildArgumentReplacementTables()
+  {
+    if(argumentReplacementTablesValid)
+      return;
+
+    argumentTextureReplacements.clear();
+    argumentSamplerReplacements.clear();
+    argumentTextureIDs.clear();
+    argumentCapturedAddressResources.clear();
+    argumentAddressReplacements.clear();
+
+    for(const auto &resource : capturedResourceIDs)
+    {
+      auto texture = textures.find(resource.first);
+      if(texture != textures.end() && texture->second.texture)
+      {
+        const uint64_t replayIdentity = texture->second.texture->gpuResourceID()._impl;
+        argumentTextureReplacements[resource.second] = replayIdentity;
+        argumentTextureIDs[resource.second] = resource.first;
+        argumentTextureIDs[replayIdentity] = resource.first;
+      }
+
+      auto sampler = samplers.find(resource.first);
+      if(sampler != samplers.end() && sampler->second)
+        argumentSamplerReplacements[resource.second] = sampler->second->gpuResourceID()._impl;
+    }
+
+    for(const auto &captured : capturedBufferAddresses)
+    {
+      if(captured.second.first != 0 && captured.second.second != 0)
+        argumentCapturedAddressResources[captured.second.first] = captured.first;
+
+      auto replay = buffers.find(captured.first);
+      if(replay != buffers.end() && replay->second)
+        argumentAddressReplacements[captured.second.first] = {
+            captured.second.first, captured.second.second, replay->second->gpuAddress()};
+    }
+
+    argumentReplacementTablesValid = true;
+  }
+
   void ReadbackTextures()
   {
+    struct PendingReadback
+    {
+      uint64_t id;
+      const TextureInfo *info;
+      MTL::Buffer *buffer;
+      uint64_t compactRowPitch;
+      uint64_t compactImagePitch;
+      uint64_t blockRows;
+      uint64_t rowPitch;
+      uint64_t imagePitch;
+    };
+
+    rdcarray<PendingReadback> pending;
+    MTL::CommandBuffer *command = NULL;
+    MTL::BlitCommandEncoder *blit = NULL;
+
     for(const auto &entry : textures)
     {
       uint64_t id = entry.first;
       const TextureInfo &info = entry.second;
       if(readbackTextureIds.find(id) == readbackTextureIds.end())
+        continue;
+      if(filterReadbacks && requestedReadbackTextureIds.find(id) == requestedReadbackTextureIds.end())
         continue;
 
       readbackCandidateCount++;
@@ -1824,32 +2287,53 @@ struct Executor
       const uint64_t rowPitch = AlignUp(compactRowPitch, 256ULL);
       const uint64_t imagePitch = rowPitch * blockRows;
       MTL::Buffer *readback = device->newBuffer(imagePitch, MTL::ResourceStorageModeShared);
-      MTL::CommandBuffer *command = lastQueue->commandBuffer();
-      MTL::BlitCommandEncoder *blit = command->blitCommandEncoder();
-      blit->copyFromTexture(info.texture, 0, 0, MTL::Origin(0, 0, 0),
-                            MTL::Size(info.width, info.height, 1), readback, 0, rowPitch, imagePitch);
-      blit->endEncoding();
-      command->commit();
-      command->waitUntilCompleted();
-
-      if(command->status() == MTL::CommandBufferStatusError)
+      if(readback == NULL)
+        continue;
+      if(command == NULL)
       {
-        NS::Error *error = command->error();
-        RDCWARN("Could not read back Metal texture %llu (%s): %s", id, ToStr(info.format).c_str(),
-                error && error->localizedDescription() ? error->localizedDescription()->utf8String()
-                                                       : "unknown Metal error");
+        command = lastQueue->commandBuffer();
+        blit = command ? command->blitCommandEncoder() : NULL;
+      }
+      if(blit == NULL)
+      {
         readback->release();
         continue;
       }
+      blit->copyFromTexture(info.texture, 0, 0, MTL::Origin(0, 0, 0),
+                            MTL::Size(info.width, info.height, 1), readback, 0, rowPitch, imagePitch);
+      pending.push_back({id, &info, readback, compactRowPitch, compactImagePitch, blockRows,
+                         rowPitch, imagePitch});
+    }
 
-      bytebuf &destination = result.textures[id];
-      destination.resize((size_t)compactImagePitch);
-      const byte *source = (const byte *)readback->contents();
-      for(uint64_t row = 0; row < blockRows; row++)
-        memcpy(destination.data() + row * compactRowPitch, source + row * rowPitch, compactRowPitch);
-      readback->release();
+    if(command == NULL || blit == NULL || pending.empty())
+      return;
 
-      if(id == presentedTexture)
+    blit->endEncoding();
+    command->commit();
+    command->waitUntilCompleted();
+
+    if(command->status() == MTL::CommandBufferStatusError)
+    {
+      NS::Error *error = command->error();
+      RDCWARN("Could not complete batched Metal texture readback: %s",
+              error && error->localizedDescription() ? error->localizedDescription()->utf8String()
+                                                     : "unknown Metal error");
+      for(const PendingReadback &readback : pending)
+        readback.buffer->release();
+      return;
+    }
+
+    for(const PendingReadback &readback : pending)
+    {
+      bytebuf &destination = result.textures[readback.id];
+      destination.resize((size_t)readback.compactImagePitch);
+      const byte *source = (const byte *)readback.buffer->contents();
+      for(uint64_t row = 0; row < readback.blockRows; row++)
+        memcpy(destination.data() + row * readback.compactRowPitch,
+               source + row * readback.rowPitch, readback.compactRowPitch);
+      readback.buffer->release();
+
+      if(readback.id == presentedTexture)
       {
         size_t nonZeroBytes = 0;
         byte minimum = 0xff;
@@ -1863,8 +2347,8 @@ struct Executor
         RDCLOG(
             "Native Metal presented texture %llu readback: %ux%u, %zu bytes, %zu non-zero, "
             "range %u-%u",
-            id, info.width, info.height, destination.size(), nonZeroBytes, uint32_t(minimum),
-            uint32_t(maximum));
+            readback.id, readback.info->width, readback.info->height, destination.size(),
+            nonZeroBytes, uint32_t(minimum), uint32_t(maximum));
       }
     }
   }
@@ -1872,15 +2356,23 @@ struct Executor
   const SDFile &file;
   NativeMetalExecutionResult &result;
   uint32_t maxDrawCount = UINT32_MAX;
+  bool filterReadbacks = false;
+  NativeMetalReplayCache *cache = NULL;
   bool drawLimitReached = false;
+  bool executionComplete = false;
   bool requiresArgumentBufferSamplers = false;
   NS::AutoreleasePool *pool = NULL;
   MTL::Device *device = NULL;
   void *residencySet = NULL;
+  bool ownsResidencySet = false;
   MTL::CommandQueue *lastQueue = NULL;
   uint64_t presentedTexture = 0;
   size_t readbackCandidateCount = 0;
   size_t readbackCompatibleCount = 0;
+  double processMilliseconds = 0.0;
+  double commandWaitMilliseconds = 0.0;
+  double initialUploadMilliseconds = 0.0;
+  double readbackMilliseconds = 0.0;
   rdcarray<NS::Object *> retained;
   std::map<uint64_t, MTL::CommandQueue *> queues;
   std::map<uint64_t, MTL::Buffer *> buffers;
@@ -1895,6 +2387,9 @@ struct Executor
   std::map<uint64_t, MTL::Fence *> fences;
   std::map<uint64_t, MTL::Event *> events;
   std::map<uint64_t, MTL::CommandBuffer *> commandBuffers;
+  std::map<uint64_t, uint64_t> commandBufferQueues;
+  rdcarray<rdcpair<uint64_t, MTL::CommandBuffer *>> submittedCommandBuffers;
+  uint64_t submittedQueueId = 0;
   std::map<uint64_t, MTL::RenderCommandEncoder *> encoders;
   std::map<uint64_t, uint64_t> encoderPipelines;
   std::map<uint64_t, MTL::BlitCommandEncoder *> blitEncoders;
@@ -1902,23 +2397,42 @@ struct Executor
   std::map<uint64_t, std::set<uint64_t>> computeEncoderTextures;
   std::map<uint64_t, std::pair<uint64_t, uint64_t>> capturedBufferAddresses;
   std::map<uint64_t, uint64_t> capturedResourceIDs;
+  bool argumentReplacementTablesValid = false;
+  std::map<uint64_t, uint64_t> argumentTextureReplacements;
+  std::map<uint64_t, uint64_t> argumentSamplerReplacements;
+  std::map<uint64_t, uint64_t> argumentTextureIDs;
+  std::map<uint64_t, uint64_t> argumentCapturedAddressResources;
+  std::map<uint64_t, ArgumentBufferAddressReplacement> argumentAddressReplacements;
   std::set<uint64_t> normalisedArgumentBuffers;
   std::set<uint64_t> normalisingArgumentBuffers;
   std::set<uint64_t> argumentBufferIds;
   std::map<uint64_t, ArgumentBufferLayout> argumentBufferLayouts;
   std::map<uint64_t, rdcarray<uint64_t>> encoderColorAttachments;
   std::set<uint64_t> readbackTextureIds;
+  std::set<uint64_t> requestedReadbackTextureIds;
 };
 };    // namespace
 
+NativeMetalReplayCache *Metal_CreateNativeReplayCache()
+{
+  return new NativeMetalReplayCache;
+}
+
+void Metal_DestroyNativeReplayCache(NativeMetalReplayCache *cache)
+{
+  delete cache;
+}
+
 RDResult Metal_ExecuteNativeCapture(const SDFile &file, NativeMetalExecutionResult &result,
-                                    uint32_t maxDrawCount)
+                                    uint32_t maxDrawCount,
+                                    const rdcarray<uint64_t> *requestedTextureIds,
+                                    NativeMetalReplayCache *cache)
 {
   result.textures.clear();
   result.drawCount = 0;
   result.rebasedArgumentWordCount = 0;
   result.status.clear();
-  Executor executor(file, result, maxDrawCount);
+  Executor executor(file, result, maxDrawCount, requestedTextureIds, cache);
   return executor.Run();
 }
 
@@ -1937,8 +2451,8 @@ TEST_CASE("Metal argument-buffer identities are rebased", "[metal][replay]")
 
   std::map<uint64_t, uint64_t> textures = {{capturedTexture, 0xAABBCCDDEEFF0011}};
   std::map<uint64_t, uint64_t> samplers = {{capturedSampler, 0x1100FFEEDDCCBBAA}};
-  rdcarray<ArgumentBufferAddressReplacement> addresses = {
-      {capturedAddress, 4096, replayAddress},
+  std::map<uint64_t, ArgumentBufferAddressReplacement> addresses = {
+      {capturedAddress, {capturedAddress, 4096, replayAddress}},
   };
 
   CHECK(RebaseArgumentBufferWords(contents.data(), contents.size(), textures, samplers, NULL,
