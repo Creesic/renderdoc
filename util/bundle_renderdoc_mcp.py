@@ -168,6 +168,43 @@ def _write_sitecustomize(py_exe: Path) -> None:
     (purelib / "sitecustomize.py").write_text(_SITECUSTOMIZE, encoding="utf-8")
 
 
+def _make_macos_python_relocatable(prefix: Path) -> None:
+    """Give libpython an rpath-based install name suitable for an app bundle."""
+    if sys.platform != "darwin":
+        return
+
+    dylibs = sorted((prefix / "lib").glob("libpython3*.dylib"))
+    if not dylibs:
+        raise RuntimeError(f"no libpython dylib under {prefix / 'lib'}")
+
+    for dylib in dylibs:
+        subprocess.run(
+            ["install_name_tool", "-id", f"@rpath/{dylib.name}", str(dylib)],
+            check=True,
+        )
+
+
+def _prune_macos_tcl_payload(prefix: Path) -> None:
+    """Remove unused Tcl/Tk data directories that codesign mistakes for nested bundles."""
+    if sys.platform != "darwin":
+        return
+
+    lib_dir = prefix / "lib"
+    for pattern in ("itcl*", "tcl8*", "thread*", "tk8*"):
+        for path in lib_dir.glob(pattern):
+            if path.is_dir():
+                shutil.rmtree(path)
+
+    # Files beneath Contents/MacOS with an executable bit are treated as nested code by codesign.
+    # The server only executes the CPython binary; helper scripts such as idle, pip, and pydoc are
+    # retained as data so the bundled SDK remains useful without invalidating the outer app seal.
+    python_exe = _posix_python_cmd(prefix).resolve()
+    for path in (prefix / "bin").iterdir():
+        if path.is_symlink() or not path.is_file() or path.resolve() == python_exe:
+            continue
+        path.chmod(0o644)
+
+
 def bundle(
     *,
     repo_root: Path,
@@ -224,6 +261,11 @@ def bundle(
     runtime_mcp = runtime_dir / "mcp" / "renderdoc_mcp"
     runtime_site = runtime_dir / "mcp_site"
     runtime_mcp_outer = runtime_dir / "mcp"
+    done = runtime_dir / ".renderdoc_mcp_bundle.stamp.txt"
+
+    # Invalidate the runtime before replacing any of its pieces. A failed pip install must not
+    # leave a stale architecture stamp that causes the next configure to accept a partial bundle.
+    done.unlink(missing_ok=True)
 
     for stale in (runtime_python, runtime_mcp_outer, runtime_site):
         if stale.exists():
@@ -241,6 +283,8 @@ def bundle(
 
     py_exe = runtime_python / "python.exe" if _is_windows_tree(runtime_python) else _posix_python_cmd(runtime_python)
 
+    _prune_macos_tcl_payload(runtime_python)
+    _make_macos_python_relocatable(runtime_python)
     _write_sitecustomize(py_exe)
 
     env = os.environ.copy()
@@ -285,7 +329,6 @@ def bundle(
         env=env,
     )
 
-    done = runtime_dir / ".renderdoc_mcp_bundle.stamp.txt"
     done.write_text(f"{triplet_key} {tpl.get('artifact', '')}\n", encoding="utf-8")
 
     log(f"MCP bundle ready under {runtime_dir}")

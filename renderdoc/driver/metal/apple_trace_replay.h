@@ -64,7 +64,7 @@ public:
   {
     return {};
   }
-  rdcarray<EventUsage> GetUsage(ResourceId id) override { return {}; }
+  rdcarray<EventUsage> GetUsage(ResourceId id) override;
   void SetPipelineStates(D3D11Pipe::State *d3d11, D3D12Pipe::State *d3d12, GLPipe::State *gl,
                          VKPipe::State *vk, MetalPipe::State *metal) override
   {
@@ -249,6 +249,20 @@ private:
   rdcarray<DebugMessage> m_DebugMessages;
   std::map<uint32_t, MetalPipe::VertexInput> m_EventVertexInputs;
   std::map<uint32_t, MetalPipe::DepthStencil> m_EventDepthStencil;
+  struct EventPipeline
+  {
+    ResourceId renderPipeline;
+    ResourceId computePipeline;
+    ResourceId vertexShader;
+    ResourceId fragmentShader;
+    ResourceId computeShader;
+    rdcstr vertexEntryPoint;
+    rdcstr fragmentEntryPoint;
+    rdcstr computeEntryPoint;
+  };
+  std::map<uint32_t, EventPipeline> m_EventPipelines;
+  std::map<uint32_t, MetalPipe::Rasterizer> m_EventRasterizers;
+  std::map<ResourceId, rdcarray<EventUsage>> m_ResourceUses;
   rdcstr m_NativeReplayError;
   uint32_t m_LastNativeReplayDrawCount = ~0U;
   std::map<uint32_t, std::map<uint64_t, bytebuf>> m_NativeReplayTextureCache;

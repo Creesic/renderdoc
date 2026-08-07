@@ -240,16 +240,26 @@ void PythonContext::GlobalInit()
   PyConfig_InitPythonConfig(&config);
   config.configure_c_stdio = 0;
   config.parse_argv = 0;
+#if defined(Q_OS_MACOS) && defined(RENDERDOC_EMBED_MCP_PYTHON)
+  config.write_bytecode = 0;
+#endif
 #endif
 
-#if defined(STATIC_QRENDERDOC)
-  // add the location where our libs will be for statically-linked python installs
+#if defined(STATIC_QRENDERDOC) || (defined(Q_OS_MACOS) && defined(RENDERDOC_EMBED_MCP_PYTHON))
+  // add the location where our libs will be for statically-linked python installs or the
+  // bundled Python runtime in the macOS application
   {
     QDir bin = QFileInfo(QCoreApplication::applicationFilePath()).absoluteDir();
 
+#if defined(Q_OS_MACOS) && defined(RENDERDOC_EMBED_MCP_PYTHON)
+    QString pylibs =
+        QDir::cleanPath(bin.absoluteFilePath(lit("../Resources/renderdoc-mcp/python")));
+#else
     QString pylibs = QDir::cleanPath(bin.absoluteFilePath(lit("../share/renderdoc/pylibs")));
+#endif
 
-    pylibs.toWCharArray(python_home);
+    int length = pylibs.toWCharArray(python_home);
+    python_home[length] = 0;
 
 #if PY_VERSION_HEX > 0x030B0000
     config.home = python_home;

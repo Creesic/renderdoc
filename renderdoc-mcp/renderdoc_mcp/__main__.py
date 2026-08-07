@@ -21,10 +21,14 @@ def _setup_crash_logging() -> None:
     while normal logs rotate and exclude verbose dependency payloads.
     """
     global _logging_state
-    app_dir = os.environ.get("RENDERDOC_MCP_APPDIR") or os.getcwd()
+    log_dir = (
+        os.environ.get("RENDERDOC_MCP_LOGDIR")
+        or os.environ.get("RENDERDOC_MCP_APPDIR")
+        or os.getcwd()
+    )
 
     try:
-        _logging_state = configure_logging(app_dir)
+        _logging_state = configure_logging(log_dir)
     except OSError:
         return  # can't open log — silent fallback
 

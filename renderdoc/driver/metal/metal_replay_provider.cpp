@@ -227,6 +227,8 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
        "rps0",
        {},
        "rps0"},
+      {301, MetalTrace::NodeKind::Shader, "/resources/shaders/vs0", "vs0", "vertexMain", "vs0"},
+      {302, MetalTrace::NodeKind::Shader, "/resources/shaders/fs0", "fs0", "fragmentMain", "fs0"},
       {100,
        MetalTrace::NodeKind::Texture,
        "/resources/textures/texTarget",
@@ -251,12 +253,15 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
   index.nodeInfos = {
       {"/commands/cb0/re0/draw0",
        {"baseInstance", "baseVertex", "indexBufferOffset", "indexCount", "indexType",
-        "instanceCount", "primitiveType", "vertexBufferOffset[12]"},
-       {"0", "0", "0", "3", "UInt32", "1", "TriangleStrip", "24"}},
+        "instanceCount", "primitiveType", "vertexBufferOffset[12]", "viewportCount", "viewport[0]",
+        "scissorCount", "scissor[0]", "cullMode", "fillMode", "frontFacingWinding"},
+       {"0", "0", "0", "3", "UInt32", "1", "TriangleStrip", "24", "1", "0,0,640,480,0,1", "1",
+        "0,0,640,480", "Back", "Fill", "CounterClockwise"}},
       {"/resources/render_pipelines/rps0",
-       {"vertexLayout"},
+       {"vertexLayout", "vertexFunction", "fragmentFunction"},
        {"  buffer 12 (stride=24, perVertex):\n    attr0   Int @0\n    attr3   "
-        "UChar4Normalized_BGRA @12"}},
+        "UChar4Normalized_BGRA @12",
+        "301", "302"}},
   };
   REQUIRE(MetalTrace::WriteThinRDC(&rdc, manifest, index).code == ResultCode::Succeeded);
 
@@ -272,6 +277,11 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
 
   controller->SetFrameEvent(draw.eventId, true);
   REQUIRE(controller->GetMetalPipelineState() != NULL);
+  CHECK(controller->GetMetalPipelineState()->renderPipeline != ResourceId());
+  CHECK(controller->GetMetalPipelineState()->vertexShader.resourceId != ResourceId());
+  CHECK(controller->GetMetalPipelineState()->vertexShader.entryPoint == "vertexMain");
+  CHECK(controller->GetMetalPipelineState()->fragmentShader.resourceId != ResourceId());
+  CHECK(controller->GetMetalPipelineState()->fragmentShader.entryPoint == "fragmentMain");
   REQUIRE(controller->GetMetalPipelineState()->colorAttachments.size() == 1);
   CHECK(controller->GetMetalPipelineState()->colorAttachments[0].resourceId == draw.outputs[0]);
   CHECK(controller->GetPipelineState().GetPrimitiveTopology() == Topology::TriangleStrip);
@@ -282,6 +292,10 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
   CHECK(controller->GetPipelineState().GetVBuffers()[12].byteSize == 72);
   CHECK(controller->GetPipelineState().GetIBuffer().byteStride == 4);
   CHECK(controller->GetPipelineState().GetIBuffer().byteSize == 12);
+  CHECK(controller->GetPipelineState().GetViewport(0).width == 640.0f);
+  CHECK(controller->GetPipelineState().GetScissor(0).height == 480);
+  CHECK(controller->GetMetalPipelineState()->rasterizer.cullMode == CullMode::Back);
+  CHECK(controller->GetMetalPipelineState()->rasterizer.frontCCW);
 
   rdcarray<Descriptor> outputs = controller->GetPipelineState().GetOutputTargets();
   REQUIRE(outputs.size() == 1);
@@ -301,6 +315,13 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
     CHECK(input.descriptor.resource != outputs[0].resource);
   }
   CHECK(foundTextureInput);
+
+  rdcarray<EventUsage> targetUsage = controller->GetUsage(outputs[0].resource);
+  CHECK(std::find(targetUsage.begin(), targetUsage.end(),
+                  EventUsage(draw.eventId, ResourceUsage::ColorTarget)) != targetUsage.end());
+  rdcarray<EventUsage> inputUsage = controller->GetUsage(inputs[0].descriptor.resource);
+  CHECK(std::find(inputUsage.begin(), inputUsage.end(),
+                  EventUsage(draw.eventId, ResourceUsage::VS_Resource)) != inputUsage.end());
 
   controller->Shutdown();
 }

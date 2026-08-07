@@ -243,6 +243,16 @@ static QString localMCPEndpoint(int port)
   return QString::fromLatin1("http://127.0.0.1:%1/mcp").arg(port);
 }
 
+static QString mcpRuntimeDirectory()
+{
+  const QString appDir = QApplication::applicationDirPath();
+#if defined(Q_OS_MACOS)
+  return QDir(appDir).absoluteFilePath(lit("../Resources/renderdoc-mcp"));
+#else
+  return appDir;
+#endif
+}
+
 static QString posixBundledInterpreter(const QString &appDir)
 {
   const QString bindir = QDir(appDir).absoluteFilePath(lit("python/bin"));
@@ -262,7 +272,7 @@ static QString posixBundledInterpreter(const QString &appDir)
 
 QString MCPServerManager::bundledPythonExecutablePath()
 {
-  const QString appDir = QApplication::applicationDirPath();
+  const QString appDir = mcpRuntimeDirectory();
 #if defined(Q_OS_WIN32)
   const QString exe = QDir(appDir).absoluteFilePath(lit("python/python.exe"));
   return QFileInfo::exists(exe) ? exe : QString();
@@ -293,7 +303,7 @@ MCPServerManager::~MCPServerManager()
 
 QString MCPServerManager::buildPythonPath() const
 {
-  const QString appDir = QApplication::applicationDirPath();
+  const QString appDir = mcpRuntimeDirectory();
   QStringList parts;
 #if defined(Q_OS_WIN32)
   parts += windowsOrderedPymoduleDirs(appDir);
@@ -468,14 +478,19 @@ void MCPServerManager::applyConfig()
   }
 
   QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-  const QString bundleDir = QApplication::applicationDirPath();
+  const QString bundleDir = mcpRuntimeDirectory();
 #if defined(Q_OS_WIN32)
   prependWindowsRenderDocDllSearch(env, bundleDir, windowsOrderedPymoduleDirs(bundleDir));
 #endif
   const QString pyPathValue = buildPythonPath();
   env.insert(lit("PYTHONPATH"), pyPathValue);
   env.insert(lit("PYTHONUTF8"), lit("1"));
+  env.insert(lit("PYTHONDONTWRITEBYTECODE"), lit("1"));
   env.insert(lit("RENDERDOC_MCP_APPDIR"), bundleDir);
+  const QString logDir = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
+                             .absoluteFilePath(lit("mcp"));
+  QDir().mkpath(logDir);
+  env.insert(lit("RENDERDOC_MCP_LOGDIR"), logDir);
 
   QString processWorkDir = bundleDir;
 #if defined(Q_OS_WIN32)

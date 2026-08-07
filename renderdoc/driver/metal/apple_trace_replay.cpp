@@ -168,6 +168,35 @@ static bool ParseInt32(const rdcstr &text, int32_t &value)
   return true;
 }
 
+static bool ParseDouble(const rdcstr &text, double &value)
+{
+  if(text.empty())
+    return false;
+  char *end = NULL;
+  errno = 0;
+  double parsed = strtod(text.c_str(), &end);
+  if(errno != 0 || end == text.c_str() || *end != 0)
+    return false;
+  value = parsed;
+  return true;
+}
+
+static CullMode ParseCullMode(const rdcstr &text)
+{
+  if(text == "Front")
+    return CullMode::Front;
+  if(text == "Back")
+    return CullMode::Back;
+  if(text == "FrontAndBack")
+    return CullMode::FrontAndBack;
+  return CullMode::NoCull;
+}
+
+static FillMode ParseFillMode(const rdcstr &text)
+{
+  return text == "Lines" ? FillMode::Wireframe : FillMode::Solid;
+}
+
 static Topology ParsePrimitiveTopology(const rdcstr &name)
 {
   if(name == "Point")
@@ -916,6 +945,9 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
   m_EventDescriptors.clear();
   m_EventVertexInputs.clear();
   m_EventDepthStencil.clear();
+  m_EventPipelines.clear();
+  m_EventRasterizers.clear();
+  m_ResourceUses.clear();
   m_DebugMessages.clear();
   m_TexturePreviewReportedErrors.clear();
   m_LastNativeReplayDrawCount = ~0U;
@@ -992,6 +1024,25 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
       }
     }
 
+    for(const MetalTrace::Node &node : m_Index.nodes)
+    {
+      uint64_t parentStableId = 0;
+      if(!ParseUInt64(InfoProperty(FindNodeInfo(m_Index, node.path), "parentResource"),
+                      parentStableId))
+        continue;
+      auto child = m_StableResources.find(node.stableId);
+      auto parent = m_StableResources.find(parentStableId);
+      if(child == m_StableResources.end() || parent == m_StableResources.end())
+        continue;
+      for(ResourceDescription &resource : m_Resources)
+      {
+        if(resource.resourceId == child->second)
+          resource.parentResources.push_back(parent->second);
+        else if(resource.resourceId == parent->second)
+          resource.derivedResources.push_back(child->second);
+      }
+    }
+
     m_FrameRecord.frameInfo.frameNumber = 1;
     uint32_t nextEventID = 1;
     struct ActionParent
@@ -1025,6 +1076,23 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
         auto presented = m_StableResources.find(node.stableId);
         if(presented != m_StableResources.end())
           action.copyDestination = presented->second;
+      }
+
+      if(node.kind == MetalTrace::NodeKind::BlitEncoder)
+      {
+        const rdcstr descendant = node.path + "/";
+        for(const MetalTrace::Node &binding : m_Index.nodes)
+        {
+          if(binding.kind != MetalTrace::NodeKind::Binding || !binding.path.beginsWith(descendant))
+            continue;
+          auto resource = m_StableResources.find(binding.stableId);
+          if(resource == m_StableResources.end())
+            continue;
+          if(binding.name == "source")
+            action.copySource = resource->second;
+          else if(binding.name == "destination")
+            action.copyDestination = resource->second;
+        }
       }
 
       if(node.kind == MetalTrace::NodeKind::Draw || node.kind == MetalTrace::NodeKind::Dispatch)
@@ -1192,6 +1260,61 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
           }
         };
     markAttachments(m_FrameRecord.actionList);
+
+    // Build RenderDoc's cross-event resource usage index from the same normalized state used by
+    // Pipeline State. Native Metal actions deliberately have no one-to-one structured chunk, so
+    // returning an empty usage list otherwise makes provenance tools blind even when bindings and
+    // attachments are known.
+    auto AddUsage = [this](ResourceId resource, uint32_t eventId, ResourceUsage usage) {
+      if(resource != ResourceId())
+        m_ResourceUses[resource].push_back(EventUsage(eventId, usage));
+    };
+    std::function<void(const rdcarray<ActionDescription> &)> buildUsages =
+        [this, &AddUsage, &buildUsages](const rdcarray<ActionDescription> &actions) {
+          for(const ActionDescription &action : actions)
+          {
+            AddUsage(action.copySource, action.eventId, ResourceUsage::CopySrc);
+            if(!(action.flags & ActionFlags::Present))
+              AddUsage(action.copyDestination, action.eventId, ResourceUsage::CopyDst);
+            for(ResourceId output : action.outputs)
+              AddUsage(output, action.eventId, ResourceUsage::ColorTarget);
+            AddUsage(action.depthOut, action.eventId, ResourceUsage::DepthStencilTarget);
+
+            auto vertex = m_EventVertexInputs.find(action.eventId);
+            if(vertex != m_EventVertexInputs.end())
+            {
+              AddUsage(vertex->second.indexBuffer.resourceId, action.eventId,
+                       ResourceUsage::IndexBuffer);
+              for(const MetalPipe::VertexBuffer &buffer : vertex->second.vertexBuffers)
+                AddUsage(buffer.resourceId, action.eventId, ResourceUsage::VertexBuffer);
+            }
+
+            auto descriptors = m_EventDescriptors.find(action.eventId);
+            if(descriptors != m_EventDescriptors.end())
+            {
+              for(size_t i = 0; i < descriptors->second.accesses.size() &&
+                                i < descriptors->second.descriptors.size();
+                  i++)
+              {
+                const DescriptorAccess &access = descriptors->second.accesses[i];
+                const Descriptor &descriptor = descriptors->second.descriptors[i];
+                if(access.stage >= ShaderStage::Count || access.type == DescriptorType::Sampler)
+                  continue;
+                const bool writable = IsReadWriteDescriptor(access.type);
+                AddUsage(descriptor.resource, action.eventId,
+                         writable ? RWResUsage(access.stage) : ResUsage(access.stage));
+              }
+            }
+            buildUsages(action.children);
+          }
+        };
+    buildUsages(m_FrameRecord.actionList);
+    for(auto &uses : m_ResourceUses)
+    {
+      std::sort(uses.second.begin(), uses.second.end());
+      EventUsage *uniqueEnd = std::unique(uses.second.begin(), uses.second.end());
+      uses.second.resize((size_t)(uniqueEnd - uses.second.begin()));
+    }
 
     if(m_FrameRecord.actionList.empty())
       RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
@@ -1438,6 +1561,8 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
 
   rdcstr pipelineObject;
   MetalPipe::DepthStencil depthStencil;
+  MetalPipe::Rasterizer rasterizer;
+  EventPipeline eventPipeline;
   const rdcstr prefix = node.path + "/";
   for(const MetalTrace::Node &binding : m_Index.nodes)
   {
@@ -1448,6 +1573,9 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
     if(relative == "pipeline")
     {
       pipelineObject = binding.objectName;
+      auto resource = m_StableResources.find(binding.stableId);
+      if(resource != m_StableResources.end())
+        eventPipeline.renderPipeline = resource->second;
       continue;
     }
     if(relative == "depthStencil")
@@ -1509,9 +1637,79 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
         continue;
       const MetalTrace::NodeInfo *pipelineInfo = FindNodeInfo(m_Index, pipeline.path);
       ParseVertexLayout(InfoProperty(pipelineInfo, "vertexLayout"), vertexInput);
+
+      auto SetShader = [this](const rdcstr &stableText, ResourceId &resourceId, rdcstr &entryPoint) {
+        uint64_t stableId = 0;
+        if(!ParseUInt64(stableText, stableId))
+          return;
+        auto resource = m_StableResources.find(stableId);
+        if(resource != m_StableResources.end())
+          resourceId = resource->second;
+        for(const MetalTrace::Node &shader : m_Index.nodes)
+        {
+          if(shader.kind != MetalTrace::NodeKind::Shader || shader.stableId != stableId)
+            continue;
+          entryPoint = !shader.label.empty() ? shader.label : shader.name;
+          break;
+        }
+      };
+      SetShader(InfoProperty(pipelineInfo, "vertexFunction"), eventPipeline.vertexShader,
+                eventPipeline.vertexEntryPoint);
+      SetShader(InfoProperty(pipelineInfo, "fragmentFunction"), eventPipeline.fragmentShader,
+                eventPipeline.fragmentEntryPoint);
       break;
     }
   }
+
+  uint64_t rasterCount = 0;
+  if(ParseUInt64(InfoProperty(drawInfo, "viewportCount"), rasterCount))
+  {
+    rasterCount = RDCMIN(rasterCount, 16ULL);
+    for(uint64_t i = 0; i < rasterCount; i++)
+    {
+      const rdcstr value = InfoProperty(drawInfo, StringFormat::Fmt("viewport[%llu]", i));
+      double x = 0.0, y = 0.0, width = 0.0, height = 0.0, minDepth = 0.0, maxDepth = 1.0;
+      if(sscanf(value.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &x, &y, &width, &height, &minDepth,
+                &maxDepth) != 6)
+        continue;
+      Viewport viewport;
+      viewport.x = (float)x;
+      viewport.y = (float)y;
+      viewport.width = (float)width;
+      viewport.height = (float)height;
+      viewport.minDepth = (float)minDepth;
+      viewport.maxDepth = (float)maxDepth;
+      rasterizer.viewports.push_back(viewport);
+    }
+  }
+  if(ParseUInt64(InfoProperty(drawInfo, "scissorCount"), rasterCount))
+  {
+    rasterCount = RDCMIN(rasterCount, 16ULL);
+    for(uint64_t i = 0; i < rasterCount; i++)
+    {
+      const rdcstr value = InfoProperty(drawInfo, StringFormat::Fmt("scissor[%llu]", i));
+      unsigned int x = 0, y = 0, width = 0, height = 0;
+      if(sscanf(value.c_str(), "%u,%u,%u,%u", &x, &y, &width, &height) != 4)
+        continue;
+      Scissor scissor;
+      scissor.x = x;
+      scissor.y = y;
+      scissor.width = width;
+      scissor.height = height;
+      scissor.enabled = true;
+      rasterizer.scissors.push_back(scissor);
+    }
+  }
+  rasterizer.cullMode = ParseCullMode(InfoProperty(drawInfo, "cullMode"));
+  rasterizer.fillMode = ParseFillMode(InfoProperty(drawInfo, "fillMode"));
+  rasterizer.frontCCW = InfoProperty(drawInfo, "frontFacingWinding") == "CounterClockwise";
+  double rasterValue = 0.0;
+  if(ParseDouble(InfoProperty(drawInfo, "depthBias"), rasterValue))
+    rasterizer.depthBias = (float)rasterValue;
+  if(ParseDouble(InfoProperty(drawInfo, "slopeScaledDepthBias"), rasterValue))
+    rasterizer.slopeScaledDepthBias = (float)rasterValue;
+  if(ParseDouble(InfoProperty(drawInfo, "depthBiasClamp"), rasterValue))
+    rasterizer.depthBiasClamp = (float)rasterValue;
 
   for(const MetalPipe::VertexBufferLayout &layout : vertexInput.layouts)
   {
@@ -1524,6 +1722,8 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
 
   m_EventVertexInputs[eventId] = vertexInput;
   m_EventDepthStencil[eventId] = depthStencil;
+  m_EventPipelines[eventId] = eventPipeline;
+  m_EventRasterizers[eventId] = rasterizer;
 }
 
 void AppleTraceReplayDriver::SavePipelineState(uint32_t eventId)
@@ -1544,6 +1744,21 @@ void AppleTraceReplayDriver::SavePipelineState(uint32_t eventId)
   auto depthStencil = m_EventDepthStencil.find(eventId);
   if(depthStencil != m_EventDepthStencil.end())
     m_MetalPipelineState->depthStencil = depthStencil->second;
+  auto pipeline = m_EventPipelines.find(eventId);
+  if(pipeline != m_EventPipelines.end())
+  {
+    m_MetalPipelineState->renderPipeline = pipeline->second.renderPipeline;
+    m_MetalPipelineState->computePipeline = pipeline->second.computePipeline;
+    m_MetalPipelineState->vertexShader.resourceId = pipeline->second.vertexShader;
+    m_MetalPipelineState->vertexShader.entryPoint = pipeline->second.vertexEntryPoint;
+    m_MetalPipelineState->fragmentShader.resourceId = pipeline->second.fragmentShader;
+    m_MetalPipelineState->fragmentShader.entryPoint = pipeline->second.fragmentEntryPoint;
+    m_MetalPipelineState->computeShader.resourceId = pipeline->second.computeShader;
+    m_MetalPipelineState->computeShader.entryPoint = pipeline->second.computeEntryPoint;
+  }
+  auto rasterizer = m_EventRasterizers.find(eventId);
+  if(rasterizer != m_EventRasterizers.end())
+    m_MetalPipelineState->rasterizer = rasterizer->second;
 
   ActionDescription *action = FindActionByEvent(m_FrameRecord.actionList, eventId);
   if(action != NULL)
@@ -1608,6 +1823,14 @@ rdcarray<DescriptorAccess> AppleTraceReplayDriver::GetDescriptorAccess(uint32_t 
 {
   auto event = m_EventDescriptors.find(eventId);
   return event == m_EventDescriptors.end() ? rdcarray<DescriptorAccess>() : event->second.accesses;
+}
+
+rdcarray<EventUsage> AppleTraceReplayDriver::GetUsage(ResourceId id)
+{
+  auto usage = m_ResourceUses.find(id);
+  if(usage == m_ResourceUses.end())
+    return {EventUsage(0, ResourceUsage::Unused)};
+  return usage->second;
 }
 
 rdcarray<Descriptor> AppleTraceReplayDriver::GetDescriptors(ResourceId descriptorStore,

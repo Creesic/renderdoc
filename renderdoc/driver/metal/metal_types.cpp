@@ -407,7 +407,7 @@ RenderPipelineColorAttachmentDescriptor::RenderPipelineColorAttachmentDescriptor
     MTL::RenderPipelineColorAttachmentDescriptor *objc)
     : pixelFormat(objc->pixelFormat()),
       blendingEnabled(objc->blendingEnabled()),
-      sourceRGBBlendFactor(objc->sourceAlphaBlendFactor()),
+      sourceRGBBlendFactor(objc->sourceRGBBlendFactor()),
       destinationRGBBlendFactor(objc->destinationRGBBlendFactor()),
       rgbBlendOperation(objc->rgbBlendOperation()),
       sourceAlphaBlendFactor(objc->sourceAlphaBlendFactor()),

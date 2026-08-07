@@ -45,10 +45,14 @@ def serialize_scissor(sc: Any) -> dict[str, Any]:
 
 
 def serialize_used_descriptor(d: Any, controller: Any) -> dict[str, Any]:
+    access = getattr(d, "access", None)
     out: dict[str, Any] = {
         "bind_type": enum_name(getattr(d, "bindType", None)),
         "direct_access": bool(getattr(d, "directAccess", False)),
     }
+    if access is not None:
+        out["slot"] = int(getattr(access, "index", 0) or 0)
+        out["array_element"] = int(getattr(access, "arrayElement", 0) or 0)
     desc = getattr(d, "descriptor", None)
     if desc is not None:
         enrich_resource_dict(controller, out, getattr(desc, "resource", None))
@@ -69,22 +73,115 @@ def serialize_used_descriptor(d: Any, controller: Any) -> dict[str, Any]:
     return out
 
 
-def serialize_shader_stage_summary(rd: Any, pipe: Any, stage: Any, controller: Any) -> dict[str, Any]:
+def _metal_state(controller: Any) -> Any:
+    """Return Metal's public pipeline state when this is a Metal capture.
+
+    Metal inspection captures can expose normalized bindings without shader reflection. The
+    generic PipeState helpers preserve those bindings, but callers historically hid them behind a
+    GetShaderReflection() check. Looking at MetalState directly lets us report the state that is
+    actually available without pretending reflection exists.
+    """
+    return _try(lambda: controller.GetMetalPipelineState())
+
+
+def _metal_shader_for_stage(rd: Any, metal: Any, stage: Any) -> Any:
+    if metal is None:
+        return None
+    if stage == getattr(rd.ShaderStage, "Vertex", None):
+        return getattr(metal, "vertexShader", None)
+    if stage in (
+        getattr(rd.ShaderStage, "Fragment", None),
+        getattr(rd.ShaderStage, "Pixel", None),
+    ):
+        return getattr(metal, "fragmentShader", None)
+    if stage == getattr(rd.ShaderStage, "Compute", None):
+        return getattr(metal, "computeShader", None)
+    return None
+
+
+def _metal_shader_has_state(shader: Any) -> bool:
+    if shader is None:
+        return False
+    if rid_str(getattr(shader, "resourceId", None)) not in ("", "Null"):
+        return True
+    return any(getattr(shader, name, None) for name in ("buffers", "textures", "samplers"))
+
+
+def _serialize_metal_binding(controller: Any, binding: Any, bind_type: str) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "bind_type": bind_type,
+        "slot": int(getattr(binding, "bindIndex", 0) or 0),
+        "array_element": int(getattr(binding, "arrayElement", 0) or 0),
+        "direct_access": True,
+    }
+    enrich_resource_dict(controller, out, getattr(binding, "resourceId", None))
+    if hasattr(binding, "writable"):
+        out["writable"] = bool(binding.writable)
+    if hasattr(binding, "byteOffset"):
+        out["byte_offset"] = int(binding.byteOffset)
+    if hasattr(binding, "byteSize"):
+        out["byte_size"] = int(binding.byteSize)
+    return out
+
+
+def bindings_for_metal_shader(shader: Any, controller: Any) -> dict[str, Any]:
+    readonly: list[dict[str, Any]] = []
+    readwrite: list[dict[str, Any]] = []
+    for binding in getattr(shader, "textures", None) or []:
+        row = _serialize_metal_binding(controller, binding, "Image")
+        (readwrite if row.get("writable") else readonly).append(row)
+    for binding in getattr(shader, "buffers", None) or []:
+        row = _serialize_metal_binding(controller, binding, "Buffer")
+        (readwrite if row.get("writable") else readonly).append(row)
+    return {
+        "readonly": readonly,
+        "readwrite": readwrite,
+        "samplers": [
+            _serialize_metal_binding(controller, binding, "Sampler")
+            for binding in (getattr(shader, "samplers", None) or [])
+        ],
+        "constant_blocks": [],
+        "reflection_available": getattr(shader, "reflection", None) is not None,
+    }
+
+
+def _stage_entries(rd: Any, pipe: Any, metal: Any) -> list[tuple[Any, Any, bool]]:
+    entries: list[tuple[Any, Any, bool]] = []
+    for stage in collect_shader_stages(rd):
+        metal_shader = _metal_shader_for_stage(rd, metal, stage)
+        reflected = _try(lambda st=stage: pipe.GetShaderReflection(st)) is not None
+        if reflected or _metal_shader_has_state(metal_shader):
+            entries.append((stage, metal_shader, reflected))
+    return entries
+
+
+def serialize_shader_stage_summary(
+    rd: Any, pipe: Any, stage: Any, controller: Any, metal_shader: Any = None
+) -> dict[str, Any]:
     info: dict[str, Any] = {"stage": enum_name(stage)}
     refl = _try(lambda: pipe.GetShaderReflection(stage))
-    if refl is None:
+    if refl is None and not _metal_shader_has_state(metal_shader):
         info["bound"] = False
         return info
     info["bound"] = True
-    enrich_resource_dict(controller, info, getattr(refl, "resourceId", rd.ResourceId.Null()))
+    info["reflection_available"] = refl is not None
+    resource = (
+        getattr(refl, "resourceId", None)
+        if refl is not None
+        else getattr(metal_shader, "resourceId", None)
+    )
+    if rid_str(resource) not in ("", "Null"):
+        enrich_resource_dict(controller, info, resource)
     ep = _try(lambda: pipe.GetShaderEntryPoint(stage))
+    if (ep is None or ep == "") and metal_shader is not None:
+        ep = getattr(metal_shader, "entryPoint", "")
     if ep is not None and ep != "":
         # PipeState returns rdcstr (Python str); older bindings may return ShaderEntryPoint with .name.
         if isinstance(ep, str):
             info["entry_point"] = ep
         else:
             info["entry_point"] = str(getattr(ep, "name", ep))
-    dbg = getattr(refl, "debugInfo", None)
+    dbg = getattr(refl, "debugInfo", None) if refl is not None else None
     if dbg is not None:
         info["debuggable"] = bool(getattr(dbg, "debuggable", False))
     return info
@@ -366,6 +463,16 @@ def summarize_action(rd: Any, controller: Any, structured_file: Any, event_id: i
         one: dict[str, Any] = {}
         enrich_resource_dict(controller, one, o)
         outs.append(one)
+    copy_source: dict[str, Any] | None = None
+    source = getattr(act, "copySource", None)
+    if rid_str(source) not in ("", "Null"):
+        copy_source = {}
+        enrich_resource_dict(controller, copy_source, source)
+    copy_destination: dict[str, Any] | None = None
+    destination = getattr(act, "copyDestination", None)
+    if rid_str(destination) not in ("", "Null"):
+        copy_destination = {}
+        enrich_resource_dict(controller, copy_destination, destination)
     return {
         "event_id": event_id,
         "name": act.GetName(structured_file),
@@ -379,12 +486,15 @@ def summarize_action(rd: Any, controller: Any, structured_file: Any, event_id: i
         "instance_offset": int(getattr(act, "instanceOffset", 0)),
         "index_offset": int(getattr(act, "indexOffset", 0)),
         "base_vertex": int(getattr(act, "baseVertex", 0)),
+        "copy_source": copy_source,
+        "copy_destination": copy_destination,
     }
 
 
 def normalize_pipeline_state(controller: Any, structured_file: Any, event_id: int) -> dict[str, Any]:
     rd = get_renderdoc()
     pipe = controller.GetPipelineState()
+    metal = _metal_state(controller)
     data: dict[str, Any] = {"event_id": event_id}
     data["action"] = summarize_action(rd, controller, structured_file, event_id)
 
@@ -400,19 +510,27 @@ def normalize_pipeline_state(controller: Any, structured_file: Any, event_id: in
         data["compute_pipeline_name"] = cn
 
     vps = []
-    for i in range(16):
-        vp = _try(lambda idx=i: pipe.GetViewport(idx))
-        if vp is None:
-            break
-        vps.append(serialize_viewport(vp))
+    if metal is not None:
+        vps = [serialize_viewport(vp) for vp in (getattr(metal.rasterizer, "viewports", None) or [])]
+    else:
+        for i in range(16):
+            vp = _try(lambda idx=i: pipe.GetViewport(idx))
+            if vp is None:
+                break
+            vps.append(serialize_viewport(vp))
     data["viewports"] = vps
 
     scissors = []
-    for i in range(16):
-        sc = _try(lambda idx=i: pipe.GetScissor(idx))
-        if sc is None:
-            break
-        scissors.append(serialize_scissor(sc))
+    if metal is not None:
+        scissors = [
+            serialize_scissor(sc) for sc in (getattr(metal.rasterizer, "scissors", None) or [])
+        ]
+    else:
+        for i in range(16):
+            sc = _try(lambda idx=i: pipe.GetScissor(idx))
+            if sc is None:
+                break
+            scissors.append(serialize_scissor(sc))
     data["scissors"] = scissors
 
     data["targets"] = serialize_graphics_targets(pipe, controller)
@@ -423,17 +541,21 @@ def normalize_pipeline_state(controller: Any, structured_file: Any, event_id: in
     data["vertex_inputs"] = serialize_vertex_inputs(pipe, controller)
 
     stages = collect_shader_stages(rd)
-    data["shaders"] = [serialize_shader_stage_summary(rd, pipe, st, controller) for st in stages]
+    data["shaders"] = [
+        serialize_shader_stage_summary(
+            rd, pipe, st, controller, _metal_shader_for_stage(rd, metal, st)
+        )
+        for st in stages
+    ]
 
     data["bindings_by_stage"] = {}
-    for st in stages:
-        try:
-            if pipe.GetShaderReflection(st) is None:
-                continue
-        except Exception:
-            continue
+    for st, metal_shader, reflected in _stage_entries(rd, pipe, metal):
         key = enum_name(st).lower()
-        data["bindings_by_stage"][key] = bindings_for_stage(pipe, st, controller)
+        data["bindings_by_stage"][key] = (
+            bindings_for_metal_shader(metal_shader, controller)
+            if metal_shader is not None
+            else bindings_for_stage(pipe, st, controller)
+        )
 
     data["probable_causes"] = heuristic_pipeline_issues(data)
     data["anomalies"] = detect_pipeline_anomalies(data)
@@ -469,18 +591,17 @@ def heuristic_pipeline_issues(snapshot: dict[str, Any]) -> list[str]:
 def normalize_bound_resources(controller: Any, structured_file: Any, event_id: int) -> dict[str, Any]:
     rd = get_renderdoc()
     pipe = controller.GetPipelineState()
-    stages = collect_shader_stages(rd)
+    metal = _metal_state(controller)
     out: dict[str, Any] = {"event_id": event_id, "by_stage": {}, "merged_resources": []}
     merged: set[str] = set()
 
-    for st in stages:
-        try:
-            if pipe.GetShaderReflection(st) is None:
-                continue
-        except Exception:
-            continue
+    for st, metal_shader, reflected in _stage_entries(rd, pipe, metal):
         key = enum_name(st).lower()
-        bd = bindings_for_stage(pipe, st, controller)
+        bd = (
+            bindings_for_metal_shader(metal_shader, controller)
+            if metal_shader is not None
+            else bindings_for_stage(pipe, st, controller)
+        )
         out["by_stage"][key] = bd
         for bucket in ("readonly", "readwrite", "constant_blocks"):
             if bucket == "constant_blocks":
@@ -532,6 +653,7 @@ def build_draw_state_row(controller: Any, structured_file: Any, event_id: int) -
     """
     rd = get_renderdoc()
     pipe = controller.GetPipelineState()
+    metal = _metal_state(controller)
     act = find_action(controller, event_id)
     name = act.GetName(structured_file) if act is not None else ""
 
@@ -602,17 +724,28 @@ def build_draw_state_row(controller: Any, structured_file: Any, event_id: int) -
     depth_target = compact_binding(targets.get("depth_target"))
 
     shaders: dict[str, Any] = {}
-    for st in collect_shader_stages(rd):
+    for st, metal_shader, reflected in _stage_entries(rd, pipe, metal):
         refl = _try(lambda s=st: pipe.GetShaderReflection(s))
-        if refl is None:
-            continue
         entry: dict[str, Any] = {}
-        enrich_resource_dict(controller, entry, getattr(refl, "resourceId", rd.ResourceId.Null()))
+        resource = (
+            getattr(refl, "resourceId", None)
+            if refl is not None
+            else getattr(metal_shader, "resourceId", None)
+        )
+        if rid_str(resource) not in ("", "Null"):
+            enrich_resource_dict(controller, entry, resource)
+        entry["reflection_available"] = reflected
         constant_blocks = [
-            str(getattr(cb, "name", "") or "") for cb in (getattr(refl, "constantBlocks", None) or [])
+            str(getattr(cb, "name", "") or "")
+            for cb in (getattr(refl, "constantBlocks", None) or [])
         ]
         if constant_blocks:
             entry["constant_blocks"] = constant_blocks
+        if metal_shader is not None:
+            entry["resource_binding_count"] = sum(
+                len(getattr(metal_shader, name, None) or [])
+                for name in ("buffers", "textures", "samplers")
+            )
         shaders[enum_name(st).lower()] = entry
 
     return {

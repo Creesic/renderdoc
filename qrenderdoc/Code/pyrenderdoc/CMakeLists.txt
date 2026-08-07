@@ -27,7 +27,10 @@ set(CMAKE_SKIP_BUILD_RPATH TRUE)
 set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 if (APPLE)
     set(CMAKE_MACOSX_RPATH TRUE)
-    set(CMAKE_INSTALL_RPATH "@loader_path/../lib")
+    # The first path supports the normal bin/pymodules layout. The remaining paths support the
+    # macOS resource bundle, where the extension is under Resources/renderdoc-mcp/pymodules,
+    # librenderdoc is in Contents/lib, and the pinned libpython is beside the MCP package.
+    set(CMAKE_INSTALL_RPATH "@loader_path/../lib;@loader_path/../../../lib;@loader_path/../python/lib")
     set(CMAKE_BUILD_WITH_INSTALL_NAME_DIR TRUE)
 else()
     set(CMAKE_INSTALL_RPATH "$ORIGIN/:$ORIGIN/../lib${LIB_SUFFIX}/${LIB_SUBFOLDER_TRAIL_SLASH}")
@@ -74,6 +77,15 @@ set_target_properties(_renderdoc PROPERTIES PREFIX "")
 set_target_properties(_qrenderdoc PROPERTIES PREFIX "")
 set_target_properties(_renderdoc PROPERTIES OUTPUT_NAME "renderdoc")
 set_target_properties(_qrenderdoc PROPERTIES OUTPUT_NAME "qrenderdoc")
+
+if(RENDERDOC_EMBED_MCP_PYTHON)
+    add_custom_command(TARGET _renderdoc POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${RENDERDOC_MCP_RUNTIME_DIR}/pymodules"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:_renderdoc>"
+                "${RENDERDOC_MCP_RUNTIME_DIR}/pymodules/$<TARGET_FILE_NAME:_renderdoc>"
+        COMMENT "Staging renderdoc Python bindings for the bundled MCP server")
+endif()
 
 # Make sure we build after the wrappers are generated
 add_dependencies(_renderdoc swig-bindings)

@@ -1071,6 +1071,143 @@ bool WrappedMTLDevice::Serialise_CaptureScope(SerialiserType &ser)
   return true;
 }
 
+void WrappedMTLDevice::CaptureCmdBufPrepareSharedBuffers(MetalResourceRecord *record)
+{
+  SCOPED_LOCK(m_CaptureCommandBuffersLock);
+  RDCASSERT(IsCaptureMode(m_State));
+  if(!IsActiveCapturing(m_State))
+    return;
+
+  std::unordered_set<ResourceId> refIDs;
+  record->AddReferencedIDs(refIDs);
+
+  // Metal argument buffers store GPU addresses instead of wrapped object references. A command
+  // buffer therefore directly references the small top-level argument buffer, but not the shared
+  // constant/descriptor buffers reached through it. If those indirect buffers are CPU-written
+  // during the captured frame, treating their capture-start contents as immutable produces a
+  // self-consistent but stale replay (most visibly, old transform matrices).
+  //
+  // Build a live GPU-address index, then walk pointer-sized words starting from small directly
+  // referenced buffers. The size gate avoids scanning large vertex/index payloads; buffers found
+  // through a real GPU address are walked without the gate so nested descriptor tables remain
+  // complete.
+  struct AddressedBuffer
+  {
+    ResourceId id;
+    uint64_t start = 0;
+    uint64_t length = 0;
+  };
+
+  std::map<uint64_t, AddressedBuffer> addressedBuffers;
+  const rdcarray<ResourceId> liveBuffers = GetResourceManager()->GetLiveBufferResourceIDs();
+  for(ResourceId id : liveBuffers)
+  {
+    MetalResourceRecord *bufferRecord = GetResourceManager()->GetResourceRecord(id);
+    if(bufferRecord == NULL || bufferRecord->m_Type != eResBuffer || bufferRecord->bufInfo == NULL ||
+       bufferRecord->bufInfo->storageMode != MTL::StorageModeShared ||
+       bufferRecord->m_Resource == NULL)
+      continue;
+
+    MTL::Buffer *buffer = Unwrap((WrappedMTLBuffer *)bufferRecord->m_Resource);
+    const uint64_t address = buffer ? buffer->gpuAddress() : 0;
+    const uint64_t length = bufferRecord->bufInfo->length;
+    if(address != 0 && length != 0)
+      addressedBuffers[address] = {id, address, length};
+  }
+
+  static constexpr uint64_t MaxDirectArgumentBufferScan = 256 * 1024;
+  rdcarray<ResourceId> scanQueue;
+  std::unordered_set<ResourceId> scanned;
+  for(ResourceId id : refIDs)
+  {
+    MetalResourceRecord *bufferRecord = GetResourceManager()->GetResourceRecord(id);
+    if(bufferRecord != NULL && bufferRecord->m_Type == eResBuffer &&
+       bufferRecord->bufInfo != NULL &&
+       bufferRecord->bufInfo->storageMode == MTL::StorageModeShared &&
+       bufferRecord->bufInfo->length <= MaxDirectArgumentBufferScan)
+      scanQueue.push_back(id);
+  }
+
+  for(size_t queueIndex = 0; queueIndex < scanQueue.size(); queueIndex++)
+  {
+    const ResourceId sourceId = scanQueue[queueIndex];
+    if(!scanned.insert(sourceId).second)
+      continue;
+
+    MetalResourceRecord *sourceRecord = GetResourceManager()->GetResourceRecord(sourceId);
+    MetalBufferInfo *sourceInfo = sourceRecord ? sourceRecord->bufInfo : NULL;
+    if(sourceInfo == NULL || sourceInfo->data == NULL)
+      continue;
+
+    for(uint64_t offset = 0; offset + sizeof(uint64_t) <= sourceInfo->length;
+        offset += sizeof(uint64_t))
+    {
+      uint64_t address = 0;
+      memcpy(&address, sourceInfo->data + offset, sizeof(address));
+      auto target = addressedBuffers.upper_bound(address);
+      if(target == addressedBuffers.begin())
+        continue;
+      --target;
+
+      const AddressedBuffer &buffer = target->second;
+      if(address < buffer.start || address - buffer.start >= buffer.length ||
+         buffer.id == sourceId)
+        continue;
+
+      if(refIDs.insert(buffer.id).second)
+      {
+        record->MarkResourceFrameReferenced(buffer.id, eFrameRef_Read);
+        scanQueue.push_back(buffer.id);
+      }
+    }
+  }
+
+  // Snapshot/detect CPU modifications to referenced shared MTLBuffers before the real Metal
+  // command buffer is submitted. Capturing these bytes after commit races both GPU writes and
+  // application-side reuse from other threads.
+  for(ResourceId id : refIDs)
+  {
+    MetalResourceRecord *refRecord = GetResourceManager()->GetResourceRecord(id);
+    if(refRecord == NULL || refRecord->m_Type != eResBuffer)
+      continue;
+
+    MetalBufferInfo *bufInfo = refRecord->bufInfo;
+    if(bufInfo == NULL || bufInfo->storageMode != MTL::StorageModeShared)
+      continue;
+
+    if(bufInfo->data == NULL)
+    {
+      RDCERR("Writing buffer memory %s that is NULL", ToStr(id).c_str());
+      continue;
+    }
+
+    size_t diffStart = 0;
+    size_t diffEnd = bufInfo->length;
+    bool foundDifference = true;
+    if(!bufInfo->baseSnapshot.isEmpty())
+    {
+      foundDifference =
+          FindDiffRange(bufInfo->data, bufInfo->baseSnapshot.data(), bufInfo->length, diffStart,
+                        diffEnd);
+      if(diffEnd <= diffStart)
+        foundDifference = false;
+    }
+
+    if(!foundDifference)
+      continue;
+
+    Chunk *chunk = NULL;
+    {
+      CACHE_THREAD_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(MetalChunk::MTLBuffer_InternalModifyCPUContents);
+      ((WrappedMTLBuffer *)refRecord->m_Resource)
+          ->Serialise_InternalModifyCPUContents(ser, diffStart, diffEnd, bufInfo);
+      chunk = scope.Get();
+    }
+    record->AddChunk(chunk);
+  }
+}
+
 void WrappedMTLDevice::CaptureCmdBufSubmit(MetalResourceRecord *record)
 {
   RDCASSERTEQUAL(record->cmdInfo->status, MetalCmdBufferStatus::Submitted);
@@ -1078,52 +1215,8 @@ void WrappedMTLDevice::CaptureCmdBufSubmit(MetalResourceRecord *record)
   WrappedMTLCommandBuffer *commandBuffer = (WrappedMTLCommandBuffer *)(record->m_Resource);
   if(IsActiveCapturing(m_State))
   {
-    std::unordered_set<ResourceId> refIDs;
     // The record will get deleted at the end of active frame capture
     record->AddRef();
-    record->AddReferencedIDs(refIDs);
-    // snapshot/detect any CPU modifications to the contents
-    // of referenced MTLBuffer with shared storage mode
-    for(auto it = refIDs.begin(); it != refIDs.end(); ++it)
-    {
-      ResourceId id = *it;
-      MetalResourceRecord *refRecord = GetResourceManager()->GetResourceRecord(id);
-      if(refRecord->m_Type == eResBuffer)
-      {
-        MetalBufferInfo *bufInfo = refRecord->bufInfo;
-        if(bufInfo->storageMode == MTL::StorageModeShared)
-        {
-          size_t diffStart = 0;
-          size_t diffEnd = bufInfo->length;
-          bool foundDifference = true;
-          if(!bufInfo->baseSnapshot.isEmpty())
-          {
-            foundDifference = FindDiffRange(bufInfo->data, bufInfo->baseSnapshot.data(),
-                                            bufInfo->length, diffStart, diffEnd);
-            if(diffEnd <= diffStart)
-              foundDifference = false;
-          }
-
-          if(foundDifference)
-          {
-            if(bufInfo->data == NULL)
-            {
-              RDCERR("Writing buffer memory %s that is NULL", ToStr(id).c_str());
-              continue;
-            }
-            Chunk *chunk = NULL;
-            {
-              CACHE_THREAD_SERIALISER();
-              SCOPED_SERIALISE_CHUNK(MetalChunk::MTLBuffer_InternalModifyCPUContents);
-              ((WrappedMTLBuffer *)refRecord->m_Resource)
-                  ->Serialise_InternalModifyCPUContents(ser, diffStart, diffEnd, bufInfo);
-              chunk = scope.Get();
-            }
-            record->AddChunk(chunk);
-          }
-        }
-      }
-    }
     record->MarkResourceFrameReferenced(GetResID(commandBuffer->GetCommandQueue()), eFrameRef_Read);
     // pull in frame refs from this command buffer
     record->AddResourceReferences(GetResourceManager());

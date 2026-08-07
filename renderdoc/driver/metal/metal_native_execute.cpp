@@ -511,8 +511,41 @@ struct Executor
         return status;
     }
     submittedCommandBuffers.clear();
+    pendingBufferUses.clear();
     submittedQueueId = 0;
     return ResultCode::Succeeded;
+  }
+
+  void RecordEncoderBufferUse(uint64_t encoderId, uint64_t bufferId)
+  {
+    if(bufferId == 0)
+      return;
+
+    auto commandBuffer = encoderCommandBuffers.find(encoderId);
+    if(commandBuffer != encoderCommandBuffers.end())
+      commandBufferBufferUses[commandBuffer->second].insert(bufferId);
+  }
+
+  void AddBufferDependencies(uint64_t bufferId, std::set<uint64_t> &uses,
+                             std::set<uint64_t> &visited)
+  {
+    if(bufferId == 0 || !visited.insert(bufferId).second)
+      return;
+
+    uses.insert(bufferId);
+    auto dependencies = argumentBufferDependencies.find(bufferId);
+    if(dependencies == argumentBufferDependencies.end())
+      return;
+
+    for(uint64_t dependency : dependencies->second)
+      AddBufferDependencies(dependency, uses, visited);
+  }
+
+  void RecordSubmittedBufferUses(uint64_t commandBufferId)
+  {
+    std::set<uint64_t> visited;
+    for(uint64_t bufferId : commandBufferBufferUses[commandBufferId])
+      AddBufferDependencies(bufferId, pendingBufferUses, visited);
   }
 
   RDResult SeedFromCache()
@@ -780,15 +813,28 @@ struct Executor
       }
       case MetalChunk::MTLBuffer_InternalModifyCPUContents:
       {
-        MTL::Buffer *buffer = buffers[UInt(Child(chunk, "Buffer"))];
+        const uint64_t bufferId = UInt(Child(chunk, "Buffer"));
+        MTL::Buffer *buffer = buffers[bufferId];
         uint64_t start = UInt(Child(chunk, "start"));
         bytebuf data = Buffer(file, Child(chunk, "data"));
         if(buffer == NULL || start + data.size() > buffer->length())
           RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
                               "Captured Metal buffer update exceeds its replay buffer");
+        // A capture can reuse shared ring buffers as soon as an earlier command buffer has
+        // consumed them. Replay batches command-buffer submissions for fast event scrubbing, so
+        // do not overwrite one of those buffers while an already-submitted GPU command still
+        // references it. Waiting only on an actual alias preserves asynchronous batches for
+        // unrelated command buffers.
+        if(!data.empty() && pendingBufferUses.find(bufferId) != pendingBufferUses.end())
+        {
+          RDResult submitted = WaitForSubmittedCommandBuffers();
+          if(submitted != ResultCode::Succeeded)
+            return submitted;
+        }
         if(!data.empty())
           memcpy((byte *)buffer->contents() + start, data.data(), data.size());
-        normalisedArgumentBuffers.erase(UInt(Child(chunk, "Buffer")));
+        normalisedArgumentBuffers.erase(bufferId);
+        argumentBufferDependencies.erase(bufferId);
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLResource_captureIdentity:
@@ -863,7 +909,9 @@ struct Executor
         if(encoder == NULL)
           RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
                               "Could not create captured Metal blit encoder");
-        blitEncoders[UInt(Child(chunk, "BlitCommandEncoder"))] = encoder;
+        const uint64_t encoderId = UInt(Child(chunk, "BlitCommandEncoder"));
+        blitEncoders[encoderId] = encoder;
+        encoderCommandBuffers[encoderId] = UInt(Child(chunk, "CommandBuffer"));
         RetainAutoreleased(encoder, retained);
         return ResultCode::Succeeded;
       }
@@ -889,7 +937,9 @@ struct Executor
         if(encoder == NULL)
           RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
                               "Could not create captured Metal compute encoder");
-        computeEncoders[UInt(Child(chunk, "ComputeCommandEncoder"))] = encoder;
+        const uint64_t encoderId = UInt(Child(chunk, "ComputeCommandEncoder"));
+        computeEncoders[encoderId] = encoder;
+        encoderCommandBuffers[encoderId] = UInt(Child(chunk, "CommandBuffer"));
         RetainAutoreleased(encoder, retained);
         return ResultCode::Succeeded;
       }
@@ -942,6 +992,7 @@ struct Executor
       {
         MTL::RenderCommandEncoder *encoder = Encoder(chunk);
         const uint64_t bufferId = UInt(Child(chunk, "buffer"));
+        RecordEncoderBufferUse(UInt(Child(chunk, "RenderCommandEncoder")), bufferId);
         RememberArgumentBufferLayout(UInt(Child(chunk, "RenderCommandEncoder")), bufferId,
                                      UInt(Child(chunk, "index")), true);
         if(encoder)
@@ -1054,6 +1105,7 @@ struct Executor
       {
         MTL::RenderCommandEncoder *encoder = Encoder(chunk);
         const uint64_t bufferId = UInt(Child(chunk, "buffer"));
+        RecordEncoderBufferUse(UInt(Child(chunk, "RenderCommandEncoder")), bufferId);
         RememberArgumentBufferLayout(UInt(Child(chunk, "RenderCommandEncoder")), bufferId,
                                      UInt(Child(chunk, "index")), false);
         if(bufferId != 0)
@@ -1118,10 +1170,12 @@ struct Executor
         if(encoder == NULL)
           RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
                               "Captured indexed draw has no replay encoder");
+        const uint64_t indexBuffer = UInt(Child(chunk, "indexBuffer"));
+        RecordEncoderBufferUse(encoderId, indexBuffer);
         encoder->drawIndexedPrimitives((MTL::PrimitiveType)UInt(Child(chunk, "primitiveType")),
                                        (NS::UInteger)UInt(Child(chunk, "indexCount")),
                                        (MTL::IndexType)UInt(Child(chunk, "indexType")),
-                                       buffers[UInt(Child(chunk, "indexBuffer"))],
+                                       buffers[indexBuffer],
                                        (NS::UInteger)UInt(Child(chunk, "indexBufferOffset")),
                                        (NS::UInteger)UInt(Child(chunk, "instanceCount")),
                                        (NS::Integer)UInt(Child(chunk, "baseVertex")),
@@ -1158,7 +1212,10 @@ struct Executor
         MTL::Resource *real = NULL;
         auto buffer = buffers.find(resource);
         if(buffer != buffers.end())
+        {
           real = buffer->second;
+          RecordEncoderBufferUse(UInt(Child(chunk, "RenderCommandEncoder")), resource);
+        }
         auto texture = textures.find(resource);
         if(texture != textures.end())
           real = texture->second.texture;
@@ -1176,9 +1233,13 @@ struct Executor
       case MetalChunk::MTLBlitCommandEncoder_copyFromBuffer_toBuffer:
       {
         MTL::BlitCommandEncoder *encoder = BlitEncoder(chunk);
+        const uint64_t source = UInt(Child(chunk, "sourceBuffer"));
         const uint64_t destination = UInt(Child(chunk, "destinationBuffer"));
+        const uint64_t encoderId = UInt(Child(chunk, "BlitCommandEncoder"));
+        RecordEncoderBufferUse(encoderId, source);
+        RecordEncoderBufferUse(encoderId, destination);
         if(encoder)
-          encoder->copyFromBuffer(buffers[UInt(Child(chunk, "sourceBuffer"))],
+          encoder->copyFromBuffer(buffers[source],
                                   (NS::UInteger)UInt(Child(chunk, "sourceOffset")),
                                   buffers[destination],
                                   (NS::UInteger)UInt(Child(chunk, "destinationOffset")),
@@ -1190,9 +1251,11 @@ struct Executor
       case MetalChunk::MTLBlitCommandEncoder_copyFromBuffer_toTexture_options:
       {
         MTL::BlitCommandEncoder *encoder = BlitEncoder(chunk);
+        const uint64_t source = UInt(Child(chunk, "sourceBuffer"));
         const uint64_t destination = UInt(Child(chunk, "destinationTexture"));
+        RecordEncoderBufferUse(UInt(Child(chunk, "BlitCommandEncoder")), source);
         if(encoder)
-          encoder->copyFromBuffer(buffers[UInt(Child(chunk, "sourceBuffer"))],
+          encoder->copyFromBuffer(buffers[source],
                                   (NS::UInteger)UInt(Child(chunk, "sourceOffset")),
                                   (NS::UInteger)UInt(Child(chunk, "sourceBytesPerRow")),
                                   (NS::UInteger)UInt(Child(chunk, "sourceBytesPerImage")),
@@ -1251,6 +1314,7 @@ struct Executor
       {
         MTL::BlitCommandEncoder *encoder = BlitEncoder(chunk);
         const uint64_t destination = UInt(Child(chunk, "destinationBuffer"));
+        RecordEncoderBufferUse(UInt(Child(chunk, "BlitCommandEncoder")), destination);
         if(encoder)
           encoder->copyFromTexture(textures[UInt(Child(chunk, "sourceTexture"))].texture,
                                    (NS::UInteger)UInt(Child(chunk, "sourceSlice")),
@@ -1277,6 +1341,7 @@ struct Executor
       {
         MTL::BlitCommandEncoder *encoder = BlitEncoder(chunk);
         const uint64_t buffer = UInt(Child(chunk, "buffer"));
+        RecordEncoderBufferUse(UInt(Child(chunk, "BlitCommandEncoder")), buffer);
         if(encoder)
           encoder->fillBuffer(buffers[buffer], Range(Child(chunk, "range")),
                               (uint8_t)UInt(Child(chunk, "value")));
@@ -1347,6 +1412,7 @@ struct Executor
       {
         MTL::ComputeCommandEncoder *encoder = ComputeEncoder(chunk);
         const uint64_t buffer = UInt(Child(chunk, "buffer"));
+        RecordEncoderBufferUse(UInt(Child(chunk, "ComputeCommandEncoder")), buffer);
         if(buffer != 0)
           argumentBufferIds.insert(buffer);
         NormaliseArgumentBuffer(buffer);
@@ -1379,7 +1445,10 @@ struct Executor
         MTL::Resource *real = NULL;
         auto buffer = buffers.find(resource);
         if(buffer != buffers.end())
+        {
           real = buffer->second;
+          RecordEncoderBufferUse(UInt(Child(chunk, "ComputeCommandEncoder")), resource);
+        }
         auto texture = textures.find(resource);
         if(texture != textures.end())
           real = texture->second.texture;
@@ -1462,6 +1531,7 @@ struct Executor
         commandWaitMilliseconds += commandTimer.GetMilliseconds();
         submittedQueueId = queueId;
         submittedCommandBuffers.push_back({commandBufferId, buffer});
+        RecordSubmittedBufferUses(commandBufferId);
         if(drawLimitReached)
           executionComplete = true;
         return ResultCode::Succeeded;
@@ -1874,6 +1944,9 @@ struct Executor
       RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
                           "Could not create captured Metal render encoder");
     encoders[encoderId] = encoder;
+    encoderCommandBuffers[encoderId] = commandBufferId;
+    const uint64_t visibilityBuffer = UInt(Child(descriptor, "visibilityResultBuffer"));
+    RecordEncoderBufferUse(encoderId, visibilityBuffer);
     RetainAutoreleased(encoder, retained);
     return ResultCode::Succeeded;
   }
@@ -2163,6 +2236,7 @@ struct Executor
     }
 
     BuildArgumentReplacementTables();
+    argumentBufferDependencies[id].clear();
 
     // Textures referenced only through an argument buffer never pass through
     // setFragmentTexture:/setTexture:. Discover them before replacing the captured identities so
@@ -2187,6 +2261,7 @@ struct Executor
            value >= captured->second.first &&
            value - captured->second.first < captured->second.second)
         {
+          argumentBufferDependencies[id].insert(address->second);
           argumentBufferIds.insert(address->second);
           NormaliseArgumentBuffer(address->second);
         }
@@ -2388,6 +2463,10 @@ struct Executor
   std::map<uint64_t, MTL::Event *> events;
   std::map<uint64_t, MTL::CommandBuffer *> commandBuffers;
   std::map<uint64_t, uint64_t> commandBufferQueues;
+  std::map<uint64_t, uint64_t> encoderCommandBuffers;
+  std::map<uint64_t, std::set<uint64_t>> commandBufferBufferUses;
+  std::map<uint64_t, std::set<uint64_t>> argumentBufferDependencies;
+  std::set<uint64_t> pendingBufferUses;
   rdcarray<rdcpair<uint64_t, MTL::CommandBuffer *>> submittedCommandBuffers;
   uint64_t submittedQueueId = 0;
   std::map<uint64_t, MTL::RenderCommandEncoder *> encoders;

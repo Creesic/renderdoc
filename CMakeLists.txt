@@ -208,6 +208,7 @@ option(ENABLE_METAL "Enable Metal driver" OFF)
 option(ENABLE_RENDERDOCCMD "Enable renderdoccmd" ON)
 option(ENABLE_QRENDERDOC "Enable qrenderdoc" ON)
 option(ENABLE_PYRENDERDOC "Enable renderdoc python modules" ON)
+option(RENDERDOC_EMBED_MCP_PYTHON "Embed standalone CPython + MCP deps next to qrenderdoc (HTTPS at build-time)" ON)
 
 option(ENABLE_XLIB "Enable xlib windowing support" ON)
 option(ENABLE_XCB "Enable xcb windowing support" ON)
@@ -489,6 +490,53 @@ add_subdirectory(renderdoc)
 # but we need to add it if either is enabled since the swig bindings
 # are handled in common
 if(ENABLE_QRENDERDOC OR ENABLE_PYRENDERDOC)
+    # The macOS MCP bundle carries a pinned CPython runtime. Build the replay bindings against
+    # that exact interpreter rather than whichever unrelated Python happens to be installed on
+    # the host, otherwise importing renderdoc from the bundled server fails at the ABI boundary.
+    if(APPLE AND ENABLE_QRENDERDOC AND ENABLE_PYRENDERDOC AND RENDERDOC_EMBED_MCP_PYTHON)
+        set(RENDERDOC_MCP_RUNTIME_DIR
+            "${CMAKE_BINARY_DIR}/bin/qrenderdoc.app/Contents/Resources/renderdoc-mcp")
+        set(RENDERDOC_MCP_PYTHON "${RENDERDOC_MCP_RUNTIME_DIR}/python/bin/python3")
+        find_program(RENDERDOC_MCP_BUNDLE_PYTHON NAMES python3 python REQUIRED)
+
+        if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR
+           (NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$"))
+            set(RENDERDOC_MCP_BUNDLE_TRIPLET "macos_arm64")
+        elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR NOT CMAKE_OSX_ARCHITECTURES)
+            set(RENDERDOC_MCP_BUNDLE_TRIPLET "macos_amd64")
+        else()
+            message(FATAL_ERROR "The bundled MCP Python runtime requires a single macOS architecture")
+        endif()
+
+        set(RENDERDOC_MCP_RUNTIME_STAMP "${RENDERDOC_MCP_RUNTIME_DIR}/.renderdoc_mcp_bundle.stamp.txt")
+        set(RENDERDOC_MCP_RUNTIME_CURRENT FALSE)
+        if(EXISTS "${RENDERDOC_MCP_RUNTIME_STAMP}")
+            file(READ "${RENDERDOC_MCP_RUNTIME_STAMP}" RENDERDOC_MCP_RUNTIME_STAMP_CONTENT)
+            if(RENDERDOC_MCP_RUNTIME_STAMP_CONTENT MATCHES "^${RENDERDOC_MCP_BUNDLE_TRIPLET} ")
+                set(RENDERDOC_MCP_RUNTIME_CURRENT TRUE)
+            endif()
+        endif()
+
+        if(NOT RENDERDOC_MCP_RUNTIME_CURRENT)
+            message(STATUS "Bootstrapping the bundled macOS Python runtime for RenderDoc MCP")
+            execute_process(
+                COMMAND "${RENDERDOC_MCP_BUNDLE_PYTHON}"
+                        "${CMAKE_SOURCE_DIR}/util/bundle_renderdoc_mcp.py"
+                        --repo-root "${CMAKE_SOURCE_DIR}"
+                        --runtime-dir "${RENDERDOC_MCP_RUNTIME_DIR}"
+                        --triplet "${RENDERDOC_MCP_BUNDLE_TRIPLET}"
+                        --quiet
+                RESULT_VARIABLE RENDERDOC_MCP_BOOTSTRAP_RESULT)
+            if(NOT RENDERDOC_MCP_BOOTSTRAP_RESULT EQUAL 0)
+                message(FATAL_ERROR "Could not bootstrap the bundled macOS Python runtime for RenderDoc MCP")
+            endif()
+        endif()
+
+        set(Python3_ROOT_DIR "${RENDERDOC_MCP_RUNTIME_DIR}/python")
+        set(Python3_EXECUTABLE "${RENDERDOC_MCP_PYTHON}" CACHE FILEPATH
+            "Python interpreter used to build RenderDoc's bundled MCP bindings" FORCE)
+    endif()
+
     # Make sure Python 3 is found
     set(Python_ADDITIONAL_VERSIONS 3.18 3.17 3.16 3.15 3.14 3.13 3.12 3.11 3.10 3.9 3.8 3.7 3.6 3.5 3.4)
     if(NOT ${CMAKE_VERSION} VERSION_LESS "3.12")
@@ -561,4 +609,3 @@ endif()
 if(INTERNAL_SELF_CAPTURE)
     message(STATUS "INTERNAL: Configuring for self-capture")
 endif()
-

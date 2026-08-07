@@ -171,6 +171,7 @@ public:
 
   void CaptureCmdBufCommit(MetalResourceRecord *cbRecord);
   void CaptureCmdBufEnqueue(MetalResourceRecord *cbRecord);
+  void CaptureCmdBufPrepareSharedBuffers(MetalResourceRecord *cbRecord);
 
   void AddFrameCaptureRecordChunk(Chunk *chunk) { m_FrameCaptureRecord->AddChunk(chunk); }
   // From ResourceManager interface

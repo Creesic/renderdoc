@@ -251,3 +251,87 @@ def test_unavailable_pipe_state_is_explicit_not_empty():
     ):
         assert state["available"] is False
         assert state["reason"]
+
+
+def test_metal_bindings_do_not_require_shader_reflection(monkeypatch):
+    from types import SimpleNamespace
+    from renderdoc_mcp import serialize
+
+    monkeypatch.setattr(serialize, "rid_str", lambda rid: str(rid) if rid else "Null")
+
+    def enrich(_controller, out, rid):
+        out["resource_id"] = str(rid) if rid else "Null"
+
+    monkeypatch.setattr(serialize, "enrich_resource_dict", enrich)
+
+    shader = SimpleNamespace(
+        resourceId="ResourceId::9",
+        entryPoint="fragmentMain",
+        reflection=None,
+        textures=[
+            SimpleNamespace(
+                bindIndex=3,
+                arrayElement=0,
+                resourceId="ResourceId::40",
+                writable=False,
+            )
+        ],
+        buffers=[
+            SimpleNamespace(
+                bindIndex=12,
+                arrayElement=0,
+                resourceId="ResourceId::21",
+                byteOffset=16,
+                byteSize=240,
+                writable=False,
+            )
+        ],
+        samplers=[SimpleNamespace(bindIndex=1, arrayElement=0, resourceId="ResourceId::77")],
+    )
+
+    bindings = serialize.bindings_for_metal_shader(shader, controller=None)
+
+    assert bindings["reflection_available"] is False
+    assert bindings["readonly"] == [
+        {
+            "bind_type": "Image",
+            "slot": 3,
+            "array_element": 0,
+            "direct_access": True,
+            "resource_id": "ResourceId::40",
+            "writable": False,
+        },
+        {
+            "bind_type": "Buffer",
+            "slot": 12,
+            "array_element": 0,
+            "direct_access": True,
+            "resource_id": "ResourceId::21",
+            "writable": False,
+            "byte_offset": 16,
+            "byte_size": 240,
+        },
+    ]
+    assert bindings["samplers"][0]["resource_id"] == "ResourceId::77"
+
+
+def test_synthetic_metal_event_details_explain_missing_chunk():
+    from types import SimpleNamespace
+    from renderdoc_mcp.server import _synthetic_event_details
+
+    indexed = SimpleNamespace(
+        name="drawPrimitives(6)",
+        flags_names=["Drawcall"],
+        marker_stack=[],
+        num_vertices=6,
+        num_instances=1,
+        num_indices=0,
+    )
+    sess = SimpleNamespace(events_by_id={862: indexed})
+
+    details = _synthetic_event_details(sess, 862)
+
+    assert details["structured_chunk_available"] is False
+    assert details["synthetic_action"] is True
+    assert details["chunk_index"] is None
+    assert details["name"] == "drawPrimitives(6)"

@@ -55,12 +55,55 @@ rdcstr Number(const SDObject *object)
   return object ? ToStr(object->AsDouble()) : rdcstr();
 }
 
+double Double(const SDObject *object)
+{
+  return object ? object->AsDouble() : 0.0;
+}
+
 rdcstr EnumSuffix(const SDObject *object, const char *prefix)
 {
   rdcstr value = String(object);
   if(value.beginsWith(prefix))
     value = value.substr(strlen(prefix));
   return value;
+}
+
+rdcstr VertexLayoutDescription(const SDObject *descriptor)
+{
+  const SDObject *vertex = Child(descriptor, "vertexDescriptor");
+  const SDObject *layouts = Child(vertex, "layouts");
+  const SDObject *attributes = Child(vertex, "attributes");
+  if(layouts == NULL || attributes == NULL)
+    return {};
+
+  rdcstr description;
+  for(size_t slot = 0; slot < layouts->NumChildren(); slot++)
+  {
+    const SDObject *layout = layouts->GetChild(slot);
+    const uint64_t stride = UInt(Child(layout, "stride"));
+    if(stride == 0)
+      continue;
+    const rdcstr step = EnumSuffix(Child(layout, "stepFunction"), "MTLVertexStepFunction");
+    const uint64_t rate = UInt(Child(layout, "stepRate"));
+    description += StringFormat::Fmt("buffer %zu (stride=%llu, %s", slot, (unsigned long long)stride,
+                                     step == "PerInstance" ? "perInstance" : "perVertex");
+    if(rate > 1)
+      description += StringFormat::Fmt(", stepRate=%llu", (unsigned long long)rate);
+    description += "):\n";
+
+    for(size_t attribute = 0; attribute < attributes->NumChildren(); attribute++)
+    {
+      const SDObject *source = attributes->GetChild(attribute);
+      if(UInt(Child(source, "bufferIndex")) != slot)
+        continue;
+      const rdcstr format = EnumSuffix(Child(source, "format"), "MTLVertexFormat");
+      if(format.empty() || format == "Invalid")
+        continue;
+      description += StringFormat::Fmt("  attr%zu %s @%llu\n", attribute, format.c_str(),
+                                       (unsigned long long)UInt(Child(source, "offset")));
+    }
+  }
+  return description;
 }
 
 bytebuf Buffer(const SDFile &file, const SDObject *object)
@@ -88,6 +131,14 @@ struct NativeEncoderState
   std::map<uint32_t, uint64_t> fragmentTextures;
   std::map<uint32_t, uint64_t> fragmentSamplers;
   std::map<uint32_t, bytebuf> fragmentInlineBytes;
+  rdcarray<Viewport> viewports;
+  rdcarray<Scissor> scissors;
+  rdcstr frontFacingWinding = "Clockwise";
+  rdcstr cullMode = "None";
+  rdcstr fillMode = "Fill";
+  double depthBias = 0.0;
+  double slopeScaledDepthBias = 0.0;
+  double depthBiasClamp = 0.0;
   rdcarray<rdcstr> debugGroups;
   rdcfixedarray<uint64_t, 8> colorAttachments = {};
   uint64_t depthAttachment = 0;
@@ -241,6 +292,27 @@ struct NativeIndexBuilder
       binding.canFetch = index.nodes[known->second].canFetch;
     }
     index.nodes.push_back(binding);
+  }
+
+  void AddBlitCopy(const SDChunk *chunk, const char *sourceName, const char *destinationName,
+                   const char *label)
+  {
+    const uint64_t encoderId = UInt(Child(chunk, "BlitCommandEncoder"));
+    auto encoder = blitEncoders.find(encoderId);
+    if(encoder == blitEncoders.end())
+      return;
+    const uint64_t source = UInt(Child(chunk, sourceName));
+    const uint64_t destination = UInt(Child(chunk, destinationName));
+    AddBinding(encoder->second + "/source", "source", source);
+    AddBinding(encoder->second + "/destination", "destination", destination);
+    for(MetalTrace::Node &node : index.nodes)
+    {
+      if(node.kind != MetalTrace::NodeKind::BlitEncoder || node.stableId != encoderId)
+        continue;
+      node.label = StringFormat::Fmt("%s(%s -> %s)", label, ResourceObjectName(source).c_str(),
+                                     ResourceObjectName(destination).c_str());
+      break;
+    }
   }
 
   static void CopySlots(const std::map<uint32_t, uint64_t> &source, std::set<uint32_t> &dest)
@@ -524,6 +596,28 @@ struct NativeIndexBuilder
     for(const auto &inlineBytes : encoder.fragmentInlineBytes)
       Property(StringFormat::Fmt("fragmentInlineBytes[%u]", inlineBytes.first).c_str(),
                StringFormat::Fmt("%zu bytes", inlineBytes.second.size()));
+    Property("viewportCount", ToStr(encoder.viewports.size()));
+    for(size_t i = 0; i < encoder.viewports.size(); i++)
+    {
+      const Viewport &viewport = encoder.viewports[i];
+      Property(
+          StringFormat::Fmt("viewport[%zu]", i).c_str(),
+          StringFormat::Fmt("%.17g,%.17g,%.17g,%.17g,%.17g,%.17g", viewport.x, viewport.y,
+                            viewport.width, viewport.height, viewport.minDepth, viewport.maxDepth));
+    }
+    Property("scissorCount", ToStr(encoder.scissors.size()));
+    for(size_t i = 0; i < encoder.scissors.size(); i++)
+    {
+      const Scissor &scissor = encoder.scissors[i];
+      Property(StringFormat::Fmt("scissor[%zu]", i).c_str(),
+               StringFormat::Fmt("%u,%u,%u,%u", scissor.x, scissor.y, scissor.width, scissor.height));
+    }
+    Property("frontFacingWinding", encoder.frontFacingWinding);
+    Property("cullMode", encoder.cullMode);
+    Property("fillMode", encoder.fillMode);
+    Property("depthBias", ToStr(encoder.depthBias));
+    Property("slopeScaledDepthBias", ToStr(encoder.slopeScaledDepthBias));
+    Property("depthBiasClamp", ToStr(encoder.depthBiasClamp));
     for(size_t i = 0; i < encoder.colorAttachments.size(); i++)
       if(encoder.colorAttachments[i] != 0)
         AddBinding(path + StringFormat::Fmt("/color%zu", i), StringFormat::Fmt("color%zu", i),
@@ -678,6 +772,11 @@ struct NativeIndexBuilder
                                          UInt(Child(chunk, "bytesPerRow")))};
         node.byteSize = GetByteSize((uint32_t)width, (uint32_t)height, 1,
                                     (MTL::PixelFormat)UInt(Child(descriptor, "pixelFormat")), 0);
+        MetalTrace::NodeInfo info;
+        info.path = node.path;
+        info.keys = {"parentResource"};
+        info.values = {ToStr(parent)};
+        index.nodeInfos.push_back(info);
         break;
       }
       case MetalChunk::MTLTexture_newTextureViewWithPixelFormat:
@@ -713,6 +812,11 @@ struct NativeIndexBuilder
                               UInt(Child(slices, "location")), UInt(Child(slices, "length")))};
         node.byteSize = GetByteSize((uint32_t)width, (uint32_t)height, 1,
                                     (MTL::PixelFormat)UInt(Child(chunk, "pixelFormat")), 0);
+        MetalTrace::NodeInfo info;
+        info.path = node.path;
+        info.keys = {"parentResource"};
+        info.values = {ToStr(parent)};
+        index.nodeInfos.push_back(info);
         break;
       }
       case MetalChunk::MTLDevice_newLibraryWithSource:
@@ -744,6 +848,14 @@ struct NativeIndexBuilder
         rdcstr label = String(Child(Child(chunk, "descriptor"), "label"));
         if(!label.empty())
           node.label = label;
+        const SDObject *descriptor = Child(chunk, "descriptor");
+        MetalTrace::NodeInfo info;
+        info.path = node.path;
+        info.keys = {"vertexFunction", "fragmentFunction", "vertexLayout"};
+        info.values = {ToStr(UInt(Child(descriptor, "vertexFunction"))),
+                       ToStr(UInt(Child(descriptor, "fragmentFunction"))),
+                       VertexLayoutDescription(descriptor)};
+        index.nodeInfos.push_back(info);
         break;
       }
       case MetalChunk::MTLDevice_newComputePipelineStateWithFunction:
@@ -909,6 +1021,22 @@ struct NativeIndexBuilder
         computeEncoders[encoderId] = state;
         break;
       }
+      case MetalChunk::MTLBlitCommandEncoder_copyFromBuffer_toBuffer:
+        AddBlitCopy(chunk, "sourceBuffer", "destinationBuffer", "copyFromBuffer");
+        break;
+      case MetalChunk::MTLBlitCommandEncoder_copyFromBuffer_toTexture:
+      case MetalChunk::MTLBlitCommandEncoder_copyFromBuffer_toTexture_options:
+        AddBlitCopy(chunk, "sourceBuffer", "destinationTexture", "copyFromBuffer");
+        break;
+      case MetalChunk::MTLBlitCommandEncoder_copyFromTexture_toTexture:
+      case MetalChunk::MTLBlitCommandEncoder_copyFromTexture_toTexture_slice_level_origin:
+      case MetalChunk::MTLBlitCommandEncoder_copyFromTexture_toTexture_slice_level_count:
+        AddBlitCopy(chunk, "sourceTexture", "destinationTexture", "copyFromTexture");
+        break;
+      case MetalChunk::MTLBlitCommandEncoder_copyFromTexture_toBuffer:
+      case MetalChunk::MTLBlitCommandEncoder_copyFromTexture_toBuffer_options:
+        AddBlitCopy(chunk, "sourceTexture", "destinationBuffer", "copyFromTexture");
+        break;
       case MetalChunk::MTLRenderCommandEncoder_pushDebugGroup:
       {
         uint64_t encoderId = UInt(Child(chunk, "RenderCommandEncoder"));
@@ -967,6 +1095,98 @@ struct NativeIndexBuilder
         encoders[UInt(Child(chunk, "RenderCommandEncoder"))].depthStencil =
             UInt(Child(chunk, "depthStencilState"));
         break;
+      case MetalChunk::MTLRenderCommandEncoder_setViewport:
+      {
+        NativeEncoderState &state = encoders[UInt(Child(chunk, "RenderCommandEncoder"))];
+        const SDObject *source = Child(chunk, "viewport");
+        Viewport viewport;
+        viewport.x = (float)Double(Child(source, "originX"));
+        viewport.y = (float)Double(Child(source, "originY"));
+        viewport.width = (float)Double(Child(source, "width"));
+        viewport.height = (float)Double(Child(source, "height"));
+        viewport.minDepth = (float)Double(Child(source, "znear"));
+        viewport.maxDepth = (float)Double(Child(source, "zfar"));
+        state.viewports.clear();
+        state.viewports.push_back(viewport);
+        break;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setViewports:
+      {
+        NativeEncoderState &state = encoders[UInt(Child(chunk, "RenderCommandEncoder"))];
+        const SDObject *sources = Child(chunk, "viewports");
+        state.viewports.clear();
+        if(sources != NULL)
+        {
+          for(size_t i = 0; i < sources->NumChildren(); i++)
+          {
+            const SDObject *source = sources->GetChild(i);
+            Viewport viewport;
+            viewport.x = (float)Double(Child(source, "originX"));
+            viewport.y = (float)Double(Child(source, "originY"));
+            viewport.width = (float)Double(Child(source, "width"));
+            viewport.height = (float)Double(Child(source, "height"));
+            viewport.minDepth = (float)Double(Child(source, "znear"));
+            viewport.maxDepth = (float)Double(Child(source, "zfar"));
+            state.viewports.push_back(viewport);
+          }
+        }
+        break;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setScissorRect:
+      {
+        NativeEncoderState &state = encoders[UInt(Child(chunk, "RenderCommandEncoder"))];
+        const SDObject *source = Child(chunk, "rect");
+        Scissor scissor;
+        scissor.x = (uint32_t)UInt(Child(source, "x"));
+        scissor.y = (uint32_t)UInt(Child(source, "y"));
+        scissor.width = (uint32_t)UInt(Child(source, "width"));
+        scissor.height = (uint32_t)UInt(Child(source, "height"));
+        scissor.enabled = true;
+        state.scissors.clear();
+        state.scissors.push_back(scissor);
+        break;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setScissorRects:
+      {
+        NativeEncoderState &state = encoders[UInt(Child(chunk, "RenderCommandEncoder"))];
+        const SDObject *sources = Child(chunk, "rects");
+        state.scissors.clear();
+        if(sources != NULL)
+        {
+          for(size_t i = 0; i < sources->NumChildren(); i++)
+          {
+            const SDObject *source = sources->GetChild(i);
+            Scissor scissor;
+            scissor.x = (uint32_t)UInt(Child(source, "x"));
+            scissor.y = (uint32_t)UInt(Child(source, "y"));
+            scissor.width = (uint32_t)UInt(Child(source, "width"));
+            scissor.height = (uint32_t)UInt(Child(source, "height"));
+            scissor.enabled = true;
+            state.scissors.push_back(scissor);
+          }
+        }
+        break;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setFrontFacingWinding:
+        encoders[UInt(Child(chunk, "RenderCommandEncoder"))].frontFacingWinding =
+            EnumSuffix(Child(chunk, "winding"), "MTLWinding");
+        break;
+      case MetalChunk::MTLRenderCommandEncoder_setCullMode:
+        encoders[UInt(Child(chunk, "RenderCommandEncoder"))].cullMode =
+            EnumSuffix(Child(chunk, "cullMode"), "MTLCullMode");
+        break;
+      case MetalChunk::MTLRenderCommandEncoder_setTriangleFillMode:
+        encoders[UInt(Child(chunk, "RenderCommandEncoder"))].fillMode =
+            EnumSuffix(Child(chunk, "fillMode"), "MTLTriangleFillMode");
+        break;
+      case MetalChunk::MTLRenderCommandEncoder_setDepthBias:
+      {
+        NativeEncoderState &state = encoders[UInt(Child(chunk, "RenderCommandEncoder"))];
+        state.depthBias = Double(Child(chunk, "depthBias"));
+        state.slopeScaledDepthBias = Double(Child(chunk, "slopeScale"));
+        state.depthBiasClamp = Double(Child(chunk, "clamp"));
+        break;
+      }
       case MetalChunk::MTLRenderCommandEncoder_drawPrimitives:
       case MetalChunk::MTLRenderCommandEncoder_drawPrimitives_instanced:
       case MetalChunk::MTLRenderCommandEncoder_drawPrimitives_instanced_base:

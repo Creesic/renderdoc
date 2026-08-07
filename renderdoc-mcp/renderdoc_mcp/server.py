@@ -124,6 +124,33 @@ _READ_USAGE_NAMES = {
 }
 
 
+def _synthetic_event_details(sess: Any, event_id: int) -> dict[str, Any] | None:
+    """Describe an action that intentionally has no structured-file chunk.
+
+    Imported and normalized Metal actions use APIEvent.NoChunk. Treating that sentinel as an
+    array index produced a misleading out-of-range error even though the action itself was valid.
+    """
+    indexed = sess.events_by_id.get(int(event_id))
+    if indexed is None:
+        return None
+    return {
+        "event_id": int(event_id),
+        "chunk_index": None,
+        "structured_chunk_available": False,
+        "synthetic_action": True,
+        "name": indexed.name,
+        "flags": indexed.flags_names,
+        "marker_stack": indexed.marker_stack,
+        "num_vertices": indexed.num_vertices,
+        "num_instances": indexed.num_instances,
+        "num_indices": indexed.num_indices,
+        "reason": (
+            "This Metal inspection action was normalized from captured commands and has no "
+            "one-to-one structured-file chunk."
+        ),
+    }
+
+
 def _event_summary(sess: Any, event_id: int) -> dict[str, Any]:
     ie = sess.events_by_id.get(int(event_id))
     if ie is None:
@@ -139,6 +166,25 @@ def _event_summary(sess: Any, event_id: int) -> dict[str, Any]:
             "num_indices": ie.num_indices,
         },
     }
+
+
+def _resource_relationships(controller: Any, rid: Any) -> dict[str, list[dict[str, str]]]:
+    relationships: dict[str, list[dict[str, str]]] = {"parents": [], "derived": []}
+    try:
+        resource = next(r for r in controller.GetResources() if r.resourceId == rid)
+    except Exception:
+        return relationships
+    for key, values in (
+        ("parents", getattr(resource, "parentResources", None) or []),
+        ("derived", getattr(resource, "derivedResources", None) or []),
+    ):
+        for related in values:
+            row = {"resource_id": rdutil.rid_str(related)}
+            name = rdutil.resource_name_for(controller, related)
+            if name:
+                row["resource_name"] = name
+            relationships[key].append(row)
+    return relationships
 
 
 def _marker_path_for_event(ie: Any, include_event_name: bool = True) -> str:
@@ -536,6 +582,15 @@ def build_mcp() -> FastMCP:
                     return R.err(
                         "no_chunk_for_event", "No structured-file chunk found for event {}".format(event_id)
                     )
+                no_chunk = int(getattr(rd.APIEvent, "NoChunk", 0xFFFFFFFF))
+                if chunk_index == no_chunk:
+                    synthetic = _synthetic_event_details(sess, int(event_id))
+                    if synthetic is None:
+                        return R.err(
+                            "no_chunk_for_event",
+                            "No structured-file chunk found for event {}".format(event_id),
+                        )
+                    return R.ok(synthetic)
                 chunks = sess.structured_file.chunks
                 if chunk_index < 0 or chunk_index >= len(chunks):
                     return R.err(
@@ -723,13 +778,17 @@ def build_mcp() -> FastMCP:
                 for res in sess.controller.GetResources():
                     if rt is not None and res.type != rt:
                         continue
-                    out.append(
-                        {
-                            "resource_id": rdutil.rid_str(res.resourceId),
-                            "name": res.name,
-                            "type": rdutil.enum_name(res.type),
-                        }
-                    )
+                    row: dict[str, Any] = {
+                        "resource_id": rdutil.rid_str(res.resourceId),
+                        "name": res.name,
+                        "type": rdutil.enum_name(res.type),
+                    }
+                    relationships = _resource_relationships(sess.controller, res.resourceId)
+                    if relationships["parents"]:
+                        row["parent_resources"] = relationships["parents"]
+                    if relationships["derived"]:
+                        row["derived_resources"] = relationships["derived"]
+                    out.append(row)
                     if len(out) >= min(limit, 5000):
                         break
                 return R.ok({"resources": out, "truncated": len(out) >= min(limit, 5000)})
@@ -762,6 +821,11 @@ def build_mcp() -> FastMCP:
                 rn = rdutil.resource_name_for(sess.controller, rid)
                 if rn:
                     payload["resource_name"] = rn
+                relationships = _resource_relationships(sess.controller, rid)
+                if relationships["parents"]:
+                    payload["parent_resources"] = relationships["parents"]
+                if relationships["derived"]:
+                    payload["derived_resources"] = relationships["derived"]
                 return R.ok(payload)
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)
@@ -791,6 +855,9 @@ def build_mcp() -> FastMCP:
                 chunk_index = sess.chunk_index_by_event.get(int(eid))
                 if chunk_index is None:
                     return None
+                rd = rdutil.get_renderdoc()
+                if chunk_index == int(getattr(rd.APIEvent, "NoChunk", 0xFFFFFFFF)):
+                    return _synthetic_event_details(sess, eid)
                 chunks = sess.structured_file.chunks
                 if chunk_index < 0 or chunk_index >= len(chunks):
                     return None
@@ -804,6 +871,22 @@ def build_mcp() -> FastMCP:
                 row = _event_summary(sess, eid)
                 row["resource_usage"] = usage["usage"]
                 row["resource_id"] = rid_s
+                action = find_action(sess.controller, eid)
+                if action is not None:
+                    for field, attribute in (
+                        ("copy_source", "copySource"),
+                        ("copy_destination", "copyDestination"),
+                    ):
+                        related = getattr(action, attribute, None)
+                        if rdutil.rid_str(related) in ("", "Null"):
+                            continue
+                        related_row: dict[str, str] = {
+                            "resource_id": rdutil.rid_str(related)
+                        }
+                        name = rdutil.resource_name_for(sess.controller, related)
+                        if name:
+                            related_row["resource_name"] = name
+                        row[field] = related_row
                 try:
                     sessions.set_frame_event(sess, eid)
                     if include_bound_resources:
@@ -836,18 +919,40 @@ def build_mcp() -> FastMCP:
                     return R.err("bad_resource_id", str(ex))
 
                 usages = _usage_rows(sess.controller, rid)
+                relationships = _resource_relationships(sess.controller, rid)
                 target_eid = int(event_id) if event_id is not None else (
                     max((u["event_id"] for u in usages), default=0) + 1
                 )
                 direction_norm = direction.strip().lower()
                 max_n = max(1, min(int(max_steps), 32))
+                resolved_parent: dict[str, str] | None = None
 
                 if direction_norm in ("backward", "back", "producer", "producers"):
                     candidates = [
                         u for u in usages if u["event_id"] <= target_eid and _is_write_usage(u["usage"])
                     ]
+                    if not candidates:
+                        for parent in relationships["parents"]:
+                            try:
+                                parent_rid = rdutil.parse_resource_id(parent["resource_id"])
+                            except ValueError:
+                                continue
+                            parent_usages = _usage_rows(sess.controller, parent_rid)
+                            parent_candidates = [
+                                u
+                                for u in parent_usages
+                                if u["event_id"] <= target_eid and _is_write_usage(u["usage"])
+                            ]
+                            if parent_candidates:
+                                candidates = parent_candidates
+                                usages = parent_usages
+                                resolved_parent = parent
+                                break
                     selected = list(reversed(candidates))[:max_n]
-                    rows = [_producer_row(sess, resource_id, u) for u in selected]
+                    producer_resource = (
+                        resolved_parent["resource_id"] if resolved_parent is not None else resource_id
+                    )
+                    rows = [_producer_row(sess, producer_resource, u) for u in selected]
                     mode = "backward"
                 elif direction_norm in ("forward", "fwd", "consumer", "consumers"):
                     candidates = [
@@ -881,6 +986,12 @@ def build_mcp() -> FastMCP:
                 rn = rdutil.resource_name_for(sess.controller, rid)
                 if rn:
                     payload["resource_name"] = rn
+                if relationships["parents"]:
+                    payload["parent_resources"] = relationships["parents"]
+                if relationships["derived"]:
+                    payload["derived_resources"] = relationships["derived"]
+                if direction_norm in ("backward", "back", "producer", "producers") and resolved_parent:
+                    payload["resolved_via_parent_resource"] = resolved_parent
                 return R.ok(payload)
 
             return await asyncio.get_running_loop().run_in_executor(_replay_executor, _go)

@@ -237,6 +237,12 @@ if(APPLE)
         ${CMAKE_BINARY_DIR}/qrenderdoc/qrenderdoc_cmake.pri
         "OSX_ICONFILE=${CMAKE_CURRENT_BINARY_DIR}/RenderDoc.icns\n"
         "QMAKE_MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}\n")
+    if(RENDERDOC_EMBED_MCP_PYTHON)
+        file(APPEND
+            ${CMAKE_BINARY_DIR}/qrenderdoc/qrenderdoc_cmake.pri
+            "DEFINES+=RENDERDOC_EMBED_MCP_PYTHON\n"
+            "QMAKE_LFLAGS+=-Wl,-rpath,@executable_path/../Resources/renderdoc-mcp/python/lib\n")
+    endif()
 endif()
 
 # Ignore warnings - qmake has no way to do this per-file, so we must do it globally
@@ -431,8 +437,6 @@ if(APPLE AND CMAKE_GENERATOR STREQUAL "Xcode")
     source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${THIRDPARTY_FILES})
 endif()
 
-option(RENDERDOC_EMBED_MCP_PYTHON "Embed standalone CPython + MCP deps next to qrenderdoc (HTTPS at build-time)" ON)
-
 # Obsolete: prefer RENDERDOC_EMBED_MCP_PYTHON. Kept so old cache entries do not error.
 option(RENDERDOC_BUNDLE_MCP_PYTHON_SITE "Legacy no-op; MCP embedding is handled by RENDERDOC_EMBED_MCP_PYTHON" OFF)
 if(RENDERDOC_BUNDLE_MCP_PYTHON_SITE)
@@ -440,9 +444,16 @@ if(RENDERDOC_BUNDLE_MCP_PYTHON_SITE)
 endif()
 
 set(RENDERDOC_MCP_SRC "${CMAKE_SOURCE_DIR}/renderdoc-mcp")
+file(GLOB_RECURSE RENDERDOC_MCP_PYTHON_SOURCES CONFIGURE_DEPENDS
+     "${RENDERDOC_MCP_SRC}/renderdoc_mcp/*.py")
+set(RENDERDOC_MCP_BUNDLE_COMMAND_PYTHON "${PYTHON_EXECUTABLE}")
+if(RENDERDOC_MCP_BUNDLE_PYTHON)
+    set(RENDERDOC_MCP_BUNDLE_COMMAND_PYTHON "${RENDERDOC_MCP_BUNDLE_PYTHON}")
+endif()
 
 if(APPLE AND ENABLE_QRENDERDOC)
-    set(RENDERDOC_MCP_RUNTIME_DIR "${CMAKE_BINARY_DIR}/bin/qrenderdoc.app/Contents/MacOS")
+    set(RENDERDOC_MCP_RUNTIME_DIR
+        "${CMAKE_BINARY_DIR}/bin/qrenderdoc.app/Contents/Resources/renderdoc-mcp")
 else()
     set(RENDERDOC_MCP_RUNTIME_DIR "${CMAKE_BINARY_DIR}/bin")
 endif()
@@ -460,25 +471,29 @@ if(EXISTS "${RENDERDOC_MCP_SRC}/renderdoc_mcp/__init__.py")
         add_custom_command(
             OUTPUT "${RENDERDOC_MCP_EMBED_STAMP}"
             COMMAND ${CMAKE_COMMAND} -E env PYTHONUNBUFFERED=1
-                    "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/util/bundle_renderdoc_mcp.py"
-                    --repo-root "${CMAKE_SOURCE_DIR}" --runtime-dir "${RENDERDOC_MCP_RUNTIME_DIR}" --quiet
+                    "${RENDERDOC_MCP_BUNDLE_COMMAND_PYTHON}" "${CMAKE_SOURCE_DIR}/util/bundle_renderdoc_mcp.py"
+                    --repo-root "${CMAKE_SOURCE_DIR}" --runtime-dir "${RENDERDOC_MCP_RUNTIME_DIR}"
+                    --triplet "${RENDERDOC_MCP_BUNDLE_TRIPLET}" --quiet
             COMMAND ${CMAKE_COMMAND} -E touch "${RENDERDOC_MCP_EMBED_STAMP}"
             DEPENDS "${CMAKE_SOURCE_DIR}/util/bundle_renderdoc_mcp.py"
                     "${CMAKE_SOURCE_DIR}/util/renderdoc_mcp_bundle.json"
                     "${RENDERDOC_MCP_SRC}/pyproject.toml"
+                    ${RENDERDOC_MCP_PYTHON_SOURCES}
             COMMENT "Embedding standalone CPython + MCP under ${RENDERDOC_MCP_RUNTIME_DIR}"
             VERBATIM)
         add_custom_target(embed-renderdoc-mcp DEPENDS "${RENDERDOC_MCP_EMBED_STAMP}")
         add_dependencies(build-qrenderdoc embed-renderdoc-mcp)
 
         if(APPLE AND ENABLE_QRENDERDOC)
-            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/python/" DESTINATION bin/qrenderdoc.app/Contents/MacOS/python/)
-            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/mcp/" DESTINATION bin/qrenderdoc.app/Contents/MacOS/mcp/)
-            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/mcp_site/" DESTINATION bin/qrenderdoc.app/Contents/MacOS/mcp_site/)
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/python/" DESTINATION bin/qrenderdoc.app/Contents/Resources/renderdoc-mcp/python/)
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/mcp/" DESTINATION bin/qrenderdoc.app/Contents/Resources/renderdoc-mcp/mcp/)
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/mcp_site/" DESTINATION bin/qrenderdoc.app/Contents/Resources/renderdoc-mcp/mcp_site/)
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/pymodules/" DESTINATION bin/qrenderdoc.app/Contents/Resources/renderdoc-mcp/pymodules/)
         else()
             install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/python/" DESTINATION bin/python/)
             install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/mcp/" DESTINATION bin/mcp/)
             install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/mcp_site/" DESTINATION bin/mcp_site/)
+            install(DIRECTORY "${RENDERDOC_MCP_RUNTIME_DIR}/pymodules/" DESTINATION bin/pymodules/)
         endif()
     endif()
 else()
@@ -510,4 +525,7 @@ endif() # if(ENABLE_QRENDERDOC)
 # Build python modules - primarily used for constructing documentation
 if(ENABLE_PYRENDERDOC AND UNIX)
     add_subdirectory(Code/pyrenderdoc)
+    if(RENDERDOC_EMBED_MCP_PYTHON)
+        add_dependencies(build-qrenderdoc _renderdoc)
+    endif()
 endif()

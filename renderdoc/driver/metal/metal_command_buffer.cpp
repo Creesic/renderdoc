@@ -483,7 +483,14 @@ void WrappedMTLCommandBuffer::commit()
   // During capture keep the real resource alive
   // It will be released when it is no longer required to be tracked
   if(isCapture)
+  {
     mtlCommandBuffer->retain();
+
+    // Shared buffers are live CPU memory. Snapshot their submitted contents before the real
+    // command buffer is committed: once commit() returns to Metal, GPU writes and application
+    // reuse on other threads can race the capture and produce a torn buffer snapshot.
+    m_Device->CaptureCmdBufPrepareSharedBuffers(GetRecord(this));
+  }
   SERIALISE_TIME_CALL(mtlCommandBuffer->commit());
   if(isCapture)
   {
