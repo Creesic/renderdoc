@@ -204,7 +204,8 @@ struct VertexBuffer
   bool operator==(const VertexBuffer &o) const
   {
     return slot == o.slot && resourceId == o.resourceId && byteOffset == o.byteOffset &&
-           byteStride == o.byteStride && byteSize == o.byteSize;
+           byteOffsetKnown == o.byteOffsetKnown && byteStride == o.byteStride &&
+           byteSize == o.byteSize && lastSetCall == o.lastSetCall;
   }
   bool operator<(const VertexBuffer &o) const
   {
@@ -214,9 +215,13 @@ struct VertexBuffer
       return resourceId < o.resourceId;
     if(byteOffset != o.byteOffset)
       return byteOffset < o.byteOffset;
+    if(byteOffsetKnown != o.byteOffsetKnown)
+      return byteOffsetKnown < o.byteOffsetKnown;
     if(byteStride != o.byteStride)
       return byteStride < o.byteStride;
-    return byteSize < o.byteSize;
+    if(byteSize != o.byteSize)
+      return byteSize < o.byteSize;
+    return lastSetCall < o.lastSetCall;
   }
 
   DOCUMENT(R"(The vertex buffer slot.
@@ -234,6 +239,13 @@ struct VertexBuffer
 :type: int
 )");
   uint64_t byteOffset = 0;
+  DOCUMENT(R"(``True`` if :data:`byteOffset` was recovered from the trace. Apple GPU Trace may
+omit ranged-binding array contents; in that case this is ``False`` and :data:`lastSetCall` records
+the unresolved API call.
+
+:type: bool
+)");
+  bool byteOffsetKnown = false;
   DOCUMENT(R"(The byte stride between elements.
 
 :type: int
@@ -244,6 +256,11 @@ struct VertexBuffer
 :type: int
 )");
   uint64_t byteSize = 0;
+  DOCUMENT(R"(The last Metal API call that established this binding or changed its offset.
+
+:type: str
+)");
+  rdcstr lastSetCall;
 };
 
 DOCUMENT("Describes the current Metal index-buffer binding.");
@@ -274,6 +291,11 @@ struct IndexBuffer
 :type: int
 )");
   uint64_t byteSize = 0;
+  DOCUMENT(R"(The indexed draw call that established this binding and byte offset.
+
+:type: str
+)");
+  rdcstr lastSetCall;
 };
 
 DOCUMENT("Describes Metal vertex input and primitive assembly state.");
@@ -523,7 +545,8 @@ struct Attachment
     return resourceId == o.resourceId && resolveResourceId == o.resolveResourceId &&
            mipLevel == o.mipLevel && slice == o.slice && depthPlane == o.depthPlane &&
            loadAction == o.loadAction && storeAction == o.storeAction && clearColor == o.clearColor &&
-           clearDepth == o.clearDepth && clearStencil == o.clearStencil;
+           clearDepth == o.clearDepth && clearStencil == o.clearStencil &&
+           reconstructed == o.reconstructed;
   }
   bool operator<(const Attachment &o) const
   {
@@ -545,7 +568,9 @@ struct Attachment
       return clearColor < o.clearColor;
     if(clearDepth != o.clearDepth)
       return clearDepth < o.clearDepth;
-    return clearStencil < o.clearStencil;
+    if(clearStencil != o.clearStencil)
+      return clearStencil < o.clearStencil;
+    return reconstructed < o.reconstructed;
   }
 
   DOCUMENT(R"(The attached texture.
@@ -598,6 +623,12 @@ struct Attachment
 :type: int
 )");
   uint32_t clearStencil = 0;
+  DOCUMENT(R"(``True`` if this pass description was reconstructed from RenderDoc's native Metal
+capture stream. ``False`` indicates attachment operations reported directly by Apple GPU Trace.
+
+:type: bool
+)");
+  bool reconstructed = false;
 };
 
 DOCUMENT("Describes Metal viewport and rasterization state.");

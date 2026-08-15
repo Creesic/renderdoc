@@ -162,6 +162,11 @@ Write-Host ''
 New-Item -ItemType Directory -Force -Path $mcpDst | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'renderdoc-mcp\renderdoc_mcp') -Destination (Join-Path $mcpDst 'renderdoc_mcp') -Recurse -Force
+$copiedMcp = Join-Path $mcpDst 'renderdoc_mcp'
+Get-ChildItem -LiteralPath $copiedMcp -Directory -Recurse -Filter '__pycache__' -ErrorAction SilentlyContinue |
+  Remove-Item -Recurse -Force
+Get-ChildItem -LiteralPath $copiedMcp -File -Recurse -Include '*.pyc', '*.pyo' -ErrorAction SilentlyContinue |
+  Remove-Item -Force
 
 $mcpProj = Join-Path $RepoRoot 'renderdoc-mcp'
 & $pyExe -m pip install --disable-pip-version-check --no-input --target $siteDst $mcpProj | Out-Host

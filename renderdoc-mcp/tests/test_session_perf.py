@@ -63,3 +63,16 @@ def test_find_action_walks_tree_once_per_controller():
     assert find_action(ctrl, 4).eventId == 4
     assert find_action(ctrl, 999) is None
     assert ctrl.root_calls == 1
+
+
+def test_action_draw_counts_splits_renderdocs_shared_element_count():
+    from renderdoc_mcp.session import action_draw_counts
+
+    rd = _RdFake()
+    nonindexed = type("Action", (), {"flags": _CountingFlags.Drawcall, "numIndices": 88})()
+    indexed = type(
+        "Action", (), {"flags": _CountingFlags.Drawcall | _CountingFlags.Indexed, "numIndices": 42}
+    )()
+
+    assert action_draw_counts(rd, nonindexed) == (88, 0)
+    assert action_draw_counts(rd, indexed) == (0, 42)

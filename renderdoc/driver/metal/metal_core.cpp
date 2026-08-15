@@ -263,8 +263,15 @@ bool WrappedMTLDevice::ProcessChunk(ReadSerialiser &ser, MetalChunk chunk)
     }
     case MetalChunk::MTLRenderCommandEncoder_setVertexBuffer:
       return m_DummyReplayRenderCommandEncoder->Serialise_setVertexBuffer(ser, NULL, 0, 0);
-    case MetalChunk::MTLRenderCommandEncoder_setVertexBufferOffset: METAL_CHUNK_NOT_HANDLED();
-    case MetalChunk::MTLRenderCommandEncoder_setVertexBuffers: METAL_CHUNK_NOT_HANDLED();
+    case MetalChunk::MTLRenderCommandEncoder_setVertexBufferOffset:
+      return m_DummyReplayRenderCommandEncoder->Serialise_setVertexBufferOffset(ser, 0, 0);
+    case MetalChunk::MTLRenderCommandEncoder_setVertexBuffers:
+    {
+      rdcarray<WrappedMTLBuffer *> buffers;
+      rdcarray<NS::UInteger> offsets;
+      return m_DummyReplayRenderCommandEncoder->Serialise_setVertexBuffers(ser, buffers, offsets,
+                                                                            0);
+    }
     case MetalChunk::MTLRenderCommandEncoder_setVertexTexture: METAL_CHUNK_NOT_HANDLED();
     case MetalChunk::MTLRenderCommandEncoder_setVertexTextures: METAL_CHUNK_NOT_HANDLED();
     case MetalChunk::MTLRenderCommandEncoder_setVertexSamplerState: METAL_CHUNK_NOT_HANDLED();
@@ -346,7 +353,9 @@ bool WrappedMTLDevice::ProcessChunk(ReadSerialiser &ser, MetalChunk chunk)
       METAL_CHUNK_NOT_HANDLED();
     case MetalChunk::MTLRenderCommandEncoder_setFragmentAccelerationStructure:
       METAL_CHUNK_NOT_HANDLED();
-    case MetalChunk::MTLRenderCommandEncoder_setBlendColor: METAL_CHUNK_NOT_HANDLED();
+    case MetalChunk::MTLRenderCommandEncoder_setBlendColor:
+      return m_DummyReplayRenderCommandEncoder->Serialise_setBlendColor(ser, 0.0f, 0.0f, 0.0f,
+                                                                         0.0f);
     case MetalChunk::MTLRenderCommandEncoder_setDepthStencilState:
       return m_DummyReplayRenderCommandEncoder->Serialise_setDepthStencilState(ser, NULL);
     case MetalChunk::MTLRenderCommandEncoder_setStencilReferenceValue:
@@ -354,9 +363,15 @@ bool WrappedMTLDevice::ProcessChunk(ReadSerialiser &ser, MetalChunk chunk)
     case MetalChunk::MTLRenderCommandEncoder_setStencilFrontReferenceValue:
       METAL_CHUNK_NOT_HANDLED();
     case MetalChunk::MTLRenderCommandEncoder_setVisibilityResultMode: METAL_CHUNK_NOT_HANDLED();
-    case MetalChunk::MTLRenderCommandEncoder_setColorStoreAction: METAL_CHUNK_NOT_HANDLED();
-    case MetalChunk::MTLRenderCommandEncoder_setDepthStoreAction: METAL_CHUNK_NOT_HANDLED();
-    case MetalChunk::MTLRenderCommandEncoder_setStencilStoreAction: METAL_CHUNK_NOT_HANDLED();
+    case MetalChunk::MTLRenderCommandEncoder_setColorStoreAction:
+      return m_DummyReplayRenderCommandEncoder->Serialise_setColorStoreAction(
+          ser, MTL::StoreActionUnknown, 0);
+    case MetalChunk::MTLRenderCommandEncoder_setDepthStoreAction:
+      return m_DummyReplayRenderCommandEncoder->Serialise_setDepthStoreAction(
+          ser, MTL::StoreActionUnknown);
+    case MetalChunk::MTLRenderCommandEncoder_setStencilStoreAction:
+      return m_DummyReplayRenderCommandEncoder->Serialise_setStencilStoreAction(
+          ser, MTL::StoreActionUnknown);
     case MetalChunk::MTLRenderCommandEncoder_setColorStoreActionOptions: METAL_CHUNK_NOT_HANDLED();
     case MetalChunk::MTLRenderCommandEncoder_setDepthStoreActionOptions: METAL_CHUNK_NOT_HANDLED();
     case MetalChunk::MTLRenderCommandEncoder_setStencilStoreActionOptions:

@@ -76,6 +76,18 @@ def expand_action_flags(rd: Any, flags: int) -> list[str]:
     return list(cached)
 
 
+def action_draw_counts(rd: Any, act: Any) -> tuple[int, int]:
+    """Return (vertices, indices) across RenderDoc Python binding generations."""
+    flags = int(act.flags)
+    element_count = int(getattr(act, "numIndices", 0) or 0)
+    indexed_flag = int(getattr(rd.ActionFlags, "Indexed", 0) or 0)
+    explicit_vertices = int(getattr(act, "numVertices", 0) or 0)
+    return (
+        explicit_vertices or (0 if flags & indexed_flag else element_count),
+        element_count if flags & indexed_flag else 0,
+    )
+
+
 @dataclass
 class IndexedEvent:
     event_id: int
@@ -238,15 +250,20 @@ class CaptureSessionManager:
 
         def visit(act: Any) -> None:
             eid = int(act.eventId)
+            flags = int(act.flags)
+            num_vertices, num_indices = action_draw_counts(rd, act)
             idx = IndexedEvent(
                 event_id=eid,
                 name=act.GetName(structured),
-                flags=int(act.flags),
-                flags_names=expand_action_flags(rd, int(act.flags)),
+                flags=flags,
+                flags_names=expand_action_flags(rd, flags),
                 marker_stack=marker_stack(rd, act, structured),
-                num_vertices=int(getattr(act, "numVertices", 0) or 0),
+                # RenderDoc's core ActionDescription stores the element count in numIndices for
+                # both indexed and non-indexed draws. Some bindings expose a newer numVertices;
+                # prefer it when present, otherwise split the shared field using Indexed.
+                num_vertices=num_vertices,
                 num_instances=int(getattr(act, "numInstances", 0) or 0),
-                num_indices=int(getattr(act, "numIndices", 0) or 0),
+                num_indices=num_indices,
             )
             events_by_id[eid] = idx
             ordered.append(eid)

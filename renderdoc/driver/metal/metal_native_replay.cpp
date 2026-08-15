@@ -23,6 +23,7 @@
  ******************************************************************************/
 
 #include "metal_native_replay.h"
+#include <cstring>
 #include <map>
 #include <set>
 #include "common/formatting.h"
@@ -106,6 +107,56 @@ rdcstr VertexLayoutDescription(const SDObject *descriptor)
   return description;
 }
 
+rdcstr ColorWriteMaskDescription(uint64_t mask)
+{
+  rdcstr description;
+  if(mask & (uint64_t)MTL::ColorWriteMaskRed)
+    description += "R";
+  if(mask & (uint64_t)MTL::ColorWriteMaskGreen)
+    description += "G";
+  if(mask & (uint64_t)MTL::ColorWriteMaskBlue)
+    description += "B";
+  if(mask & (uint64_t)MTL::ColorWriteMaskAlpha)
+    description += "A";
+  return description.empty() ? rdcstr("None") : description;
+}
+
+rdcstr ColorAttachmentsDescription(const SDObject *descriptor)
+{
+  const SDObject *attachments = Child(descriptor, "colorAttachments");
+  if(attachments == NULL)
+    return {};
+
+  rdcstr description;
+  for(size_t i = 0; i < attachments->NumChildren(); i++)
+  {
+    const SDObject *attachment = attachments->GetChild(i);
+    const rdcstr format = EnumSuffix(Child(attachment, "pixelFormat"), "MTLPixelFormat");
+    if(format.empty() || format == "Invalid")
+      continue;
+    description += StringFormat::Fmt(
+        "  color%zu:\n"
+        "    format:       %s\n"
+        "    blendEnabled: %s\n"
+        "    srcRGB:       %s\n"
+        "    dstRGB:       %s\n"
+        "    opRGB:        %s\n"
+        "    srcAlpha:     %s\n"
+        "    dstAlpha:     %s\n"
+        "    opAlpha:      %s\n"
+        "    writeMask:    %s\n",
+        i, format.c_str(), UInt(Child(attachment, "blendingEnabled")) ? "yes" : "no",
+        EnumSuffix(Child(attachment, "sourceRGBBlendFactor"), "MTLBlendFactor").c_str(),
+        EnumSuffix(Child(attachment, "destinationRGBBlendFactor"), "MTLBlendFactor").c_str(),
+        EnumSuffix(Child(attachment, "rgbBlendOperation"), "MTLBlendOperation").c_str(),
+        EnumSuffix(Child(attachment, "sourceAlphaBlendFactor"), "MTLBlendFactor").c_str(),
+        EnumSuffix(Child(attachment, "destinationAlphaBlendFactor"), "MTLBlendFactor").c_str(),
+        EnumSuffix(Child(attachment, "alphaBlendOperation"), "MTLBlendOperation").c_str(),
+        ColorWriteMaskDescription(UInt(Child(attachment, "writeMask"))).c_str());
+  }
+  return description;
+}
+
 bytebuf Buffer(const SDFile &file, const SDObject *object)
 {
   if(object == NULL || !object->IsBuffer() || object->data.basic.u >= file.buffers.size())
@@ -120,6 +171,18 @@ rdcstr ObjectName(const char *type, uint64_t id)
 
 struct NativeEncoderState
 {
+  struct Attachment
+  {
+    uint64_t texture = 0;
+    uint64_t resolveTexture = 0;
+    uint64_t level = 0;
+    uint64_t slice = 0;
+    uint64_t depthPlane = 0;
+    rdcstr loadAction;
+    rdcstr storeAction;
+    rdcstr clearValue;
+  };
+
   rdcstr path;
   uint64_t commandBuffer = 0;
   uint32_t drawCount = 0;
@@ -127,6 +190,7 @@ struct NativeEncoderState
   uint64_t pipeline = 0;
   uint64_t depthStencil = 0;
   std::map<uint32_t, std::pair<uint64_t, uint64_t>> vertexBuffers;
+  std::map<uint32_t, rdcstr> vertexBufferSourceCalls;
   std::map<uint32_t, std::pair<uint64_t, uint64_t>> fragmentBuffers;
   std::map<uint32_t, uint64_t> fragmentTextures;
   std::map<uint32_t, uint64_t> fragmentSamplers;
@@ -139,9 +203,11 @@ struct NativeEncoderState
   double depthBias = 0.0;
   double slopeScaledDepthBias = 0.0;
   double depthBiasClamp = 0.0;
+  rdcfixedarray<double, 4> blendFactor = {};
   rdcarray<rdcstr> debugGroups;
-  rdcfixedarray<uint64_t, 8> colorAttachments = {};
-  uint64_t depthAttachment = 0;
+  rdcfixedarray<Attachment, 8> colorAttachments = {};
+  Attachment depthAttachment;
+  Attachment stencilAttachment;
 
   rdcstr CurrentPath() const { return debugGroups.empty() ? path : debugGroups.back(); }
 };
@@ -229,6 +295,29 @@ struct NativeIndexBuilder
     return index.nodes.back();
   }
 
+  void SetNodeInfoProperty(const rdcstr &path, const rdcstr &key, const rdcstr &value)
+  {
+    MetalTrace::NodeInfo *info = NULL;
+    for(MetalTrace::NodeInfo &candidate : index.nodeInfos)
+      if(candidate.path == path)
+        info = &candidate;
+    if(info == NULL)
+    {
+      index.nodeInfos.push_back({path});
+      info = &index.nodeInfos.back();
+    }
+    for(size_t i = 0; i < info->keys.size() && i < info->values.size(); i++)
+    {
+      if(info->keys[i] == key)
+      {
+        info->values[i] = value;
+        return;
+      }
+    }
+    info->keys.push_back(key);
+    info->values.push_back(value);
+  }
+
   rdcstr ResourceObjectName(uint64_t stableId) const
   {
     auto it = resourceNodes.find(stableId);
@@ -292,6 +381,31 @@ struct NativeIndexBuilder
       binding.canFetch = index.nodes[known->second].canFetch;
     }
     index.nodes.push_back(binding);
+  }
+
+  void AddAttachmentBinding(const rdcstr &path, const rdcstr &name,
+                            const NativeEncoderState::Attachment &attachment,
+                            const char *clearProperty)
+  {
+    if(attachment.texture == 0)
+      return;
+    AddBinding(path, name, attachment.texture);
+    MetalTrace::NodeInfo info;
+    info.path = path;
+    info.keys = {"loadAction", "storeAction", "level", "slice", "depthPlane"};
+    info.values = {attachment.loadAction, attachment.storeAction, ToStr(attachment.level),
+                   ToStr(attachment.slice), ToStr(attachment.depthPlane)};
+    if(attachment.resolveTexture != 0)
+    {
+      info.keys.push_back("resolveTexture");
+      info.values.push_back("@" + ResourceObjectName(attachment.resolveTexture));
+    }
+    if(clearProperty != NULL && !attachment.clearValue.empty())
+    {
+      info.keys.push_back(clearProperty);
+      info.values.push_back(attachment.clearValue);
+    }
+    index.nodeInfos.push_back(std::move(info));
   }
 
   void AddBlitCopy(const SDChunk *chunk, const char *sourceName, const char *destinationName,
@@ -562,11 +676,36 @@ struct NativeIndexBuilder
     Property(indexed ? "indexCount" : "vertexCount", ToStr(count));
     Property("instanceCount", ToStr(UInt(Child(chunk, "instanceCount"))));
     Property("baseInstance", ToStr(UInt(Child(chunk, "baseInstance"))));
+    const rdcstr drawAPICall = indexed
+                                   ? StringFormat::Fmt(
+                                         "[MTLRenderCommandEncoder drawIndexedPrimitives:%s "
+                                         "indexCount:%llu indexType:%s indexBuffer:@%s "
+                                         "indexBufferOffset:%llu]",
+                                         EnumSuffix(Child(chunk, "primitiveType"),
+                                                    "MTLPrimitiveType")
+                                             .c_str(),
+                                         (unsigned long long)count,
+                                         EnumSuffix(Child(chunk, "indexType"), "MTLIndexType")
+                                             .c_str(),
+                                         ResourceObjectName(UInt(Child(chunk, "indexBuffer")))
+                                             .c_str(),
+                                         (unsigned long long)UInt(Child(chunk,
+                                                                         "indexBufferOffset")))
+                                   : StringFormat::Fmt(
+                                         "[MTLRenderCommandEncoder drawPrimitives:%s "
+                                         "vertexStart:%llu vertexCount:%llu]",
+                                         EnumSuffix(Child(chunk, "primitiveType"),
+                                                    "MTLPrimitiveType")
+                                             .c_str(),
+                                         (unsigned long long)UInt(Child(chunk, "vertexStart")),
+                                         (unsigned long long)count);
+    Property("drawAPICall", drawAPICall);
     if(indexed)
     {
       Property("indexType", EnumSuffix(Child(chunk, "indexType"), "MTLIndexType"));
       Property("indexBufferOffset", ToStr(UInt(Child(chunk, "indexBufferOffset"))));
       Property("baseVertex", ToStr((int64_t)UInt(Child(chunk, "baseVertex"))));
+      Property("indexBufferSourceCall", drawAPICall);
       AddBinding(path + "/indexBuffer", "indexBuffer", UInt(Child(chunk, "indexBuffer")));
     }
     else
@@ -577,6 +716,14 @@ struct NativeIndexBuilder
     {
       Property(StringFormat::Fmt("vertexBufferOffset[%u]", vertex.first).c_str(),
                ToStr(vertex.second.second));
+      auto sourceCall = encoder.vertexBufferSourceCalls.find(vertex.first);
+      if(sourceCall != encoder.vertexBufferSourceCalls.end())
+        Property(StringFormat::Fmt("vertexBufferSourceCall[%u]", vertex.first).c_str(),
+                 sourceCall->second);
+      auto resourceNode = resourceNodes.find(vertex.second.first);
+      if(resourceNode != resourceNodes.end())
+        Property(StringFormat::Fmt("vertexBufferSize[%u]", vertex.first).c_str(),
+                 ToStr(index.nodes[resourceNode->second].byteSize));
       AddBinding(path + StringFormat::Fmt("/vertex/buf[%u]", vertex.first),
                  StringFormat::Fmt("buf[%u]", vertex.first), vertex.second.first);
     }
@@ -618,12 +765,17 @@ struct NativeIndexBuilder
     Property("depthBias", ToStr(encoder.depthBias));
     Property("slopeScaledDepthBias", ToStr(encoder.slopeScaledDepthBias));
     Property("depthBiasClamp", ToStr(encoder.depthBiasClamp));
+    Property("blendFactor",
+             StringFormat::Fmt("%.17g,%.17g,%.17g,%.17g", encoder.blendFactor[0],
+                               encoder.blendFactor[1], encoder.blendFactor[2],
+                               encoder.blendFactor[3]));
     for(size_t i = 0; i < encoder.colorAttachments.size(); i++)
-      if(encoder.colorAttachments[i] != 0)
-        AddBinding(path + StringFormat::Fmt("/color%zu", i), StringFormat::Fmt("color%zu", i),
-                   encoder.colorAttachments[i]);
-    if(encoder.depthAttachment != 0)
-      AddBinding(path + "/depth", "depth", encoder.depthAttachment);
+      AddAttachmentBinding(path + StringFormat::Fmt("/color%zu", i),
+                           StringFormat::Fmt("color%zu", i), encoder.colorAttachments[i],
+                           "clearColor");
+    AddAttachmentBinding(path + "/depth", "depth", encoder.depthAttachment, "clearDepth");
+    AddAttachmentBinding(path + "/stencil", "stencil", encoder.stencilAttachment,
+                         "clearStencil");
     if(encoder.pipeline != 0)
       AddBinding(path + "/pipeline", "pipeline", encoder.pipeline);
     if(encoder.depthStencil != 0)
@@ -823,7 +975,14 @@ struct NativeIndexBuilder
       case MetalChunk::MTLDevice_newDefaultLibrary:
       {
         uint64_t id = UInt(Child(chunk, "Library"));
-        AddResource(id, MetalTrace::NodeKind::Library, "libraries", "Library");
+        MetalTrace::Node &library =
+            AddResource(id, MetalTrace::NodeKind::Library, "libraries", "Library");
+        if(metalChunk == MetalChunk::MTLDevice_newLibraryWithSource)
+        {
+          SetNodeInfoProperty(library.path, "sourceFilename",
+                              StringFormat::Fmt("library-%llu.metal", (unsigned long long)id));
+          SetNodeInfoProperty(library.path, "source", String(Child(chunk, "source")));
+        }
         break;
       }
       case MetalChunk::MTLLibrary_newFunctionWithName:
@@ -835,9 +994,14 @@ struct NativeIndexBuilder
         const rdcstr name = String(Child(chunk, "FunctionName"));
         if(!name.empty())
           node.label = name;
+        SetNodeInfoProperty(node.path, "entryPoint", name);
+        SetNodeInfoProperty(node.path, "libraryStableId", ToStr(UInt(Child(chunk, "Library"))));
         if(metalChunk == MetalChunk::MTLLibrary_newFunctionWithName_constantValues &&
            UInt(Child(chunk, "hasDeclaredFunctionConstants")) != 0)
+        {
           node.values = {"Specialization constants are not yet serialised"};
+          SetNodeInfoProperty(node.path, "hasFunctionConstants", "1");
+        }
         break;
       }
       case MetalChunk::MTLDevice_newRenderPipelineStateWithDescriptor:
@@ -851,11 +1015,19 @@ struct NativeIndexBuilder
         const SDObject *descriptor = Child(chunk, "descriptor");
         MetalTrace::NodeInfo info;
         info.path = node.path;
-        info.keys = {"vertexFunction", "fragmentFunction", "vertexLayout"};
+        info.keys = {"vertexFunction", "fragmentFunction", "vertexLayout", "colorAttachments"};
         info.values = {ToStr(UInt(Child(descriptor, "vertexFunction"))),
                        ToStr(UInt(Child(descriptor, "fragmentFunction"))),
-                       VertexLayoutDescription(descriptor)};
+                       VertexLayoutDescription(descriptor), ColorAttachmentsDescription(descriptor)};
         index.nodeInfos.push_back(info);
+        const uint64_t vertexFunction = UInt(Child(descriptor, "vertexFunction"));
+        const uint64_t fragmentFunction = UInt(Child(descriptor, "fragmentFunction"));
+        auto vertexNode = resourceNodes.find(vertexFunction);
+        if(vertexNode != resourceNodes.end())
+          SetNodeInfoProperty(index.nodes[vertexNode->second].path, "stage", "vertex");
+        auto fragmentNode = resourceNodes.find(fragmentFunction);
+        if(fragmentNode != resourceNodes.end())
+          SetNodeInfoProperty(index.nodes[fragmentNode->second].path, "stage", "fragment");
         break;
       }
       case MetalChunk::MTLDevice_newComputePipelineStateWithFunction:
@@ -867,6 +1039,14 @@ struct NativeIndexBuilder
         const rdcstr label = String(Child(Child(chunk, "descriptor"), "label"));
         if(!label.empty())
           node.label = label;
+        const uint64_t function =
+            metalChunk == MetalChunk::MTLDevice_newComputePipelineStateWithFunction
+                ? UInt(Child(chunk, "function"))
+                : UInt(Child(Child(chunk, "descriptor"), "computeFunction"));
+        SetNodeInfoProperty(node.path, "computeFunction", ToStr(function));
+        auto functionNode = resourceNodes.find(function);
+        if(functionNode != resourceNodes.end())
+          SetNodeInfoProperty(index.nodes[functionNode->second].path, "stage", "compute");
         break;
       }
       case MetalChunk::MTLDevice_newDepthStencilStateWithDescriptor:
@@ -968,11 +1148,42 @@ struct NativeIndexBuilder
             CurrentCommandPath(commandBuffer) + StringFormat::Fmt("/render%zu", encoders.size());
 
         const SDObject *descriptor = Child(chunk, "descriptor");
+        auto ReadAttachment = [](const SDObject *source, NativeEncoderState::Attachment &dest,
+                                 const char *clearProperty) {
+          if(source == NULL)
+            return;
+          dest.texture = UInt(Child(source, "texture"));
+          dest.resolveTexture = UInt(Child(source, "resolveTexture"));
+          dest.level = UInt(Child(source, "level"));
+          dest.slice = UInt(Child(source, "slice"));
+          dest.depthPlane = UInt(Child(source, "depthPlane"));
+          dest.loadAction = EnumSuffix(Child(source, "loadAction"), "MTLLoadAction");
+          dest.storeAction = EnumSuffix(Child(source, "storeAction"), "MTLStoreAction");
+          if(strcmp(clearProperty, "clearColor") == 0)
+          {
+            const SDObject *clear = Child(source, clearProperty);
+            dest.clearValue = StringFormat::Fmt("%.17g,%.17g,%.17g,%.17g",
+                                                Double(Child(clear, "red")),
+                                                Double(Child(clear, "green")),
+                                                Double(Child(clear, "blue")),
+                                                Double(Child(clear, "alpha")));
+          }
+          else if(strcmp(clearProperty, "clearDepth") == 0)
+          {
+            dest.clearValue = Number(Child(source, clearProperty));
+          }
+          else
+          {
+            dest.clearValue = ToStr(UInt(Child(source, clearProperty)));
+          }
+        };
         const SDObject *colors = Child(descriptor, "colorAttachments");
         if(colors)
           for(size_t i = 0; i < colors->NumChildren() && i < state.colorAttachments.size(); i++)
-            state.colorAttachments[i] = UInt(Child(colors->GetChild(i), "texture"));
-        state.depthAttachment = UInt(Child(Child(descriptor, "depthAttachment"), "texture"));
+            ReadAttachment(colors->GetChild(i), state.colorAttachments[i], "clearColor");
+        ReadAttachment(Child(descriptor, "depthAttachment"), state.depthAttachment, "clearDepth");
+        ReadAttachment(Child(descriptor, "stencilAttachment"), state.stencilAttachment,
+                       "clearStencil");
 
         MetalTrace::Node encoder;
         encoder.stableId = encoderId;
@@ -1059,8 +1270,58 @@ struct NativeIndexBuilder
       case MetalChunk::MTLRenderCommandEncoder_setVertexBuffer:
       {
         NativeEncoderState &state = encoders[UInt(Child(chunk, "RenderCommandEncoder"))];
-        state.vertexBuffers[(uint32_t)UInt(Child(chunk, "index"))] = {UInt(Child(chunk, "buffer")),
-                                                                      UInt(Child(chunk, "offset"))};
+        const uint32_t slot = (uint32_t)UInt(Child(chunk, "index"));
+        const uint64_t buffer = UInt(Child(chunk, "buffer"));
+        const uint64_t offset = UInt(Child(chunk, "offset"));
+        state.vertexBuffers[slot] = {buffer, offset};
+        state.vertexBufferSourceCalls[slot] = StringFormat::Fmt(
+            "[MTLRenderCommandEncoder setVertexBuffer:@%s offset:%llu atIndex:%u]",
+            ResourceObjectName(buffer).c_str(), (unsigned long long)offset, slot);
+        break;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setVertexBufferOffset:
+      {
+        NativeEncoderState &state = encoders[UInt(Child(chunk, "RenderCommandEncoder"))];
+        const uint32_t slot = (uint32_t)UInt(Child(chunk, "index"));
+        const uint64_t offset = UInt(Child(chunk, "offset"));
+        auto binding = state.vertexBuffers.find(slot);
+        if(binding != state.vertexBuffers.end())
+          binding->second.second = offset;
+        state.vertexBufferSourceCalls[slot] = StringFormat::Fmt(
+            "[MTLRenderCommandEncoder setVertexBufferOffset:%llu atIndex:%u]",
+            (unsigned long long)offset, slot);
+        break;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setVertexBuffers:
+      {
+        NativeEncoderState &state = encoders[UInt(Child(chunk, "RenderCommandEncoder"))];
+        const SDObject *bufferObjects = Child(chunk, "buffers");
+        const SDObject *offsetObjects = Child(chunk, "offsets");
+        const size_t count = bufferObjects && offsetObjects
+                                 ? RDCMIN(bufferObjects->NumChildren(), offsetObjects->NumChildren())
+                                 : 0;
+        const uint64_t firstIndex = UInt(Child(chunk, "firstIndex"));
+        rdcstr objectList;
+        rdcstr offsetList;
+        for(size_t i = 0; i < count; i++)
+        {
+          const uint64_t buffer = UInt(bufferObjects->GetChild(i));
+          const uint64_t offset = UInt(offsetObjects->GetChild(i));
+          const uint32_t slot = (uint32_t)(firstIndex + i);
+          state.vertexBuffers[slot] = {buffer, offset};
+          if(i > 0)
+          {
+            objectList += ", ";
+            offsetList += ", ";
+          }
+          objectList += "@" + ResourceObjectName(buffer);
+          offsetList += ToStr(offset);
+        }
+        const rdcstr sourceCall = StringFormat::Fmt(
+            "[MTLRenderCommandEncoder setVertexBuffers:(%s) offsets:(%s) withRange:{%llu, %zu}]",
+            objectList.c_str(), offsetList.c_str(), (unsigned long long)firstIndex, count);
+        for(size_t i = 0; i < count; i++)
+          state.vertexBufferSourceCalls[(uint32_t)(firstIndex + i)] = sourceCall;
         break;
       }
       case MetalChunk::MTLRenderCommandEncoder_setFragmentTexture:
@@ -1178,6 +1439,30 @@ struct NativeIndexBuilder
       case MetalChunk::MTLRenderCommandEncoder_setTriangleFillMode:
         encoders[UInt(Child(chunk, "RenderCommandEncoder"))].fillMode =
             EnumSuffix(Child(chunk, "fillMode"), "MTLTriangleFillMode");
+        break;
+      case MetalChunk::MTLRenderCommandEncoder_setBlendColor:
+      {
+        NativeEncoderState &state = encoders[UInt(Child(chunk, "RenderCommandEncoder"))];
+        state.blendFactor = {Double(Child(chunk, "red")), Double(Child(chunk, "green")),
+                             Double(Child(chunk, "blue")), Double(Child(chunk, "alpha"))};
+        break;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setColorStoreAction:
+      {
+        NativeEncoderState &state = encoders[UInt(Child(chunk, "RenderCommandEncoder"))];
+        const uint64_t attachmentIndex = UInt(Child(chunk, "colorAttachmentIndex"));
+        if(attachmentIndex < state.colorAttachments.size())
+          state.colorAttachments[(size_t)attachmentIndex].storeAction =
+              EnumSuffix(Child(chunk, "storeAction"), "MTLStoreAction");
+        break;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setDepthStoreAction:
+        encoders[UInt(Child(chunk, "RenderCommandEncoder"))].depthAttachment.storeAction =
+            EnumSuffix(Child(chunk, "storeAction"), "MTLStoreAction");
+        break;
+      case MetalChunk::MTLRenderCommandEncoder_setStencilStoreAction:
+        encoders[UInt(Child(chunk, "RenderCommandEncoder"))].stencilAttachment.storeAction =
+            EnumSuffix(Child(chunk, "storeAction"), "MTLStoreAction");
         break;
       case MetalChunk::MTLRenderCommandEncoder_setDepthBias:
       {

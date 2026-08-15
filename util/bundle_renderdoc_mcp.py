@@ -311,7 +311,11 @@ def bundle(
     )
 
     runtime_mcp.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(rd_mcp_pkg, runtime_mcp)
+    shutil.copytree(
+        rd_mcp_pkg,
+        runtime_mcp,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
 
     subprocess.run(
         [

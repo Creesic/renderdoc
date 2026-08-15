@@ -2375,10 +2375,12 @@ void DoSerialise(SerialiserType &ser, MetalPipe::VertexBuffer &el)
   SERIALISE_MEMBER(slot);
   SERIALISE_MEMBER(resourceId);
   SERIALISE_MEMBER(byteOffset);
+  SERIALISE_MEMBER(byteOffsetKnown);
   SERIALISE_MEMBER(byteStride);
   SERIALISE_MEMBER(byteSize);
+  SERIALISE_MEMBER(lastSetCall);
 
-  SIZE_CHECK(40);
+  SIZE_CHECK(64);
 }
 
 template <typename SerialiserType>
@@ -2388,8 +2390,9 @@ void DoSerialise(SerialiserType &ser, MetalPipe::IndexBuffer &el)
   SERIALISE_MEMBER(byteOffset);
   SERIALISE_MEMBER(byteStride);
   SERIALISE_MEMBER(byteSize);
+  SERIALISE_MEMBER(lastSetCall);
 
-  SIZE_CHECK(32);
+  SIZE_CHECK(56);
 }
 
 template <typename SerialiserType>
@@ -2467,8 +2470,9 @@ void DoSerialise(SerialiserType &ser, MetalPipe::Attachment &el)
   SERIALISE_MEMBER(clearColor);
   SERIALISE_MEMBER(clearDepth);
   SERIALISE_MEMBER(clearStencil);
+  SERIALISE_MEMBER(reconstructed);
 
-  SIZE_CHECK(64);
+  SIZE_CHECK(72);
 }
 
 template <typename SerialiserType>

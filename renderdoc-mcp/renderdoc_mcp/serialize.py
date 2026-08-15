@@ -12,7 +12,7 @@ from renderdoc_mcp.rdutil import (
     resource_name_map,
     rid_str,
 )
-from renderdoc_mcp.session import expand_action_flags, find_action
+from renderdoc_mcp.session import action_draw_counts, expand_action_flags, find_action
 from renderdoc_mcp.analysis import detect_pipeline_anomalies
 
 
@@ -220,14 +220,52 @@ def collect_shader_stages(rd: Any) -> list[Any]:
     return uniq
 
 
-def serialize_graphics_targets(pipe: Any, controller: Any) -> dict[str, Any]:
-    rd = get_renderdoc()
+def _apply_metal_attachment_metadata(
+    row: dict[str, Any], attachment: Any, controller: Any
+) -> None:
+    if attachment is None:
+        return
+    row.update(
+        {
+            "load_action": enum_name(getattr(attachment, "loadAction", None)),
+            "store_action": enum_name(getattr(attachment, "storeAction", None)),
+            "mipslice": int(getattr(attachment, "mipLevel", row.get("mipslice", 0)) or 0),
+            "slice": int(getattr(attachment, "slice", row.get("slice", 0)) or 0),
+            "depth_plane": int(getattr(attachment, "depthPlane", 0) or 0),
+            "clear_depth": float(getattr(attachment, "clearDepth", 0.0) or 0.0),
+            "clear_stencil": int(getattr(attachment, "clearStencil", 0) or 0),
+            "reconstructed": bool(getattr(attachment, "reconstructed", False)),
+        }
+    )
+    clear_color = getattr(attachment, "clearColor", None)
+    if clear_color is not None:
+        try:
+            row["clear_color"] = [float(x) for x in clear_color]
+        except TypeError:
+            # SWIG exposes RenderDoc's FloatVector as named fields, not an iterable.
+            row["clear_color"] = [
+                float(getattr(clear_color, component, 0.0) or 0.0)
+                for component in ("x", "y", "z", "w")
+            ]
+    resolve = getattr(attachment, "resolveResourceId", None)
+    resolve_row: dict[str, Any] = {}
+    enrich_resource_dict(controller, resolve_row, resolve)
+    if resolve_row.get("resource_id") not in (None, "", "Null"):
+        row["resolve_resource_id"] = resolve_row["resource_id"]
+        if "resource_name" in resolve_row:
+            row["resolve_resource_name"] = resolve_row["resource_name"]
+
+
+def serialize_graphics_targets(pipe: Any, controller: Any, metal: Any = None) -> dict[str, Any]:
     data: dict[str, Any] = {}
     outs = _try(lambda: pipe.GetOutputTargets(), [])
     data["color_targets"] = []
+    metal_colors = list(getattr(metal, "colorAttachments", []) or []) if metal is not None else []
     for i, o in enumerate(outs):
         ct: dict[str, Any] = {"slot": i, "slice": int(getattr(o, "slice", 0)), "mipslice": int(getattr(o, "mipslice", 0))}
         enrich_resource_dict(controller, ct, getattr(o, "resource", None))
+        if i < len(metal_colors):
+            _apply_metal_attachment_metadata(ct, metal_colors[i], controller)
         data["color_targets"].append(ct)
     dt = _try(lambda: pipe.GetDepthTarget())
     if dt is not None:
@@ -236,6 +274,9 @@ def serialize_graphics_targets(pipe: Any, controller: Any) -> dict[str, Any]:
             "mipslice": int(getattr(dt, "mipslice", 0)),
         }
         enrich_resource_dict(controller, dd, getattr(dt, "resource", None))
+        _apply_metal_attachment_metadata(
+            dd, getattr(metal, "depthAttachment", None) if metal is not None else None, controller
+        )
         data["depth_target"] = dd
     else:
         data["depth_target"] = None
@@ -243,6 +284,9 @@ def serialize_graphics_targets(pipe: Any, controller: Any) -> dict[str, Any]:
     if ss is not None:
         st: dict[str, Any] = {}
         enrich_resource_dict(controller, st, getattr(ss, "resource", None))
+        _apply_metal_attachment_metadata(
+            st, getattr(metal, "stencilAttachment", None) if metal is not None else None, controller
+        )
         data["stencil_target"] = st
     else:
         data["stencil_target"] = None
@@ -382,6 +426,10 @@ def serialize_vertex_inputs(pipe: Any, controller: Any) -> dict[str, Any]:
     ib = _try(lambda: pipe.GetIBuffer())
     vbs = _try(lambda: pipe.GetVBuffers(), [])
     attrs = _try(lambda: pipe.GetVertexInputs(), [])
+    metal = _metal_state(controller)
+    metal_vi = getattr(metal, "vertexInput", None) if metal is not None else None
+    metal_ib = getattr(metal_vi, "indexBuffer", None) if metal_vi is not None else None
+    metal_vbs = list(getattr(metal_vi, "vertexBuffers", []) or []) if metal_vi is not None else []
     data: dict[str, Any] = {}
     # GetIBuffer() always returns a BoundVBuffer struct, never Python None -- non-indexed draws
     # get one with resourceId == ResourceId::Null(), so presence must be checked via the
@@ -391,7 +439,13 @@ def serialize_vertex_inputs(pipe: Any, controller: Any) -> dict[str, Any]:
             "byte_offset": int(ib.byteOffset),
             "byte_stride": int(ib.byteStride),
             "byte_size": int(ib.byteSize),
+            "index_format": {1: "UInt8", 2: "UInt16", 4: "UInt32"}.get(
+                int(ib.byteStride), "Unknown"
+            ),
         }
+        last_set_call = str(getattr(metal_ib, "lastSetCall", "") or "")
+        if last_set_call:
+            ibd["last_set_call"] = last_set_call
         enrich_resource_dict(controller, ibd, ib.resourceId)
         data["index_buffer"] = ibd
     data["vertex_buffers"] = []
@@ -402,6 +456,11 @@ def serialize_vertex_inputs(pipe: Any, controller: Any) -> dict[str, Any]:
             "byte_stride": int(vb.byteStride),
             "byte_size": int(vb.byteSize),
         }
+        if i < len(metal_vbs):
+            vbd["byte_offset_known"] = bool(getattr(metal_vbs[i], "byteOffsetKnown", False))
+            last_set_call = str(getattr(metal_vbs[i], "lastSetCall", "") or "")
+            if last_set_call:
+                vbd["last_set_call"] = last_set_call
         enrich_resource_dict(controller, vbd, vb.resourceId)
         data["vertex_buffers"].append(vbd)
     data["attributes"] = []
@@ -473,17 +532,23 @@ def summarize_action(rd: Any, controller: Any, structured_file: Any, event_id: i
     if rid_str(destination) not in ("", "Null"):
         copy_destination = {}
         enrich_resource_dict(controller, copy_destination, destination)
+    num_vertices, num_indices = action_draw_counts(rd, act)
+    vertex_start = int(getattr(act, "vertexOffset", 0))
+    base_instance = int(getattr(act, "instanceOffset", 0))
     return {
         "event_id": event_id,
         "name": act.GetName(structured_file),
         "flags": expand_action_flags(rd, int(act.flags)),
         "outputs": outs,
         "topology": enum_name(act.topology) if getattr(act, "topology", None) is not None else None,
-        "num_vertices": int(getattr(act, "numVertices", 0)),
+        "num_vertices": num_vertices,
         "num_instances": int(getattr(act, "numInstances", 0)),
-        "num_indices": int(getattr(act, "numIndices", 0)),
-        "vertex_offset": int(getattr(act, "vertexOffset", 0)),
-        "instance_offset": int(getattr(act, "instanceOffset", 0)),
+        "num_indices": num_indices,
+        "index_count": num_indices,
+        "vertex_offset": vertex_start,
+        "vertex_start": vertex_start,
+        "instance_offset": base_instance,
+        "base_instance": base_instance,
         "index_offset": int(getattr(act, "indexOffset", 0)),
         "base_vertex": int(getattr(act, "baseVertex", 0)),
         "copy_source": copy_source,
@@ -533,7 +598,7 @@ def normalize_pipeline_state(controller: Any, structured_file: Any, event_id: in
             scissors.append(serialize_scissor(sc))
     data["scissors"] = scissors
 
-    data["targets"] = serialize_graphics_targets(pipe, controller)
+    data["targets"] = serialize_graphics_targets(pipe, controller, metal)
     data["rasterizer"] = serialize_rasterizer(pipe)
     data["depth"] = serialize_depth_state(pipe)
     data["stencil"] = serialize_stencil_state(pipe)
@@ -615,7 +680,7 @@ def normalize_bound_resources(controller: Any, structured_file: Any, event_id: i
                     if rid and rid != "Null":
                         merged.add(rid)
 
-    tg = serialize_graphics_targets(pipe, controller)
+    tg = serialize_graphics_targets(pipe, controller, metal)
     for c in tg.get("color_targets") or []:
         if c["resource_id"] not in ("Null", ""):
             merged.add(c["resource_id"])
@@ -658,14 +723,21 @@ def build_draw_state_row(controller: Any, structured_file: Any, event_id: int) -
     name = act.GetName(structured_file) if act is not None else ""
 
     vi = serialize_vertex_inputs(pipe, controller)
-    targets = serialize_graphics_targets(pipe, controller)
+    targets = serialize_graphics_targets(pipe, controller, metal)
     topo = _try(lambda: pipe.GetPrimitiveTopology())
 
     def compact_binding(binding: dict[str, Any] | None) -> dict[str, Any] | None:
         if not binding or binding.get("resource_id") in (None, "", "Null"):
             return None
         compact: dict[str, Any] = {}
-        for key in ("slot", "resource_id", "resource_name"):
+        for key in (
+            "slot",
+            "resource_id",
+            "resource_name",
+            "last_set_call",
+            "byte_offset_known",
+            "index_format",
+        ):
             if key in binding:
                 compact[key] = binding[key]
         byte_offset = int(binding.get("byte_offset", 0) or 0)
@@ -698,6 +770,7 @@ def build_draw_state_row(controller: Any, structured_file: Any, event_id: int) -
             binding.get("resource_name"),
             binding.get("byte_stride", 0),
             binding.get("byte_size", 0),
+            binding.get("last_set_call"),
         )
         groups.setdefault(key, []).append(binding)
     for bindings in groups.values():
@@ -896,6 +969,19 @@ def serialize_shader_sampler(sampler: Any) -> dict[str, Any]:
     }
 
 
+def serialize_shader_resource(resource: Any) -> dict[str, Any]:
+    return {
+        "name": str(getattr(resource, "name", "") or ""),
+        "bind_point": int(getattr(resource, "fixedBindNumber", 0) or 0),
+        "bind_set_or_space": int(getattr(resource, "fixedBindSetOrSpace", 0) or 0),
+        "array_size": int(getattr(resource, "bindArraySize", 1) or 1),
+        "descriptor_type": enum_name(getattr(resource, "descriptorType", None)),
+        "texture_type": enum_name(getattr(resource, "textureType", None)),
+        "is_texture": bool(getattr(resource, "isTexture", False)),
+        "read_only": bool(getattr(resource, "isReadOnly", False)),
+    }
+
+
 def serialize_shader_reflection_summary(
     refl: Any, controller: Any | None = None, *, max_resources: int = 64
 ) -> dict[str, Any]:
@@ -907,6 +993,9 @@ def serialize_shader_reflection_summary(
     enrich_resource_dict(controller, out, rid) if controller is not None else out.update(
         {"resource_id": rid_str(rid)}
     )
+    out["entry_point"] = str(getattr(refl, "entryPoint", "") or "")
+    out["stage"] = enum_name(getattr(refl, "stage", None))
+    out["encoding"] = enum_name(getattr(refl, "encoding", None))
     cb = getattr(refl, "constantBlocks", None) or []
     out["constant_blocks"] = []
     for i, block in enumerate(cb[:max_resources]):
@@ -924,6 +1013,8 @@ def serialize_shader_reflection_summary(
     rw = getattr(refl, "readWriteResources", None) or []
     out["readonly_bindings"] = [getattr(x, "name", str(x)) for x in ro[:max_resources]]
     out["readwrite_bindings"] = [getattr(x, "name", str(x)) for x in rw[:max_resources]]
+    out["readonly_resources"] = [serialize_shader_resource(x) for x in ro[:max_resources]]
+    out["readwrite_resources"] = [serialize_shader_resource(x) for x in rw[:max_resources]]
 
     samplers = getattr(refl, "samplers", None) or []
     out["samplers"] = [serialize_shader_sampler(s) for s in samplers[:max_resources]]
@@ -932,5 +1023,12 @@ def serialize_shader_reflection_summary(
     out_sig = getattr(refl, "outputSignature", None) or []
     out["input_signature"] = [serialize_sig_parameter(sp) for sp in in_sig[:max_resources]]
     out["output_signature"] = [serialize_sig_parameter(sp) for sp in out_sig[:max_resources]]
+
+    out["interfaces"] = [str(x) for x in (getattr(refl, "interfaces", None) or [])[:max_resources]]
+    debug_info = getattr(refl, "debugInfo", None)
+    out["source_files"] = [
+        str(getattr(source_file, "filename", "") or "")
+        for source_file in (getattr(debug_info, "files", None) or [])
+    ]
 
     return out

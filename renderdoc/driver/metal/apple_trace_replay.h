@@ -52,18 +52,12 @@ public:
   rdcarray<TextureDescription> GetTextures() override { return m_Textures; }
   TextureDescription GetTexture(ResourceId id) override;
   rdcarray<DebugMessage> GetDebugMessages() override;
-  rdcarray<ShaderEntryPoint> GetShaderEntryPoints(ResourceId shader) override { return {}; }
+  rdcarray<ShaderEntryPoint> GetShaderEntryPoints(ResourceId shader) override;
   const ShaderReflection *GetShader(ResourceId pipeline, ResourceId shader,
-                                    ShaderEntryPoint entry) override
-  {
-    return NULL;
-  }
-  rdcarray<rdcstr> GetDisassemblyTargets(bool withPipeline) override { return {}; }
+                                    ShaderEntryPoint entry) override;
+  rdcarray<rdcstr> GetDisassemblyTargets(bool withPipeline) override;
   rdcstr DisassembleShader(ResourceId pipeline, const ShaderReflection *refl,
-                           const rdcstr &target) override
-  {
-    return {};
-  }
+                           const rdcstr &target) override;
   rdcarray<EventUsage> GetUsage(ResourceId id) override;
   void SetPipelineStates(D3D11Pipe::State *d3d11, D3D12Pipe::State *d3d12, GLPipe::State *gl,
                          VKPipe::State *vk, MetalPipe::State *metal) override
@@ -234,6 +228,9 @@ private:
   std::map<uint64_t, ResourceId> m_StableResources;
   std::map<ResourceId, size_t> m_BufferNodes;
   std::map<ResourceId, size_t> m_TextureNodes;
+  std::map<ResourceId, size_t> m_ShaderNodes;
+  std::map<ResourceId, ShaderReflection> m_ShaderReflections;
+  std::map<ResourceId, rdcstr> m_ShaderSources;
   struct EventDescriptors
   {
     ResourceId store;
@@ -262,6 +259,14 @@ private:
   };
   std::map<uint32_t, EventPipeline> m_EventPipelines;
   std::map<uint32_t, MetalPipe::Rasterizer> m_EventRasterizers;
+  std::map<uint32_t, MetalPipe::ColorBlendState> m_EventColorBlends;
+  struct EventAttachments
+  {
+    rdcarray<MetalPipe::Attachment> colors;
+    MetalPipe::Attachment depth;
+    MetalPipe::Attachment stencil;
+  };
+  std::map<uint32_t, EventAttachments> m_EventAttachments;
   std::map<ResourceId, rdcarray<EventUsage>> m_ResourceUses;
   rdcstr m_NativeReplayError;
   uint32_t m_LastNativeReplayDrawCount = ~0U;

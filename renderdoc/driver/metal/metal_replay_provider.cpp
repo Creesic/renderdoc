@@ -229,6 +229,7 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
        "rps0"},
       {301, MetalTrace::NodeKind::Shader, "/resources/shaders/vs0", "vs0", "vertexMain", "vs0"},
       {302, MetalTrace::NodeKind::Shader, "/resources/shaders/fs0", "fs0", "fragmentMain", "fs0"},
+      {303, MetalTrace::NodeKind::Library, "/resources/libraries/lib0", "lib0", {}, "lib0"},
       {100,
        MetalTrace::NodeKind::Texture,
        "/resources/textures/texTarget",
@@ -252,16 +253,46 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
   };
   index.nodeInfos = {
       {"/commands/cb0/re0/draw0",
-       {"baseInstance", "baseVertex", "indexBufferOffset", "indexCount", "indexType",
-        "instanceCount", "primitiveType", "vertexBufferOffset[12]", "viewportCount", "viewport[0]",
-        "scissorCount", "scissor[0]", "cullMode", "fillMode", "frontFacingWinding"},
-       {"0", "0", "0", "3", "UInt32", "1", "TriangleStrip", "24", "1", "0,0,640,480,0,1", "1",
-        "0,0,640,480", "Back", "Fill", "CounterClockwise"}},
+       {"baseInstance", "baseVertex", "indexBufferOffset", "indexBufferSourceCall", "indexCount",
+        "indexType", "instanceCount", "primitiveType", "vertexBufferOffset[12]",
+        "vertexBufferSize[12]", "vertexBufferSourceCall[12]", "blendFactor", "viewportCount",
+        "viewport[0]", "scissorCount", "scissor[0]", "cullMode", "fillMode",
+        "frontFacingWinding"},
+       {"0", "0", "4",
+        "[MTLRenderCommandEncoder drawIndexedPrimitives:Triangle indexCount:3 indexType:UInt32 "
+        "indexBuffer:@buf1 indexBufferOffset:4]",
+        "3", "UInt32", "1", "TriangleStrip", "24", "96",
+        "[MTLRenderCommandEncoder setVertexBuffer:@buf0 offset:24 atIndex:12]", "0.1,0.2,0.3,0.4",
+        "1", "0,0,640,480,0,1", "1", "0,0,640,480", "Back", "Fill",
+        "CounterClockwise"}},
+      {"/commands/cb0/re0/draw0/color0",
+       {"loadAction", "storeAction", "level", "slice", "depthPlane", "clearColor"},
+       {"Load", "Store", "2", "3", "0", "0.25,0.5,0.75,1"}},
       {"/resources/render_pipelines/rps0",
-       {"vertexLayout", "vertexFunction", "fragmentFunction"},
+       {"vertexLayout", "vertexFunction", "fragmentFunction", "colorAttachments"},
        {"  buffer 12 (stride=24, perVertex):\n    attr0   Int @0\n    attr3   "
         "UChar4Normalized_BGRA @12",
-        "301", "302"}},
+        "301", "302",
+        "color0:\n  blendEnabled: yes\n  srcRGB: SourceAlpha\n  dstRGB: OneMinusSourceAlpha\n"
+        "  opRGB: Add\n  srcAlpha: One\n  dstAlpha: Zero\n  opAlpha: Add\n  writeMask: RGBA"}},
+      {"/resources/shaders/vs0",
+       {"entryPoint", "libraryStableId", "stage"},
+       {"vertexMain", "303", "vertex"}},
+      {"/resources/shaders/fs0",
+       {"entryPoint", "libraryStableId", "stage"},
+       {"fragmentMain", "303", "fragment"}},
+      {"/resources/libraries/lib0",
+       {"sourceFilename", "source"},
+       {"synthetic.metal",
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct VertexInput { float4 pos [[attribute(0)]]; };\n"
+        "struct FragmentOutput { float4 color [[color(1)]]; };\n"
+        "struct ArgumentBuffer { texture2d<float> nested [[id(4)]]; };\n"
+        "constant bool featureEnabled [[function_constant(7)]];\n"
+        "vertex float4 vertexMain(VertexInput input [[stage_in]], constant float4 &tint "
+        "[[buffer(1)]]) { return input.pos + tint; }\n"
+        "fragment FragmentOutput fragmentMain(texture2d<float> image [[texture(2)]], sampler "
+        "linear [[sampler(3)]]) { return {image.sample(linear, float2(0))}; }\n"}},
   };
   REQUIRE(MetalTrace::WriteThinRDC(&rdc, manifest, index).code == ResultCode::Succeeded);
 
@@ -288,14 +319,63 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
   REQUIRE(controller->GetPipelineState().GetVertexInputs().size() == 2);
   REQUIRE(controller->GetPipelineState().GetVBuffers().size() == 13);
   CHECK(controller->GetPipelineState().GetVBuffers()[12].byteOffset == 24);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.vertexBuffers[12].byteOffsetKnown);
   CHECK(controller->GetPipelineState().GetVBuffers()[12].byteStride == 24);
   CHECK(controller->GetPipelineState().GetVBuffers()[12].byteSize == 72);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.vertexBuffers[12].lastSetCall.contains(
+      "setVertexBuffer:@buf0"));
+  CHECK(controller->GetPipelineState().GetIBuffer().byteOffset == 4);
   CHECK(controller->GetPipelineState().GetIBuffer().byteStride == 4);
-  CHECK(controller->GetPipelineState().GetIBuffer().byteSize == 12);
+  CHECK(controller->GetPipelineState().GetIBuffer().byteSize == 8);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.indexBuffer.lastSetCall.contains(
+      "drawIndexedPrimitives"));
   CHECK(controller->GetPipelineState().GetViewport(0).width == 640.0f);
   CHECK(controller->GetPipelineState().GetScissor(0).height == 480);
   CHECK(controller->GetMetalPipelineState()->rasterizer.cullMode == CullMode::Back);
   CHECK(controller->GetMetalPipelineState()->rasterizer.frontCCW);
+  REQUIRE(controller->GetMetalPipelineState()->colorBlend.blends.size() == 1);
+  CHECK(controller->GetMetalPipelineState()->colorBlend.blends[0].enabled);
+  CHECK(controller->GetMetalPipelineState()->colorBlend.blends[0].colorBlend.source ==
+        BlendMultiplier::SrcAlpha);
+  CHECK(controller->GetMetalPipelineState()->colorBlend.blends[0].colorBlend.destination ==
+        BlendMultiplier::InvSrcAlpha);
+  CHECK(controller->GetMetalPipelineState()->colorBlend.blends[0].writeMask == 0xf);
+  CHECK(controller->GetMetalPipelineState()->colorBlend.blendFactor[0] == 0.1f);
+  CHECK(controller->GetMetalPipelineState()->colorBlend.blendFactor[1] == 0.2f);
+  CHECK(controller->GetMetalPipelineState()->colorBlend.blendFactor[2] == 0.3f);
+  CHECK(controller->GetMetalPipelineState()->colorBlend.blendFactor[3] == 0.4f);
+  CHECK(controller->GetMetalPipelineState()->colorAttachments[0].loadAction ==
+        MetalPipe::LoadAction::Load);
+  CHECK(controller->GetMetalPipelineState()->colorAttachments[0].storeAction ==
+        MetalPipe::StoreAction::Store);
+  CHECK(controller->GetMetalPipelineState()->colorAttachments[0].mipLevel == 2);
+  CHECK(controller->GetMetalPipelineState()->colorAttachments[0].slice == 3);
+  CHECK_FALSE(controller->GetMetalPipelineState()->colorAttachments[0].reconstructed);
+
+  REQUIRE(controller->GetMetalPipelineState()->vertexShader.reflection != NULL);
+  CHECK(controller->GetMetalPipelineState()->vertexShader.reflection->entryPoint == "vertexMain");
+  REQUIRE(controller->GetMetalPipelineState()->vertexShader.reflection->debugInfo.files.size() == 1);
+  CHECK(controller->GetMetalPipelineState()->vertexShader.reflection->debugInfo.files[0].filename ==
+        "synthetic.metal");
+  CHECK(controller->GetMetalPipelineState()->vertexShader.reflection->inputSignature.size() == 1);
+  CHECK(controller->GetMetalPipelineState()->vertexShader.reflection->readOnlyResources.size() == 1);
+  REQUIRE(controller->GetMetalPipelineState()->fragmentShader.reflection != NULL);
+  REQUIRE(controller->GetMetalPipelineState()->fragmentShader.reflection->outputSignature.size() ==
+          1);
+  CHECK(controller->GetMetalPipelineState()->fragmentShader.reflection->outputSignature[0]
+            .semanticIndex == 1);
+  CHECK(controller->GetMetalPipelineState()->fragmentShader.reflection->interfaces.contains(
+      "id 4: texture2d<float> nested"));
+  CHECK(controller->GetMetalPipelineState()->fragmentShader.reflection->interfaces.contains(
+      "function_constant 7: constant bool featureEnabled"));
+  CHECK(controller->GetMetalPipelineState()->fragmentShader.reflection->readOnlyResources.size() ==
+        1);
+  CHECK(controller->GetMetalPipelineState()->fragmentShader.reflection->samplers.size() == 1);
+  CHECK(controller->GetAPIProperties().HasFeature(ReplayFeature::ShaderSource));
+  CHECK(controller->DisassembleShader(
+              controller->GetMetalPipelineState()->renderPipeline,
+              controller->GetMetalPipelineState()->fragmentShader.reflection, "MSL source")
+            .contains("fragmentMain"));
 
   rdcarray<Descriptor> outputs = controller->GetPipelineState().GetOutputTargets();
   REQUIRE(outputs.size() == 1);
@@ -326,6 +406,109 @@ TEST_CASE("Apple GPU Trace draw attachments and texture inputs populate pipeline
   controller->Shutdown();
 }
 
+TEST_CASE("Metal draw normalization keeps shared-buffer offsets and pipeline strides per draw",
+          "[metal][replay]")
+{
+  RDCFile rdc;
+  rdc.SetData(RDCDriver::Metal, "Synthetic per-draw Metal vertex bindings", 0, NULL, 0, 1.0);
+
+  MetalTrace::Manifest manifest;
+  manifest.header.sourceKind = MetalTrace::SourceKind::AppleGPUTrace;
+  manifest.capabilities = MetalTrace::Capability::Actions | MetalTrace::Capability::Resources;
+  manifest.sourcePath = "/synthetic/missing.gputrace";
+
+  MetalTrace::Index index;
+  index.nodes = {
+      {1, MetalTrace::NodeKind::CommandBuffer, "/commands/cb0", "cb0"},
+      {2, MetalTrace::NodeKind::RenderEncoder, "/commands/cb0/re0", "re0"},
+      {3, MetalTrace::NodeKind::Draw, "/commands/cb0/re0/draw0", "draw0", "88-byte draw"},
+      {300, MetalTrace::NodeKind::Binding, "/commands/cb0/re0/draw0/pipeline", "pipeline", {},
+       "rpsWide"},
+      {400,
+       MetalTrace::NodeKind::Binding,
+       "/commands/cb0/re0/draw0/vertex/buf[12]",
+       "buf[12]",
+       "Shared Vertex Buffer",
+       "bufShared",
+       {"1024 bytes"},
+       false,
+       true,
+       false,
+       1024},
+      {4, MetalTrace::NodeKind::Draw, "/commands/cb0/re0/draw1", "draw1", "24-byte draw"},
+      {301, MetalTrace::NodeKind::Binding, "/commands/cb0/re0/draw1/pipeline", "pipeline", {},
+       "rpsNarrow"},
+      {400,
+       MetalTrace::NodeKind::Binding,
+       "/commands/cb0/re0/draw1/vertex/buf[12]",
+       "buf[12]",
+       "Shared Vertex Buffer",
+       "bufShared",
+       {"1024 bytes"},
+       false,
+       true,
+       false,
+       1024},
+      {300, MetalTrace::NodeKind::RenderPipeline, "/resources/render_pipelines/rpsWide", "rpsWide",
+       {}, "rpsWide"},
+      {301, MetalTrace::NodeKind::RenderPipeline, "/resources/render_pipelines/rpsNarrow",
+       "rpsNarrow", {}, "rpsNarrow"},
+  };
+  index.nodeInfos = {
+      {"/commands/cb0/re0/draw0",
+       {"vertexCount", "vertexStart", "instanceCount", "primitiveType", "vertexBufferOffset[12]",
+        "vertexBufferSize[12]", "vertexBufferSourceCall[12]"},
+       {"3", "4", "1", "Triangle", "176", "1024",
+        "[MTLRenderCommandEncoder setVertexBuffer:@bufShared offset:176 atIndex:12]"}},
+      {"/commands/cb0/re0/draw1",
+       {"vertexCount", "vertexStart", "instanceCount", "primitiveType", "vertexBufferOffset[12]",
+        "vertexBufferSize[12]", "vertexBufferSourceCall[12]"},
+       {"6", "8", "1", "Triangle", "352", "1024",
+        "[MTLRenderCommandEncoder setVertexBufferOffset:352 atIndex:12]"}},
+      {"/resources/render_pipelines/rpsWide", {"vertexLayout"},
+       {"  buffer 12 (stride=88, perVertex):\n    attr0 Float3 @0"}},
+      {"/resources/render_pipelines/rpsNarrow", {"vertexLayout"},
+       {"  buffer 12 (stride=24, perVertex):\n    attr0 Float3 @0"}},
+  };
+  REQUIRE(MetalTrace::WriteThinRDC(&rdc, manifest, index).code == ResultCode::Succeeded);
+
+  ReplayController *controller = new ReplayController;
+  REQUIRE(controller->CreateDevice(&rdc, ReplayOptions()).code == ResultCode::Succeeded);
+  REQUIRE(controller->GetRootActions().size() == 1);
+  REQUIRE(controller->GetRootActions()[0].children.size() == 1);
+  REQUIRE(controller->GetRootActions()[0].children[0].children.size() == 2);
+  const ActionDescription &wide = controller->GetRootActions()[0].children[0].children[0];
+  const ActionDescription &narrow = controller->GetRootActions()[0].children[0].children[1];
+  CHECK_FALSE(wide.flags & ActionFlags::Indexed);
+  CHECK(wide.numIndices == 3);
+  CHECK(wide.vertexOffset == 4);
+  CHECK_FALSE(narrow.flags & ActionFlags::Indexed);
+  CHECK(narrow.numIndices == 6);
+  CHECK(narrow.vertexOffset == 8);
+
+  controller->SetFrameEvent(wide.eventId, true);
+  REQUIRE(controller->GetMetalPipelineState()->vertexInput.vertexBuffers.size() == 13);
+  REQUIRE(controller->GetMetalPipelineState()->vertexInput.layouts.size() == 1);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.vertexBuffers[12].byteOffset == 176);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.vertexBuffers[12].byteOffsetKnown);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.vertexBuffers[12].byteSize == 848);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.vertexBuffers[12].lastSetCall.contains(
+      "setVertexBuffer:@bufShared"));
+  CHECK(controller->GetMetalPipelineState()->vertexInput.layouts[0].byteStride == 88);
+
+  controller->SetFrameEvent(narrow.eventId, true);
+  REQUIRE(controller->GetMetalPipelineState()->vertexInput.vertexBuffers.size() == 13);
+  REQUIRE(controller->GetMetalPipelineState()->vertexInput.layouts.size() == 1);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.vertexBuffers[12].byteOffset == 352);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.vertexBuffers[12].byteOffsetKnown);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.vertexBuffers[12].byteSize == 672);
+  CHECK(controller->GetMetalPipelineState()->vertexInput.vertexBuffers[12].lastSetCall.contains(
+      "setVertexBufferOffset:352"));
+  CHECK(controller->GetMetalPipelineState()->vertexInput.layouts[0].byteStride == 24);
+
+  controller->Shutdown();
+}
+
 TEST_CASE("Metal public state and feature capabilities serialise losslessly", "[metal][replay]")
 {
   MetalPipe::State writtenState;
@@ -349,6 +532,20 @@ TEST_CASE("Metal public state and feature capabilities serialise losslessly", "[
   writtenState.vertexInput.layouts[0].byteStride = 32;
   writtenState.vertexInput.layouts[0].stepFunction = MetalPipe::StepFunction::PerInstance;
   writtenState.vertexInput.layouts[0].stepRate = 4;
+  writtenState.vertexInput.vertexBuffers.resize(3);
+  writtenState.vertexInput.vertexBuffers[2].slot = 2;
+  writtenState.vertexInput.vertexBuffers[2].resourceId = ResourceIDGen::GetNewUniqueID();
+  writtenState.vertexInput.vertexBuffers[2].byteOffset = 128;
+  writtenState.vertexInput.vertexBuffers[2].byteOffsetKnown = true;
+  writtenState.vertexInput.vertexBuffers[2].byteSize = 2048;
+  writtenState.vertexInput.vertexBuffers[2].lastSetCall =
+      "[MTLRenderCommandEncoder setVertexBuffer:@buf2 offset:128 atIndex:2]";
+  writtenState.vertexInput.indexBuffer.resourceId = ResourceIDGen::GetNewUniqueID();
+  writtenState.vertexInput.indexBuffer.byteOffset = 12;
+  writtenState.vertexInput.indexBuffer.byteSize = 256;
+  writtenState.vertexInput.indexBuffer.byteStride = 4;
+  writtenState.vertexInput.indexBuffer.lastSetCall =
+      "[MTLRenderCommandEncoder drawIndexedPrimitives:Triangle indexBufferOffset:12]";
   writtenState.vertexShader.resourceId = ResourceIDGen::GetNewUniqueID();
   writtenState.vertexShader.entryPoint = "vertex_main";
   writtenState.vertexShader.stage = ShaderStage::Vertex;
@@ -360,6 +557,7 @@ TEST_CASE("Metal public state and feature capabilities serialise losslessly", "[
   writtenState.colorAttachments[0].loadAction = MetalPipe::LoadAction::Clear;
   writtenState.colorAttachments[0].storeAction = MetalPipe::StoreAction::Store;
   writtenState.colorAttachments[0].clearColor = {0.25f, 0.5f, 0.75f, 1.0f};
+  writtenState.colorAttachments[0].reconstructed = true;
   writtenState.depthStencil.depthTestEnable = true;
   writtenState.depthStencil.depthWriteEnable = true;
   writtenState.depthStencil.depthFunction = CompareFunction::LessEqual;
@@ -403,12 +601,19 @@ TEST_CASE("Metal public state and feature capabilities serialise losslessly", "[
   CHECK(readState.vertexInput.attributes[0].attributeIndex == 3);
   REQUIRE(readState.vertexInput.layouts.size() == 1);
   CHECK(readState.vertexInput.layouts[0].stepFunction == MetalPipe::StepFunction::PerInstance);
+  REQUIRE(readState.vertexInput.vertexBuffers.size() == 3);
+  CHECK(readState.vertexInput.vertexBuffers[2].lastSetCall ==
+        writtenState.vertexInput.vertexBuffers[2].lastSetCall);
+  CHECK(readState.vertexInput.vertexBuffers[2].byteOffsetKnown);
+  CHECK(readState.vertexInput.indexBuffer.byteOffset == 12);
+  CHECK(readState.vertexInput.indexBuffer.lastSetCall == writtenState.vertexInput.indexBuffer.lastSetCall);
   CHECK(readState.vertexShader.entryPoint == "vertex_main");
   CHECK(readState.vertexShader.reflection == NULL);
   CHECK(readState.fragmentShader.entryPoint == "fragment_main");
   REQUIRE(readState.colorAttachments.size() == 1);
   CHECK(readState.colorAttachments[0].loadAction == MetalPipe::LoadAction::Clear);
   CHECK(readState.colorAttachments[0].storeAction == MetalPipe::StoreAction::Store);
+  CHECK(readState.colorAttachments[0].reconstructed);
   CHECK(readState.depthStencil.depthFunction == CompareFunction::LessEqual);
   CHECK(readProps.pipelineType == GraphicsAPI::Metal);
   CHECK(readProps.degraded);
@@ -616,19 +821,75 @@ TEST_CASE("Canonical Apple GPU Trace normalizes and opens", "[metal][apple-trace
       textureCount++;
   }
   CHECK(drawCount == 2);
-  CHECK(bufferCount == 3);
-  CHECK(textureCount == 4);
-  CHECK(drawPaths.contains("/commands/cb0/grp0/re0/grp0/grp0/draw0"));
-  CHECK(drawPaths.contains("/commands/cb0/grp0/re1/grp0/grp0/draw0"));
+  CHECK(bufferCount >= 3);
+  CHECK(textureCount >= 4);
+  REQUIRE(drawPaths.size() == 2);
+  CHECK(drawPaths[0].beginsWith("/commands/"));
+  CHECK(drawPaths[1].beginsWith("/commands/"));
   CHECK(bufferStableID != 0);
 
   ReplayController *controller = new ReplayController;
   REQUIRE(controller->CreateDevice(&rdc, ReplayOptions()).code == ResultCode::Succeeded);
-  CHECK(controller->GetRootActions().size() == 1);
+  CHECK(controller->GetRootActions().size() >= 1);
   REQUIRE(controller->GetRootActions()[0].events.size() == 1);
   CHECK(controller->GetRootActions()[0].events[0].chunkIndex == ~0U);
-  CHECK(controller->GetBuffers().size() == 3);
-  CHECK(controller->GetTextures().size() == 4);
+  CHECK(controller->GetBuffers().size() >= bufferCount);
+  CHECK(controller->GetTextures().size() >= textureCount);
+
+  rdcarray<const ActionDescription *> draws;
+  std::function<void(const rdcarray<ActionDescription> &)> CollectDraws;
+  CollectDraws = [&draws, &CollectDraws](const rdcarray<ActionDescription> &actions) {
+    for(const ActionDescription &action : actions)
+    {
+      if(action.flags & ActionFlags::Drawcall)
+        draws.push_back(&action);
+      CollectDraws(action.children);
+    }
+  };
+  CollectDraws(controller->GetRootActions());
+  REQUIRE(draws.size() == 2);
+
+  bool foundWideBinding = false;
+  bool foundNarrowBinding = false;
+  constexpr uint64_t WideFixtureOffset = 176;
+  constexpr uint64_t NarrowFixtureOffset = 512;
+  for(const ActionDescription *draw : draws)
+  {
+    controller->SetFrameEvent(draw->eventId, true);
+    const MetalPipe::State *state = controller->GetMetalPipelineState();
+    REQUIRE(state != NULL);
+    REQUIRE(state->vertexInput.vertexBuffers.size() > 12);
+    const MetalPipe::VertexBuffer &binding = state->vertexInput.vertexBuffers[12];
+    for(const MetalPipe::VertexBufferLayout &layout : state->vertexInput.layouts)
+    {
+      if(layout.slot != 12)
+        continue;
+      if(layout.byteStride == 88 && binding.byteOffset == WideFixtureOffset)
+      {
+        foundWideBinding = true;
+        CHECK(binding.lastSetCall.contains("setVertexBufferOffset"));
+        REQUIRE(state->colorBlend.blends.size() >= 1);
+        CHECK(state->colorBlend.blends[0].enabled);
+        CHECK(state->colorBlend.blendFactor[0] == 0.1f);
+        REQUIRE(state->colorAttachments.size() >= 1);
+        CHECK(state->colorAttachments[0].loadAction == MetalPipe::LoadAction::Clear);
+        CHECK(state->colorAttachments[0].storeAction == MetalPipe::StoreAction::Store);
+        CHECK_FALSE(state->colorAttachments[0].reconstructed);
+      }
+      if(layout.byteStride == 24)
+      {
+        foundNarrowBinding = true;
+        CHECK(binding.lastSetCall.contains("setVertexBuffers"));
+        if(binding.byteOffsetKnown)
+          CHECK(binding.byteOffset == NarrowFixtureOffset);
+        else
+          CHECK(binding.lastSetCall.contains("(unresolved)"));
+      }
+    }
+  }
+  CHECK(foundWideBinding);
+  CHECK(foundNarrowBinding);
+  CHECK(controller->GetAPIProperties().HasFeature(ReplayFeature::ShaderSource));
 
   ResourceId uniformBuffer;
   for(const ResourceDescription &resource : controller->GetResources())

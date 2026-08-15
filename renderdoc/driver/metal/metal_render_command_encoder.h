@@ -41,6 +41,10 @@ public:
                               WrappedMTLRenderPipelineState *pipelineState);
   DECLARE_FUNCTION_SERIALISED(void, setVertexBuffer, WrappedMTLBuffer *buffer, NS::UInteger offset,
                               NS::UInteger index);
+  DECLARE_FUNCTION_SERIALISED(void, setVertexBufferOffset, NS::UInteger offset,
+                              NS::UInteger index);
+  DECLARE_FUNCTION_SERIALISED(void, setVertexBuffers, rdcarray<WrappedMTLBuffer *> &buffers,
+                              rdcarray<NS::UInteger> &offsets, NS::UInteger firstIndex);
   void setVertexBytes(const void *bytes, NS::UInteger length, NS::UInteger index);
   template <typename SerialiserType>
   bool Serialise_setVertexBytes(SerialiserType &ser, bytebuf &bytes, NS::UInteger index);
@@ -64,7 +68,12 @@ public:
   DECLARE_FUNCTION_SERIALISED(void, setScissorRect, MTL::ScissorRect &rect);
   DECLARE_FUNCTION_SERIALISED(void, setScissorRects, rdcarray<MTL::ScissorRect> &rects);
   DECLARE_FUNCTION_SERIALISED(void, setTriangleFillMode, MTL::TriangleFillMode fillMode);
+  DECLARE_FUNCTION_SERIALISED(void, setBlendColor, float red, float green, float blue, float alpha);
   DECLARE_FUNCTION_SERIALISED(void, setStencilReferenceValue, uint32_t referenceValue);
+  DECLARE_FUNCTION_SERIALISED(void, setColorStoreAction, MTL::StoreAction storeAction,
+                              NS::UInteger colorAttachmentIndex);
+  DECLARE_FUNCTION_SERIALISED(void, setDepthStoreAction, MTL::StoreAction storeAction);
+  DECLARE_FUNCTION_SERIALISED(void, setStencilStoreAction, MTL::StoreAction storeAction);
   DECLARE_FUNCTION_SERIALISED(void, drawPrimitives, MTL::PrimitiveType primitiveType,
                               NS::UInteger vertexStart, NS::UInteger vertexCount,
                               NS::UInteger instanceCount, NS::UInteger baseInstance);

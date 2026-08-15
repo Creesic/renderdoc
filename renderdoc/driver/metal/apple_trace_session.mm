@@ -41,6 +41,7 @@
 #include <climits>
 #include <map>
 #include <mutex>
+#include <set>
 #include <vector>
 #include "common/formatting.h"
 #include "os/os_specific.h"
@@ -404,20 +405,138 @@ static bool ParseAPICallPath(const rdcstr &path, uint32_t &apiCall)
   return true;
 }
 
-static bool ParseVertexBufferSetCall(const rdcstr &summary, rdcstr &objectName, uint64_t &offset,
-                                     uint32_t &slot)
+enum class VertexBufferCallKind
+{
+  Unknown,
+  SetBuffer,
+  SetOffset,
+  SetBuffers,
+};
+
+struct VertexBufferCall
+{
+  VertexBufferCallKind kind = VertexBufferCallKind::Unknown;
+  rdcarray<uint32_t> slots;
+  rdcarray<uint64_t> offsets;
+  rdcarray<rdcstr> objectNames;
+};
+
+static rdcarray<uint64_t> ParseUnsignedValues(const rdcstr &text)
+{
+  rdcarray<uint64_t> values;
+  size_t offset = 0;
+  while(offset < text.size())
+  {
+    while(offset < text.size() && (text[offset] < '0' || text[offset] > '9'))
+      offset++;
+    if(offset == text.size())
+      break;
+    char *end = NULL;
+    uint64_t value = strtoull(text.c_str() + offset, &end, 0);
+    if(end == text.c_str() + offset)
+      break;
+    values.push_back(value);
+    offset = size_t(end - text.c_str());
+  }
+  return values;
+}
+
+static rdcarray<rdcstr> ParseObjectNames(const rdcstr &text)
+{
+  rdcarray<rdcstr> objects;
+  size_t offset = 0;
+  while(offset < text.size())
+  {
+    int32_t at = text.find('@', (int32_t)offset);
+    if(at < 0)
+      break;
+    size_t end = (size_t)at + 1;
+    while(end < text.size() &&
+          ((text[end] >= 'a' && text[end] <= 'z') ||
+           (text[end] >= 'A' && text[end] <= 'Z') ||
+           (text[end] >= '0' && text[end] <= '9') || text[end] == '_'))
+      end++;
+    if(end > (size_t)at + 1)
+      objects.push_back(text.substr((size_t)at + 1, end - (size_t)at - 1));
+    offset = end;
+  }
+  return objects;
+}
+
+static bool ParseVertexBufferCall(const rdcstr &summary, VertexBufferCall &call)
 {
   char parsedObject[128] = {};
   unsigned long long parsedOffset = 0;
   unsigned int parsedSlot = 0;
   if(sscanf(summary.c_str(),
             "[MTLRenderCommandEncoder setVertexBuffer:@%127s offset:%llu atIndex:%u]", parsedObject,
-            &parsedOffset, &parsedSlot) != 3)
+            &parsedOffset, &parsedSlot) == 3)
+  {
+    call.kind = VertexBufferCallKind::SetBuffer;
+    call.slots = {parsedSlot};
+    call.offsets = {(uint64_t)parsedOffset};
+    call.objectNames = {parsedObject};
+    return true;
+  }
+
+  if(sscanf(summary.c_str(),
+            "[MTLRenderCommandEncoder setVertexBufferOffset:%llu atIndex:%u]", &parsedOffset,
+            &parsedSlot) == 2)
+  {
+    call.kind = VertexBufferCallKind::SetOffset;
+    call.slots = {parsedSlot};
+    call.offsets = {(uint64_t)parsedOffset};
+    call.objectNames = {rdcstr()};
+    return true;
+  }
+
+  const rdcstr prefix = "[MTLRenderCommandEncoder setVertexBuffers:";
+  if(!summary.beginsWith(prefix))
+    return false;
+  const int32_t offsetsBegin = summary.find(" offsets:", (int32_t)prefix.size());
+  const int32_t rangeBegin = summary.find(" withRange:", offsetsBegin);
+  if(offsetsBegin < 0 || rangeBegin < 0)
     return false;
 
-  objectName = parsedObject;
-  offset = (uint64_t)parsedOffset;
-  slot = parsedSlot;
+  const rdcarray<uint64_t> range =
+      ParseUnsignedValues(summary.substr((size_t)rangeBegin + strlen(" withRange:")));
+  if(range.size() < 2 || range[0] > UINT32_MAX || range[1] > UINT32_MAX ||
+     range[0] + range[1] > UINT32_MAX)
+    return false;
+
+  call.kind = VertexBufferCallKind::SetBuffers;
+  call.objectNames = ParseObjectNames(
+      summary.substr(prefix.size(), (size_t)offsetsBegin - prefix.size()));
+  const size_t offsetsValueBegin = (size_t)offsetsBegin + strlen(" offsets:");
+  call.offsets = ParseUnsignedValues(
+      summary.substr(offsetsValueBegin, (size_t)rangeBegin - offsetsValueBegin));
+  for(uint64_t i = 0; i < range[1]; i++)
+    call.slots.push_back((uint32_t)(range[0] + i));
+  if(call.offsets.size() < call.slots.size())
+    return false;
+  call.offsets.resize(call.slots.size());
+  call.objectNames.resize(call.slots.size());
+  return true;
+}
+
+static bool ParseBlendColorCall(const rdcstr &summary, double values[4])
+{
+  return sscanf(summary.c_str(),
+                "[MTLRenderCommandEncoder setBlendColorRed:%lf green:%lf blue:%lf alpha:%lf]",
+                &values[0], &values[1], &values[2], &values[3]) == 4;
+}
+
+static bool ParseUnresolvedVertexBuffersCall(const rdcstr &summary, uint32_t &firstSlot)
+{
+  if(!summary.beginsWith("[MTLRenderCommandEncoder setVertexBuffers:(unresolved)") ||
+     !summary.contains(" withRange:"))
+    return false;
+  const int32_t range = summary.find(" withRange:");
+  const rdcarray<uint64_t> values =
+      ParseUnsignedValues(summary.substr((size_t)range + strlen(" withRange:")));
+  if(values.empty() || values[0] > UINT32_MAX)
+    return false;
+  firstSlot = (uint32_t)values[0];
   return true;
 }
 
@@ -588,8 +707,11 @@ static bool ShouldWalkChildren(const MetalTrace::Node &node)
   if(node.path.beginsWith("/resources/"))
   {
     // Resource categories are needed to enumerate the catalog. Descendants such as library
-    // sources are outside the current read-only resource/action surface.
-    return node.path.find('/', 11) < 0;
+    // entry points and source files are also retained so shader inspection remains standalone.
+    if(node.path.find('/', 11) < 0)
+      return true;
+    return node.kind == MetalTrace::NodeKind::Library &&
+           node.path.find('/', node.path.find('/', 11) + 1) < 0;
   }
 
   if(!node.path.beginsWith("/commands/"))
@@ -976,7 +1098,7 @@ public:
       return result;
 
     NormaliseNodeInfos(index);
-    NormaliseAPIVertexBufferOffsets(index);
+    NormaliseAPIDrawState(index);
 
     // Static browsing remains valid when gpudebug cannot replay the trace on this device. Probe
     // replay readiness only after the command/resource trees have been captured, and downgrade
@@ -995,6 +1117,7 @@ public:
     {
       NormaliseArgumentBufferBindings(index);
     }
+    NormaliseShaderMetadata(index, m_ReplayerReady);
 
     for(const MetalTrace::Node &node : index.nodes)
     {
@@ -1047,7 +1170,100 @@ private:
     return &index.nodeInfos.back();
   }
 
-  void NormaliseAPIVertexBufferOffsets(MetalTrace::Index &index)
+  void SetNodeInfoProperty(MetalTrace::Index &index, const rdcstr &path, const rdcstr &key,
+                           const rdcstr &value)
+  {
+    MetalTrace::NodeInfo *info = FindOrCreateNodeInfo(index, path);
+    for(size_t i = 0; i < info->keys.size() && i < info->values.size(); i++)
+    {
+      if(info->keys[i] == key)
+      {
+        info->values[i] = value;
+        return;
+      }
+    }
+    info->keys.push_back(key);
+    info->values.push_back(value);
+  }
+
+  void NormaliseShaderMetadata(MetalTrace::Index &index, bool fetchSources)
+  {
+    std::map<rdcstr, const MetalTrace::Node *> libraries;
+    std::map<rdcstr, const MetalTrace::Node *> shaders;
+    for(const MetalTrace::Node &node : index.nodes)
+    {
+      if(node.kind == MetalTrace::NodeKind::Library && !node.objectName.empty())
+        libraries[node.objectName] = &node;
+      else if(node.kind == MetalTrace::NodeKind::Shader)
+        shaders[node.name] = &node;
+    }
+
+    for(const auto &library : libraries)
+    {
+      const rdcstr prefix = library.second->path + "/";
+      for(const MetalTrace::Node &source : index.nodes)
+      {
+        if(source.kind != MetalTrace::NodeKind::Binding || !source.canFetch ||
+           !source.path.beginsWith(prefix))
+          continue;
+        SetNodeInfoProperty(index, library.second->path, "sourceFilename", source.name);
+        if(fetchSources)
+        {
+          bytebuf sourceBytes;
+          if(FetchLocked(source.stableId, source.path, sourceBytes) == ResultCode::Succeeded &&
+             !sourceBytes.empty())
+            SetNodeInfoProperty(index, library.second->path, "source",
+                                rdcstr((const char *)sourceBytes.data(), sourceBytes.size()));
+        }
+        break;
+      }
+    }
+
+    for(const auto &shader : shaders)
+    {
+      MetalTrace::NodeInfo *shaderInfo = FindOrCreateNodeInfo(index, shader.second->path);
+      rdcstr libraryName;
+      for(size_t i = 0; i < shaderInfo->keys.size() && i < shaderInfo->values.size(); i++)
+      {
+        if(shaderInfo->keys[i] != "library")
+          continue;
+        rdcarray<rdcstr> objects = ParseObjectNames(shaderInfo->values[i]);
+        if(!objects.empty())
+          libraryName = objects[0];
+      }
+      auto library = libraries.find(libraryName);
+      if(library != libraries.end())
+        SetNodeInfoProperty(index, shader.second->path, "libraryStableId",
+                            ToStr(library->second->stableId));
+      SetNodeInfoProperty(index, shader.second->path, "entryPoint", shader.second->name);
+    }
+
+    for(const MetalTrace::Node &pipeline : index.nodes)
+    {
+      if(pipeline.kind != MetalTrace::NodeKind::RenderPipeline)
+        continue;
+      MetalTrace::NodeInfo *pipelineInfo = FindOrCreateNodeInfo(index, pipeline.path);
+      for(const char *stage : {"vertex", "fragment"})
+      {
+        rdcstr entryDescription;
+        for(size_t i = 0; i < pipelineInfo->keys.size() && i < pipelineInfo->values.size(); i++)
+          if(pipelineInfo->keys[i] == stage)
+            entryDescription = pipelineInfo->values[i];
+        if(entryDescription.empty())
+          continue;
+        size_t entryEnd = 0;
+        while(entryEnd < entryDescription.size() && entryDescription[entryEnd] != ' ' &&
+              entryDescription[entryEnd] != '(')
+          entryEnd++;
+        auto shader = shaders.find(entryDescription.substr(0, entryEnd));
+        if(shader != shaders.end())
+          SetNodeInfoProperty(index, pipeline.path, rdcstr(stage) + "Function",
+                              ToStr(shader->second->stableId));
+      }
+    }
+  }
+
+  void NormaliseAPIDrawState(MetalTrace::Index &index)
   {
     if(m_APICallByPath.empty())
       return;
@@ -1097,11 +1313,45 @@ private:
       }
     }
 
+    rdcarray<rdcstr> blendFactorAtCall;
+    blendFactorAtCall.resize(summaries.size());
+    rdcstr currentBlendFactor = "0,0,0,0";
+    for(size_t apiCall = 0; apiCall < summaries.size(); apiCall++)
+    {
+      if(summaries[apiCall].contains("renderCommandEncoderWithDescriptor"))
+        currentBlendFactor = "0,0,0,0";
+      double blendFactor[4] = {};
+      if(ParseBlendColorCall(summaries[apiCall], blendFactor))
+        currentBlendFactor =
+            StringFormat::Fmt("%.17g,%.17g,%.17g,%.17g", blendFactor[0], blendFactor[1],
+                              blendFactor[2], blendFactor[3]);
+      blendFactorAtCall[apiCall] = currentBlendFactor;
+    }
+
     for(const auto &linked : m_APICallByPath)
     {
       if(linked.second == 0 || linked.second > summaries.size())
         continue;
+
+      MetalTrace::NodeInfo *info = FindOrCreateNodeInfo(index, linked.first);
+      if(linked.second < summaries.size() && !summaries[linked.second].empty())
+      {
+        info->keys.push_back("drawAPICall");
+        info->values.push_back(summaries[linked.second]);
+        if(summaries[linked.second].contains("drawIndexedPrimitives:"))
+        {
+          info->keys.push_back("indexBufferSourceCall");
+          info->values.push_back(summaries[linked.second]);
+        }
+      }
+      if(linked.second < blendFactorAtCall.size())
+      {
+        info->keys.push_back("blendFactor");
+        info->values.push_back(blendFactorAtCall[linked.second]);
+      }
+
       const rdcstr vertexPrefix = linked.first + "/vertex/";
+      std::map<uint32_t, rdcstr> wantedBindings;
       for(const MetalTrace::Node &binding : index.nodes)
       {
         if(!binding.path.beginsWith(vertexPrefix))
@@ -1111,25 +1361,57 @@ private:
         if(relative.contains("/") || sscanf(binding.name.c_str(), "buf[%u]", &wantedSlot) != 1 ||
            binding.objectName.empty())
           continue;
+        wantedBindings[wantedSlot] = binding.objectName;
+        info->keys.push_back(StringFormat::Fmt("vertexBufferSize[%u]", wantedSlot));
+        info->values.push_back(ToStr(binding.byteSize));
+      }
 
-        for(uint32_t apiCall = linked.second; apiCall > 0; apiCall--)
-        {
-          const rdcstr &summary = summaries[apiCall - 1];
-          if(summary.contains("renderCommandEncoderWithDescriptor"))
-            break;
-
-          rdcstr objectName;
-          uint64_t offset = 0;
-          uint32_t slot = 0;
-          if(!ParseVertexBufferSetCall(summary, objectName, offset, slot) || slot != wantedSlot)
-            continue;
-          if(objectName != binding.objectName)
-            break;
-
-          MetalTrace::NodeInfo *info = FindOrCreateNodeInfo(index, linked.first);
-          info->keys.push_back(StringFormat::Fmt("vertexBufferOffset[%u]", wantedSlot));
-          info->values.push_back(ToStr(offset));
+      std::set<uint32_t> resolvedBindings;
+      for(uint32_t apiCall = linked.second;
+          apiCall > 0 && resolvedBindings.size() < wantedBindings.size(); apiCall--)
+      {
+        const rdcstr &summary = summaries[apiCall - 1];
+        if(summary.contains("renderCommandEncoderWithDescriptor"))
           break;
+
+        VertexBufferCall call;
+        if(!ParseVertexBufferCall(summary, call))
+        {
+          uint32_t unresolvedSlot = 0;
+          if(ParseUnresolvedVertexBuffersCall(summary, unresolvedSlot) &&
+             wantedBindings.find(unresolvedSlot) != wantedBindings.end() &&
+             resolvedBindings.find(unresolvedSlot) == resolvedBindings.end())
+          {
+            info->keys.push_back(
+                StringFormat::Fmt("vertexBufferSourceCall[%u]", unresolvedSlot));
+            info->values.push_back(summary);
+            info->keys.push_back(
+                StringFormat::Fmt("vertexBufferOffsetUnavailable[%u]", unresolvedSlot));
+            info->values.push_back(
+                "gpudebug did not expose the ranged binding's offsets array");
+            resolvedBindings.insert(unresolvedSlot);
+          }
+          continue;
+        }
+        for(size_t entry = 0; entry < call.slots.size(); entry++)
+        {
+          const uint32_t slot = call.slots[entry];
+          auto wanted = wantedBindings.find(slot);
+          if(wanted == wantedBindings.end() || resolvedBindings.find(slot) != resolvedBindings.end())
+            continue;
+          const rdcstr objectName =
+              entry < call.objectNames.size() ? call.objectNames[entry] : rdcstr();
+          if(!objectName.empty() && objectName != wanted->second)
+          {
+            info->keys.push_back(StringFormat::Fmt("vertexBufferObjectMismatch[%u]", slot));
+            info->values.push_back(StringFormat::Fmt("draw binding @%s, API call @%s",
+                                                     wanted->second.c_str(), objectName.c_str()));
+          }
+          info->keys.push_back(StringFormat::Fmt("vertexBufferOffset[%u]", slot));
+          info->values.push_back(ToStr(call.offsets[entry]));
+          info->keys.push_back(StringFormat::Fmt("vertexBufferSourceCall[%u]", slot));
+          info->values.push_back(summary);
+          resolvedBindings.insert(slot);
         }
       }
     }
@@ -1183,6 +1465,18 @@ private:
               !node.objectName.empty())
       {
         command = "info @" + node.objectName + " --all";
+      }
+      else if((node.kind == MetalTrace::NodeKind::Library ||
+               node.kind == MetalTrace::NodeKind::Shader) &&
+              node.canInfo)
+      {
+        command = "info " + node.path + " --all";
+      }
+      else if(node.kind == MetalTrace::NodeKind::Binding && node.canInfo &&
+              node.path.beginsWith("/commands/") &&
+              (node.name == "depth" || node.name == "stencil" || node.name.beginsWith("color")))
+      {
+        command = "info " + node.path + " --all";
       }
       else
       {
@@ -1740,8 +2034,21 @@ private:
         node.objectName = FindObjectName(node.values);
         node.canGo &= !ReportsNoChildren(node.values);
         node.kind = ClassifyNode(node.path, node.name);
-        if(node.path.beginsWith("/resources/") && node.path.find('/', 11) >= 0)
-          node.objectName = node.name;
+        if(node.path.beginsWith("/resources/"))
+        {
+          const int32_t categorySlash = node.path.find('/', 11);
+          const int32_t descendantSlash =
+              categorySlash >= 0 ? node.path.find('/', categorySlash + 1) : -1;
+          if(categorySlash >= 0 && descendantSlash < 0)
+          {
+            node.objectName = node.name;
+          }
+          else if(descendantSlash >= 0 && node.path.beginsWith("/resources/libraries/"))
+          {
+            node.kind = node.canFetch ? MetalTrace::NodeKind::Binding : MetalTrace::NodeKind::Shader;
+            node.objectName = node.canFetch ? rdcstr() : node.name;
+          }
+        }
         node.byteSize = FindByteSize(node.values);
 
         // A resource object can be reused and overwritten across many draws. gpudebug's binding
@@ -1801,6 +2108,41 @@ AppleTraceSession *CreateGPUDebugAppleTraceSession(const rdcstr &tracePath,
 
 namespace
 {
+TEST_CASE("Apple GPU Trace parses every vertex-buffer setter", "[metal][apple-trace]")
+{
+  VertexBufferCall call;
+  REQUIRE(ParseVertexBufferCall(
+      "[MTLRenderCommandEncoder setVertexBuffer:@buf17 offset:176 atIndex:12]", call));
+  CHECK((uint32_t)call.kind == (uint32_t)VertexBufferCallKind::SetBuffer);
+  CHECK(call.slots == rdcarray<uint32_t>({12}));
+  CHECK(call.offsets == rdcarray<uint64_t>({176}));
+  CHECK(call.objectNames == rdcarray<rdcstr>({"buf17"}));
+
+  call = {};
+  REQUIRE(ParseVertexBufferCall(
+      "[MTLRenderCommandEncoder setVertexBufferOffset:264 atIndex:12]", call));
+  CHECK((uint32_t)call.kind == (uint32_t)VertexBufferCallKind::SetOffset);
+  CHECK(call.slots == rdcarray<uint32_t>({12}));
+  CHECK(call.offsets == rdcarray<uint64_t>({264}));
+  CHECK(call.objectNames == rdcarray<rdcstr>({rdcstr()}));
+
+  call = {};
+  REQUIRE(ParseVertexBufferCall(
+      "[MTLRenderCommandEncoder setVertexBuffers:(@buf17, @buf4) offsets:(352, 24) "
+      "withRange:{12, 2}]",
+      call));
+  CHECK((uint32_t)call.kind == (uint32_t)VertexBufferCallKind::SetBuffers);
+  CHECK(call.slots == rdcarray<uint32_t>({12, 13}));
+  CHECK(call.offsets == rdcarray<uint64_t>({352, 24}));
+  CHECK(call.objectNames == rdcarray<rdcstr>({"buf17", "buf4"}));
+
+  uint32_t unresolvedSlot = 0;
+  REQUIRE(ParseUnresolvedVertexBuffersCall(
+      "[MTLRenderCommandEncoder setVertexBuffers:(unresolved) offsets:4386679968 withRange:12]",
+      unresolvedSlot));
+  CHECK(unresolvedSlot == 12);
+}
+
 struct FakeRunnerState
 {
   uint32_t fetchCalls = 0;
@@ -2085,15 +2427,6 @@ TEST_CASE("Apple GPU Trace splits batched gpudebug JSON", "[metal][apple-trace]"
   CHECK(objects[1] == "{\"count\": 3}");
   CHECK(SplitJSONObjectStream("{\"broken\": true").empty());
 
-  rdcstr objectName;
-  uint64_t offset = 0;
-  uint32_t slot = 0;
-  REQUIRE(ParseVertexBufferSetCall(
-      "[MTLRenderCommandEncoder setVertexBuffer:@buf9 offset:8176 atIndex:12]", objectName, offset,
-      slot));
-  CHECK(objectName == "buf9");
-  CHECK(offset == 8176);
-  CHECK(slot == 12);
 }
 
 TEST_CASE("Apple GPU Trace resolves opaque argument-buffer texture IDs without choosing views",

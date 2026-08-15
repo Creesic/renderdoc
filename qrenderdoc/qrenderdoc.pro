@@ -160,9 +160,20 @@ win32 {
 		QMAKE_BUNDLE_DATA += librd
 
 		INFO_PLIST_PATH = $$shell_quote($$DESTDIR/$${TARGET}.app/Contents/Info.plist)
-		QTPLUGINS_PATH = $$shell_quote($$DESTDIR/$${TARGET}.app/Contents/qtplugins)
-		QMAKE_POST_LINK += ln -sf $$[QT_INSTALL_PLUGINS] $${QTPLUGINS_PATH} ;
-		QMAKE_POST_LINK += sh $$_PRO_FILE_PWD_/../util/set_plist_version.sh $${RENDERDOC_VERSION}.0 $${INFO_PLIST_PATH}
+		QMAKE_POST_LINK += sh $$_PRO_FILE_PWD_/../util/set_plist_version.sh $${RENDERDOC_VERSION}.0 $${INFO_PLIST_PATH} ;
+
+		# Keep the development app bundle internally consistent after every relink. Once
+		# macdeployqt has copied Qt into the bundle, linking qrenderdoc again restores
+		# Homebrew install names in the executable. Loading that executable alongside
+		# the already-bundled Cocoa plugin then loads two QtCore copies and aborts before
+		# QApplication starts. Deploy and ad-hoc sign as part of the link instead of
+		# pointing the app at an external plugin directory.
+		APP_BUNDLE_PATH = $$shell_quote($$DESTDIR/$${TARGET}.app)
+		STALE_QTPLUGINS_PATH = $$shell_quote($$DESTDIR/$${TARGET}.app/Contents/qtplugins)
+		STALE_NESTED_QTPLUGINS_PATH = $$shell_quote($$DESTDIR/$${TARGET}.app/Contents/PlugIns/plugins)
+		MACDEPLOYQT = $$shell_quote($$[QT_INSTALL_BINS]/macdeployqt)
+		QMAKE_POST_LINK += rm -f $${STALE_QTPLUGINS_PATH} $${STALE_NESTED_QTPLUGINS_PATH} ;
+		QMAKE_POST_LINK += $${MACDEPLOYQT} $${APP_BUNDLE_PATH} -no-strip -codesign=- ;
 	} else {
 		QT += x11extras
 		DEFINES += RENDERDOC_PLATFORM_POSIX RENDERDOC_PLATFORM_LINUX RENDERDOC_WINDOWING_XLIB RENDERDOC_WINDOWING_XCB

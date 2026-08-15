@@ -175,6 +175,68 @@ void WrappedMTLRenderCommandEncoder::setVertexBuffer(WrappedMTLBuffer *buffer, N
 }
 
 template <typename SerialiserType>
+bool WrappedMTLRenderCommandEncoder::Serialise_setVertexBufferOffset(SerialiserType &ser,
+                                                                     NS::UInteger offset,
+                                                                     NS::UInteger index)
+{
+  SERIALISE_ELEMENT_LOCAL(RenderCommandEncoder, this);
+  SERIALISE_ELEMENT(offset);
+  SERIALISE_ELEMENT(index).Important();
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+void WrappedMTLRenderCommandEncoder::setVertexBufferOffset(NS::UInteger offset,
+                                                           NS::UInteger index)
+{
+  SERIALISE_TIME_CALL(Unwrap(this)->setVertexBufferOffset(offset, index));
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLRenderCommandEncoder_setVertexBufferOffset);
+    Serialise_setVertexBufferOffset(ser, offset, index);
+    GetRecord(m_CommandBuffer)->AddChunk(scope.Get());
+  }
+}
+
+template <typename SerialiserType>
+bool WrappedMTLRenderCommandEncoder::Serialise_setVertexBuffers(
+    SerialiserType &ser, rdcarray<WrappedMTLBuffer *> &buffers, rdcarray<NS::UInteger> &offsets,
+    NS::UInteger firstIndex)
+{
+  SERIALISE_ELEMENT_LOCAL(RenderCommandEncoder, this);
+  SERIALISE_ELEMENT(buffers).Important();
+  SERIALISE_ELEMENT(offsets);
+  SERIALISE_ELEMENT(firstIndex).Important();
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+void WrappedMTLRenderCommandEncoder::setVertexBuffers(rdcarray<WrappedMTLBuffer *> &buffers,
+                                                      rdcarray<NS::UInteger> &offsets,
+                                                      NS::UInteger firstIndex)
+{
+  const size_t count = RDCMIN(buffers.size(), offsets.size());
+  rdcarray<MTL::Buffer *> unwrapped;
+  unwrapped.resize(count);
+  for(size_t i = 0; i < count; i++)
+    unwrapped[i] = Unwrap(buffers[i]);
+  SERIALISE_TIME_CALL(Unwrap(this)->setVertexBuffers(unwrapped.data(), offsets.data(),
+                                                     NS::Range::Make(firstIndex, count)));
+  if(IsCaptureMode(m_State))
+  {
+    buffers.resize(count);
+    offsets.resize(count);
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLRenderCommandEncoder_setVertexBuffers);
+    Serialise_setVertexBuffers(ser, buffers, offsets, firstIndex);
+    GetRecord(m_CommandBuffer)->AddChunk(scope.Get());
+    for(WrappedMTLBuffer *buffer : buffers)
+      GetRecord(m_CommandBuffer)->MarkResourceFrameReferenced(GetResID(buffer), eFrameRef_Read);
+  }
+}
+
+template <typename SerialiserType>
 bool WrappedMTLRenderCommandEncoder::Serialise_setVertexBytes(SerialiserType &ser, bytebuf &bytes,
                                                                NS::UInteger index)
 {
@@ -409,6 +471,55 @@ void WrappedMTLRenderCommandEncoder::setViewport(MTL::Viewport &viewport)
   }
 }
 
+template <typename SerialiserType>
+bool WrappedMTLRenderCommandEncoder::Serialise_setBlendColor(SerialiserType &ser, float red,
+                                                              float green, float blue, float alpha)
+{
+  SERIALISE_ELEMENT_LOCAL(RenderCommandEncoder, this);
+  SERIALISE_ELEMENT(red).Important();
+  SERIALISE_ELEMENT(green).Important();
+  SERIALISE_ELEMENT(blue).Important();
+  SERIALISE_ELEMENT(alpha).Important();
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+void WrappedMTLRenderCommandEncoder::setBlendColor(float red, float green, float blue, float alpha)
+{
+  SERIALISE_TIME_CALL(Unwrap(this)->setBlendColor(red, green, blue, alpha));
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLRenderCommandEncoder_setBlendColor);
+    Serialise_setBlendColor(ser, red, green, blue, alpha);
+    GetRecord(m_CommandBuffer)->AddChunk(scope.Get());
+  }
+}
+
+template <typename SerialiserType>
+bool WrappedMTLRenderCommandEncoder::Serialise_setColorStoreAction(
+    SerialiserType &ser, MTL::StoreAction storeAction, NS::UInteger colorAttachmentIndex)
+{
+  SERIALISE_ELEMENT_LOCAL(RenderCommandEncoder, this);
+  SERIALISE_ELEMENT(storeAction).Important();
+  SERIALISE_ELEMENT(colorAttachmentIndex).Important();
+  SERIALISE_CHECK_READ_ERRORS();
+  return true;
+}
+
+void WrappedMTLRenderCommandEncoder::setColorStoreAction(MTL::StoreAction storeAction,
+                                                         NS::UInteger colorAttachmentIndex)
+{
+  SERIALISE_TIME_CALL(Unwrap(this)->setColorStoreAction(storeAction, colorAttachmentIndex));
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(MetalChunk::MTLRenderCommandEncoder_setColorStoreAction);
+    Serialise_setColorStoreAction(ser, storeAction, colorAttachmentIndex);
+    GetRecord(m_CommandBuffer)->AddChunk(scope.Get());
+  }
+}
+
 #define IMPLEMENT_RENDER_STATE_METHOD(method, chunk, type, value, fieldName)             \
   template <typename SerialiserType>                                                     \
   bool WrappedMTLRenderCommandEncoder::CONCAT(Serialise_, method)(SerialiserType &ser,   \
@@ -444,6 +555,12 @@ IMPLEMENT_RENDER_STATE_METHOD(setTriangleFillMode,
 IMPLEMENT_RENDER_STATE_METHOD(setStencilReferenceValue,
                               MetalChunk::MTLRenderCommandEncoder_setStencilReferenceValue,
                               uint32_t, referenceValue, "referenceValue"_lit)
+IMPLEMENT_RENDER_STATE_METHOD(setDepthStoreAction,
+                              MetalChunk::MTLRenderCommandEncoder_setDepthStoreAction,
+                              MTL::StoreAction, storeAction, "storeAction"_lit)
+IMPLEMENT_RENDER_STATE_METHOD(setStencilStoreAction,
+                              MetalChunk::MTLRenderCommandEncoder_setStencilStoreAction,
+                              MTL::StoreAction, storeAction, "storeAction"_lit)
 
 #undef IMPLEMENT_RENDER_STATE_METHOD
 
@@ -824,6 +941,11 @@ INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setRenderP
                                 WrappedMTLRenderPipelineState *pipelineState);
 INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setVertexBuffer,
                                 WrappedMTLBuffer *buffer, NS::UInteger offset, NS::UInteger index);
+INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setVertexBufferOffset,
+                                NS::UInteger offset, NS::UInteger index);
+INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setVertexBuffers,
+                                rdcarray<WrappedMTLBuffer *> &buffers,
+                                rdcarray<NS::UInteger> &offsets, NS::UInteger firstIndex);
 template bool WrappedMTLRenderCommandEncoder::Serialise_setVertexBytes(ReadSerialiser &ser,
                                                                        bytebuf &bytes,
                                                                        NS::UInteger index);
@@ -862,8 +984,17 @@ INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setScissor
                                 rdcarray<MTL::ScissorRect> &rects);
 INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setTriangleFillMode,
                                 MTL::TriangleFillMode fillMode);
+INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setBlendColor, float red,
+                                float green, float blue, float alpha);
 INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setStencilReferenceValue,
                                 uint32_t referenceValue);
+INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setColorStoreAction,
+                                MTL::StoreAction storeAction,
+                                NS::UInteger colorAttachmentIndex);
+INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setDepthStoreAction,
+                                MTL::StoreAction storeAction);
+INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, setStencilStoreAction,
+                                MTL::StoreAction storeAction);
 INSTANTIATE_FUNCTION_SERIALISED(WrappedMTLRenderCommandEncoder, void, drawPrimitives,
                                 MTL::PrimitiveType primitiveType, NS::UInteger vertexStart,
                                 NS::UInteger vertexCount, NS::UInteger instanceCount,

@@ -126,16 +126,23 @@
 - (void)setVertexBufferOffset:(NSUInteger)offset
                       atIndex:(NSUInteger)index API_AVAILABLE(macos(10.11), ios(8.3))
 {
-  METAL_NOT_HOOKED();
-  return [self.real setVertexBufferOffset:offset atIndex:index];
+  GetWrapped(self)->setVertexBufferOffset(offset, index);
 }
 
 - (void)setVertexBuffers:(const id<MTLBuffer> __nullable[__nonnull])buffers
                  offsets:(const NSUInteger[__nonnull])offsets
                withRange:(NSRange)range
 {
-  METAL_NOT_HOOKED();
-  return [self.real setVertexBuffers:buffers offsets:offsets withRange:range];
+  rdcarray<WrappedMTLBuffer *> wrappedBuffers;
+  rdcarray<NS::UInteger> wrappedOffsets;
+  wrappedBuffers.resize(range.length);
+  wrappedOffsets.resize(range.length);
+  for(NSUInteger i = 0; i < range.length; i++)
+  {
+    wrappedBuffers[i] = GetWrapped(buffers[i]);
+    wrappedOffsets[i] = offsets[i];
+  }
+  GetWrapped(self)->setVertexBuffers(wrappedBuffers, wrappedOffsets, range.location);
 }
 
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_14_0
@@ -456,8 +463,7 @@
 
 - (void)setBlendColorRed:(float)red green:(float)green blue:(float)blue alpha:(float)alpha
 {
-  METAL_NOT_HOOKED();
-  return [self.real setBlendColorRed:red green:green blue:blue alpha:alpha];
+  GetWrapped(self)->setBlendColor(red, green, blue, alpha);
 }
 
 - (void)setDepthStencilState:(nullable id<MTLDepthStencilState>)depthStencilState
@@ -488,20 +494,17 @@
 - (void)setColorStoreAction:(MTLStoreAction)storeAction
                     atIndex:(NSUInteger)colorAttachmentIndex API_AVAILABLE(macos(10.12), ios(10.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real setColorStoreAction:storeAction atIndex:colorAttachmentIndex];
+  GetWrapped(self)->setColorStoreAction((MTL::StoreAction)storeAction, colorAttachmentIndex);
 }
 
 - (void)setDepthStoreAction:(MTLStoreAction)storeAction API_AVAILABLE(macos(10.12), ios(10.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real setDepthStoreAction:storeAction];
+  GetWrapped(self)->setDepthStoreAction((MTL::StoreAction)storeAction);
 }
 
 - (void)setStencilStoreAction:(MTLStoreAction)storeAction API_AVAILABLE(macos(10.12), ios(10.0))
 {
-  METAL_NOT_HOOKED();
-  return [self.real setStencilStoreAction:storeAction];
+  GetWrapped(self)->setStencilStoreAction((MTL::StoreAction)storeAction);
 }
 
 - (void)setColorStoreActionOptions:(MTLStoreActionOptions)storeActionOptions

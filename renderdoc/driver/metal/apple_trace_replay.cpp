@@ -355,6 +355,460 @@ static void ParseVertexLayout(const rdcstr &description, MetalPipe::VertexInput 
   }
 }
 
+static BlendMultiplier ParseBlendMultiplier(const rdcstr &name)
+{
+  if(name == "Zero")
+    return BlendMultiplier::Zero;
+  if(name == "One")
+    return BlendMultiplier::One;
+  if(name == "SourceColor")
+    return BlendMultiplier::SrcCol;
+  if(name == "OneMinusSourceColor")
+    return BlendMultiplier::InvSrcCol;
+  if(name == "DestinationColor")
+    return BlendMultiplier::DstCol;
+  if(name == "OneMinusDestinationColor")
+    return BlendMultiplier::InvDstCol;
+  if(name == "SourceAlpha")
+    return BlendMultiplier::SrcAlpha;
+  if(name == "OneMinusSourceAlpha")
+    return BlendMultiplier::InvSrcAlpha;
+  if(name == "DestinationAlpha")
+    return BlendMultiplier::DstAlpha;
+  if(name == "OneMinusDestinationAlpha")
+    return BlendMultiplier::InvDstAlpha;
+  if(name == "BlendColor")
+    return BlendMultiplier::FactorRGB;
+  if(name == "OneMinusBlendColor")
+    return BlendMultiplier::InvFactorRGB;
+  if(name == "BlendAlpha")
+    return BlendMultiplier::FactorAlpha;
+  if(name == "OneMinusBlendAlpha")
+    return BlendMultiplier::InvFactorAlpha;
+  if(name == "SourceAlphaSaturated")
+    return BlendMultiplier::SrcAlphaSat;
+  if(name == "Source1Color")
+    return BlendMultiplier::Src1Col;
+  if(name == "OneMinusSource1Color")
+    return BlendMultiplier::InvSrc1Col;
+  if(name == "Source1Alpha")
+    return BlendMultiplier::Src1Alpha;
+  if(name == "OneMinusSource1Alpha")
+    return BlendMultiplier::InvSrc1Alpha;
+  return BlendMultiplier::One;
+}
+
+static BlendOperation ParseBlendOperation(const rdcstr &name)
+{
+  if(name == "Subtract")
+    return BlendOperation::Subtract;
+  if(name == "ReverseSubtract")
+    return BlendOperation::ReversedSubtract;
+  if(name == "Min")
+    return BlendOperation::Minimum;
+  if(name == "Max")
+    return BlendOperation::Maximum;
+  return BlendOperation::Add;
+}
+
+static byte ParseColorWriteMask(const rdcstr &name)
+{
+  byte mask = 0;
+  if(name.contains("R"))
+    mask |= 0x1;
+  if(name.contains("G"))
+    mask |= 0x2;
+  if(name.contains("B"))
+    mask |= 0x4;
+  if(name.contains("A"))
+    mask |= 0x8;
+  return mask;
+}
+
+static void ParseColorBlendAttachments(const rdcstr &description,
+                                       MetalPipe::ColorBlendState &state)
+{
+  rdcarray<rdcstr> lines;
+  split(description, lines, '\n');
+  ColorBlend *target = NULL;
+  for(rdcstr line : lines)
+  {
+    line = line.trimmed();
+    unsigned int attachment = 0;
+    if(sscanf(line.c_str(), "color%u:", &attachment) == 1)
+    {
+      if(state.blends.size() <= attachment)
+        state.blends.resize(attachment + 1);
+      target = &state.blends[attachment];
+      continue;
+    }
+    if(target == NULL)
+      continue;
+
+    const int32_t colon = line.find(':');
+    if(colon < 0)
+      continue;
+    const rdcstr key = line.substr(0, colon).trimmed();
+    const rdcstr value = line.substr(colon + 1).trimmed();
+    if(key == "blendEnabled")
+      target->enabled = value == "yes" || value == "true" || value == "1";
+    else if(key == "srcRGB")
+      target->colorBlend.source = ParseBlendMultiplier(value);
+    else if(key == "dstRGB")
+      target->colorBlend.destination = ParseBlendMultiplier(value);
+    else if(key == "opRGB")
+      target->colorBlend.operation = ParseBlendOperation(value);
+    else if(key == "srcAlpha")
+      target->alphaBlend.source = ParseBlendMultiplier(value);
+    else if(key == "dstAlpha")
+      target->alphaBlend.destination = ParseBlendMultiplier(value);
+    else if(key == "opAlpha")
+      target->alphaBlend.operation = ParseBlendOperation(value);
+    else if(key == "writeMask")
+      target->writeMask = ParseColorWriteMask(value);
+  }
+}
+
+static bool ParseFloatVector(const rdcstr &text, float *values, size_t count)
+{
+  size_t offset = 0;
+  for(size_t i = 0; i < count; i++)
+  {
+    while(offset < text.size() && text[offset] != '-' && text[offset] != '+' &&
+          text[offset] != '.' && (text[offset] < '0' || text[offset] > '9'))
+      offset++;
+    if(offset == text.size())
+      return false;
+    char *end = NULL;
+    values[i] = strtof(text.c_str() + offset, &end);
+    if(end == text.c_str() + offset)
+      return false;
+    offset = size_t(end - text.c_str());
+  }
+  return true;
+}
+
+static MetalPipe::LoadAction ParseLoadAction(const rdcstr &name)
+{
+  if(name == "Load")
+    return MetalPipe::LoadAction::Load;
+  if(name == "Clear")
+    return MetalPipe::LoadAction::Clear;
+  return MetalPipe::LoadAction::DontCare;
+}
+
+static MetalPipe::StoreAction ParseStoreAction(const rdcstr &name)
+{
+  if(name == "Store")
+    return MetalPipe::StoreAction::Store;
+  if(name == "MultisampleResolve")
+    return MetalPipe::StoreAction::MultisampleResolve;
+  if(name == "StoreAndMultisampleResolve")
+    return MetalPipe::StoreAction::StoreAndMultisampleResolve;
+  if(name == "DontCare")
+    return MetalPipe::StoreAction::DontCare;
+  return MetalPipe::StoreAction::Unknown;
+}
+
+static void PopulateAttachmentOperations(const MetalTrace::NodeInfo *info,
+                                         MetalPipe::Attachment &attachment, bool reconstructed)
+{
+  attachment.loadAction = ParseLoadAction(InfoProperty(info, "loadAction"));
+  attachment.storeAction = ParseStoreAction(InfoProperty(info, "storeAction"));
+  uint64_t value = 0;
+  if(ParseUInt64(InfoProperty(info, "level"), value) ||
+     ParseUInt64(InfoProperty(info, "mipLevel"), value))
+    attachment.mipLevel = (uint32_t)RDCMIN(value, uint64_t(UINT32_MAX));
+  if(ParseUInt64(InfoProperty(info, "slice"), value))
+    attachment.slice = (uint32_t)RDCMIN(value, uint64_t(UINT32_MAX));
+  if(ParseUInt64(InfoProperty(info, "depthPlane"), value))
+    attachment.depthPlane = (uint32_t)RDCMIN(value, uint64_t(UINT32_MAX));
+  float clear[4] = {};
+  if(ParseFloatVector(InfoProperty(info, "clearColor"), clear, 4))
+    attachment.clearColor = {clear[0], clear[1], clear[2], clear[3]};
+  if(ParseFloatVector(InfoProperty(info, "clearDepth"), clear, 1))
+    attachment.clearDepth = clear[0];
+  if(ParseUInt64(InfoProperty(info, "clearStencil"), value))
+    attachment.clearStencil = (uint32_t)RDCMIN(value, uint64_t(UINT32_MAX));
+  attachment.reconstructed = reconstructed;
+}
+
+static ShaderStage ParseShaderStage(const rdcstr &name)
+{
+  if(name == "vertex")
+    return ShaderStage::Vertex;
+  if(name == "fragment")
+    return ShaderStage::Fragment;
+  if(name == "compute" || name == "kernel")
+    return ShaderStage::Compute;
+  return ShaderStage::Count;
+}
+
+static rdcstr IdentifierBefore(const rdcstr &source, size_t position)
+{
+  while(position > 0 && isspace((unsigned char)source[position - 1]))
+    position--;
+  size_t end = position;
+  while(position > 0 &&
+        ((source[position - 1] >= 'a' && source[position - 1] <= 'z') ||
+         (source[position - 1] >= 'A' && source[position - 1] <= 'Z') ||
+         (source[position - 1] >= '0' && source[position - 1] <= '9') ||
+         source[position - 1] == '_'))
+    position--;
+  return source.substr(position, end - position);
+}
+
+static rdcstr PreviousIdentifier(const rdcstr &source, size_t &position)
+{
+  while(position > 0 &&
+        !isalnum((unsigned char)source[position - 1]) && source[position - 1] != '_')
+    position--;
+  const size_t end = position;
+  while(position > 0 &&
+        (isalnum((unsigned char)source[position - 1]) || source[position - 1] == '_'))
+    position--;
+  return source.substr(position, end - position);
+}
+
+static rdcstr StructDeclaration(const rdcstr &source, const rdcstr &typeName)
+{
+  int32_t found = source.find(typeName);
+  while(found >= 0)
+  {
+    const size_t afterName = (size_t)found + typeName.size();
+    const bool identifierBefore =
+        found > 0 && (isalnum((unsigned char)source[(size_t)found - 1]) ||
+                      source[(size_t)found - 1] == '_');
+    const bool identifierAfter =
+        afterName < source.size() &&
+        (isalnum((unsigned char)source[afterName]) || source[afterName] == '_');
+    size_t previousPosition = (size_t)found;
+    const rdcstr previous = PreviousIdentifier(source, previousPosition);
+    size_t openingBrace = afterName;
+    while(openingBrace < source.size() && isspace((unsigned char)source[openingBrace]))
+      openingBrace++;
+    if(!identifierBefore && !identifierAfter && previous == "struct" &&
+       openingBrace < source.size() && source[openingBrace] == '{')
+    {
+      uint32_t depth = 0;
+      for(size_t cursor = openingBrace; cursor < source.size(); cursor++)
+      {
+        if(source[cursor] == '{')
+          depth++;
+        else if(source[cursor] == '}' && --depth == 0)
+          return source.substr((size_t)found, cursor - (size_t)found + 1);
+      }
+      return {};
+    }
+    found = source.find(typeName, (int32_t)afterName);
+  }
+  return {};
+}
+
+static rdcstr DeclarationBefore(const rdcstr &source, size_t position)
+{
+  size_t begin = position;
+  while(begin > 0 && source[begin - 1] != '\n' && source[begin - 1] != ',' &&
+        source[begin - 1] != '(' && source[begin - 1] != ';' && source[begin - 1] != '{')
+    begin--;
+  return source.substr(begin, position - begin).trimmed();
+}
+
+static void AppendSignatureAnnotation(const rdcstr &source, const char *annotation,
+                                      rdcarray<SigParameter> &signature)
+{
+  const rdcstr marker = rdcstr("[[") + annotation + "(";
+  int32_t found = 0;
+  while((found = source.find(marker, found)) >= 0)
+  {
+    const size_t position = (size_t)found;
+    uint64_t index = 0;
+    const size_t number = position + marker.size();
+    size_t end = number;
+    while(end < source.size() && source[end] >= '0' && source[end] <= '9')
+      end++;
+    if(end > number && ParseUInt64(source.substr(number, end - number), index) && index <= UINT32_MAX)
+    {
+      SigParameter parameter;
+      parameter.varName = IdentifierBefore(source, position);
+      parameter.semanticName = annotation;
+      parameter.semanticIdxName = StringFormat::Fmt("%s%llu", annotation,
+                                                     (unsigned long long)index);
+      parameter.semanticIndex = (uint16_t)RDCMIN(index, uint64_t(UINT16_MAX));
+      parameter.regIndex = (uint32_t)index;
+      parameter.regChannelMask = 0xf;
+      parameter.channelUsedMask = 0xf;
+      parameter.compCount = 4;
+      signature.push_back(parameter);
+    }
+    found += (int32_t)marker.size();
+  }
+}
+
+static rdcstr EntryPointDeclaration(const rdcstr &source, const rdcstr &entryPoint)
+{
+  int32_t entry = source.find(entryPoint);
+  while(entry >= 0)
+  {
+    const size_t afterName = (size_t)entry + entryPoint.size();
+    const bool identifierBefore =
+        entry > 0 && (isalnum((unsigned char)source[(size_t)entry - 1]) ||
+                      source[(size_t)entry - 1] == '_');
+    const bool identifierAfter =
+        afterName < source.size() &&
+        (isalnum((unsigned char)source[afterName]) || source[afterName] == '_');
+    size_t openingParen = afterName;
+    while(openingParen < source.size() && isspace((unsigned char)source[openingParen]))
+      openingParen++;
+    if(!identifierBefore && !identifierAfter && openingParen < source.size() &&
+       source[openingParen] == '(')
+    {
+      size_t start = (size_t)entry;
+      while(start > 0 && source[start - 1] != '\n' && source[start - 1] != ';' &&
+            source[start - 1] != '}')
+        start--;
+      size_t cursor = openingParen;
+      uint32_t depth = 0;
+      while(cursor < source.size())
+      {
+        if(source[cursor] == '(')
+          depth++;
+        else if(source[cursor] == ')' && --depth == 0)
+          return source.substr(start, cursor - start + 1);
+        cursor++;
+      }
+      return {};
+    }
+    entry = source.find(entryPoint, (int32_t)afterName);
+  }
+  return {};
+}
+
+static void AppendMSLReflection(const rdcstr &source, ShaderReflection &reflection)
+{
+  const rdcstr declaration = EntryPointDeclaration(source, reflection.entryPoint);
+  const rdcstr &bindingSource = declaration.empty() ? source : declaration;
+  struct ResourceAnnotation
+  {
+    const char *name;
+    bool texture;
+    bool sampler;
+  };
+  const ResourceAnnotation annotations[] = {
+      {"buffer", false, false}, {"texture", true, false}, {"sampler", false, true}};
+  for(const ResourceAnnotation &annotation : annotations)
+  {
+    const rdcstr marker = rdcstr("[[") + annotation.name + "(";
+    int32_t found = 0;
+    while((found = bindingSource.find(marker, found)) >= 0)
+    {
+      const size_t position = (size_t)found;
+      const size_t number = position + marker.size();
+      size_t end = number;
+      while(end < bindingSource.size() && bindingSource[end] >= '0' && bindingSource[end] <= '9')
+        end++;
+      uint64_t index = 0;
+      if(end == number || !ParseUInt64(bindingSource.substr(number, end - number), index) ||
+         index > UINT32_MAX)
+      {
+        found += (int32_t)marker.size();
+        continue;
+      }
+      const rdcstr resourceDeclaration = DeclarationBefore(bindingSource, position);
+      const rdcstr name = IdentifierBefore(bindingSource, position);
+      if(annotation.sampler)
+      {
+        ShaderSampler sampler;
+        sampler.name = name;
+        sampler.fixedBindNumber = (uint32_t)index;
+        reflection.samplers.push_back(sampler);
+      }
+      else
+      {
+        const bool writable = resourceDeclaration.contains("access::write") ||
+                              resourceDeclaration.contains("access::read_write") ||
+                              resourceDeclaration.contains("device ");
+        ShaderResource resource;
+        resource.name = name;
+        resource.fixedBindNumber = (uint32_t)index;
+        resource.isTexture = annotation.texture;
+        resource.isReadOnly = !writable;
+        resource.textureType = annotation.texture ? TextureType::Texture2D : TextureType::Buffer;
+        resource.descriptorType = annotation.texture
+                                      ? (writable ? DescriptorType::ReadWriteImage
+                                                  : DescriptorType::Image)
+                                      : (writable ? DescriptorType::ReadWriteBuffer
+                                                  : DescriptorType::Buffer);
+        if(writable)
+          reflection.readWriteResources.push_back(resource);
+        else
+          reflection.readOnlyResources.push_back(resource);
+      }
+      found += (int32_t)marker.size();
+    }
+  }
+
+  if(reflection.stage == ShaderStage::Vertex)
+  {
+    AppendSignatureAnnotation(bindingSource, "attribute", reflection.inputSignature);
+    if(reflection.inputSignature.empty())
+    {
+      const int32_t stageIn = bindingSource.find("[[stage_in]]");
+      if(stageIn >= 0)
+      {
+        size_t position = (size_t)stageIn;
+        PreviousIdentifier(bindingSource, position);    // parameter name
+        const rdcstr stageInType = PreviousIdentifier(bindingSource, position);
+        AppendSignatureAnnotation(StructDeclaration(source, stageInType), "attribute",
+                                  reflection.inputSignature);
+      }
+    }
+  }
+  if(reflection.stage == ShaderStage::Fragment)
+  {
+    AppendSignatureAnnotation(bindingSource, "color", reflection.outputSignature);
+    const int32_t entry = bindingSource.find(reflection.entryPoint);
+    rdcstr returnType;
+    if(entry >= 0)
+    {
+      size_t position = (size_t)entry;
+      returnType = PreviousIdentifier(bindingSource, position);
+      AppendSignatureAnnotation(StructDeclaration(source, returnType), "color",
+                                reflection.outputSignature);
+    }
+    if(reflection.outputSignature.empty() && !returnType.empty() && returnType != "void")
+    {
+      SigParameter parameter;
+      parameter.varName = "return";
+      parameter.semanticName = "color";
+      parameter.semanticIdxName = "color0";
+      parameter.regChannelMask = 0xf;
+      parameter.channelUsedMask = 0xf;
+      parameter.compCount = 4;
+      reflection.outputSignature.push_back(parameter);
+    }
+  }
+
+  for(const char *annotation : {"id", "function_constant"})
+  {
+    const rdcstr marker = rdcstr("[[") + annotation + "(";
+    int32_t found = 0;
+    while((found = source.find(marker, found)) >= 0)
+    {
+      const size_t position = (size_t)found;
+      const size_t number = position + marker.size();
+      size_t end = number;
+      while(end < source.size() && source[end] >= '0' && source[end] <= '9')
+        end++;
+      if(end > number)
+        reflection.interfaces.push_back(StringFormat::Fmt(
+            "%s %s: %s", annotation, source.substr(number, end - number).c_str(),
+            DeclarationBefore(source, position).c_str()));
+      found += (int32_t)marker.size();
+    }
+  }
+}
+
 static ActionFlags ActionFlagsForNode(MetalTrace::NodeKind kind)
 {
   switch(kind)
@@ -608,6 +1062,26 @@ APIProperties AppleTraceReplayDriver::GetAPIProperties()
     hasFetchableTexture |= m_Index.nodes[textureNode.second].canFetch;
   const bool textureFetch = hasFetchableTexture && sourceAvailable &&
                             (native || m_Session != NULL) && m_TextureRenderer != NULL;
+  bool shaderSource = false;
+  for(const auto &shader : m_ShaderNodes)
+  {
+    const MetalTrace::Node &node = m_Index.nodes[shader.second];
+    const MetalTrace::NodeInfo *shaderInfo = FindNodeInfo(m_Index, node.path);
+    uint64_t libraryStableId = 0;
+    if(!ParseUInt64(InfoProperty(shaderInfo, "libraryStableId"), libraryStableId))
+      continue;
+    for(const MetalTrace::Node &library : m_Index.nodes)
+    {
+      if(library.kind == MetalTrace::NodeKind::Library && library.stableId == libraryStableId &&
+         !InfoProperty(FindNodeInfo(m_Index, library.path), "source").empty())
+      {
+        shaderSource = true;
+        break;
+      }
+    }
+    if(shaderSource)
+      break;
+  }
 
   rdcstr textureFetchReason;
   if(!textureFetch)
@@ -657,8 +1131,9 @@ APIProperties AppleTraceReplayDriver::GetAPIProperties()
        : !m_Index.bufferFetchUnavailableReason.empty()
            ? m_Index.bufferFetchUnavailableReason
            : rdcstr("The normalized trace does not contain fetchable buffer data")},
-      {ReplayFeature::ShaderSource, false,
-       "Apple GPU Trace shader normalization is not implemented"},
+      {ReplayFeature::ShaderSource, shaderSource,
+       shaderSource ? rdcstr()
+                    : rdcstr("This trace does not expose MSL source for its shader libraries")},
       {ReplayFeature::Profiling, false, "Profiling an imported Apple GPU Trace is not supported"},
       {ReplayFeature::PixelHistory, false, "Pixel history requires executable Metal replay"},
       {ReplayFeature::OverlayRendering, false, "Overlay rendering requires executable Metal replay"},
@@ -722,6 +1197,141 @@ rdcarray<DebugMessage> AppleTraceReplayDriver::GetDebugMessages()
   rdcarray<DebugMessage> ret;
   ret.swap(m_DebugMessages);
   return ret;
+}
+
+rdcarray<ShaderEntryPoint> AppleTraceReplayDriver::GetShaderEntryPoints(ResourceId shader)
+{
+  auto normalized = m_ShaderNodes.find(shader);
+  if(normalized == m_ShaderNodes.end())
+    return {};
+
+  const MetalTrace::Node &node = m_Index.nodes[normalized->second];
+  const MetalTrace::NodeInfo *shaderInfo = FindNodeInfo(m_Index, node.path);
+  rdcstr entryPoint = InfoProperty(shaderInfo, "entryPoint");
+  if(entryPoint.empty())
+    entryPoint = !node.label.empty() ? node.label : node.name;
+  ShaderStage stage = ParseShaderStage(InfoProperty(shaderInfo, "stage"));
+
+  if(stage == ShaderStage::Count)
+  {
+    const char *properties[] = {"vertexFunction", "fragmentFunction", "computeFunction"};
+    const ShaderStage stages[] = {ShaderStage::Vertex, ShaderStage::Fragment,
+                                  ShaderStage::Compute};
+    for(const MetalTrace::Node &pipeline : m_Index.nodes)
+    {
+      if(pipeline.kind != MetalTrace::NodeKind::RenderPipeline &&
+         pipeline.kind != MetalTrace::NodeKind::ComputePipeline)
+        continue;
+      const MetalTrace::NodeInfo *pipelineInfo = FindNodeInfo(m_Index, pipeline.path);
+      for(size_t i = 0; i < ARRAY_COUNT(properties); i++)
+      {
+        uint64_t stableId = 0;
+        if(ParseUInt64(InfoProperty(pipelineInfo, properties[i]), stableId) &&
+           stableId == node.stableId)
+        {
+          stage = stages[i];
+          break;
+        }
+      }
+      if(stage != ShaderStage::Count)
+        break;
+    }
+  }
+
+  if(stage == ShaderStage::Count)
+    return {};
+  return {ShaderEntryPoint(entryPoint, stage)};
+}
+
+const ShaderReflection *AppleTraceReplayDriver::GetShader(ResourceId pipeline, ResourceId shader,
+                                                          ShaderEntryPoint entry)
+{
+  (void)pipeline;
+  auto cached = m_ShaderReflections.find(shader);
+  if(cached != m_ShaderReflections.end())
+    return &cached->second;
+
+  auto normalized = m_ShaderNodes.find(shader);
+  if(normalized == m_ShaderNodes.end())
+    return NULL;
+
+  const MetalTrace::Node &node = m_Index.nodes[normalized->second];
+  const MetalTrace::NodeInfo *shaderInfo = FindNodeInfo(m_Index, node.path);
+  if(entry.name.empty() || entry.stage == ShaderStage::Count)
+  {
+    rdcarray<ShaderEntryPoint> entries = GetShaderEntryPoints(shader);
+    if(entries.empty())
+      return NULL;
+    entry = entries[0];
+  }
+
+  uint64_t libraryStableId = 0;
+  ParseUInt64(InfoProperty(shaderInfo, "libraryStableId"), libraryStableId);
+  rdcstr source;
+  rdcstr sourceFilename;
+  for(const MetalTrace::Node &library : m_Index.nodes)
+  {
+    if(library.kind != MetalTrace::NodeKind::Library || library.stableId != libraryStableId)
+      continue;
+    const MetalTrace::NodeInfo *libraryInfo = FindNodeInfo(m_Index, library.path);
+    source = InfoProperty(libraryInfo, "source");
+    sourceFilename = InfoProperty(libraryInfo, "sourceFilename");
+    break;
+  }
+
+  ShaderReflection reflection;
+  reflection.resourceId = shader;
+  reflection.entryPoint = entry.name;
+  reflection.stage = entry.stage;
+  reflection.debugInfo.entrySourceName = entry.name;
+  reflection.debugInfo.debuggable = false;
+  reflection.debugInfo.debugStatus =
+      "Metal shader source inspection is available, but Metal shader debugging is not implemented";
+  if(!source.empty())
+  {
+    ShaderSourceFile sourceFile;
+    sourceFile.filename = sourceFilename.empty() ? rdcstr("captured.metal") : sourceFilename;
+    sourceFile.contents = source;
+    reflection.debugInfo.files.push_back(sourceFile);
+    reflection.debugInfo.sourceDebugInformation = true;
+    reflection.rawBytes.assign((const byte *)source.data(), source.size());
+    AppendMSLReflection(source, reflection);
+    m_ShaderSources[shader] = source;
+  }
+  else
+  {
+    reflection.debugInfo.debugStatus =
+        "This trace exposes the Metal function name, but no MSL source or AIR disassembly";
+  }
+
+  auto inserted = m_ShaderReflections.insert(std::make_pair(shader, std::move(reflection)));
+  return &inserted.first->second;
+}
+
+rdcarray<rdcstr> AppleTraceReplayDriver::GetDisassemblyTargets(bool withPipeline)
+{
+  (void)withPipeline;
+  return {"MSL source"};
+}
+
+rdcstr AppleTraceReplayDriver::DisassembleShader(ResourceId pipeline,
+                                                 const ShaderReflection *refl,
+                                                 const rdcstr &target)
+{
+  (void)pipeline;
+  if(refl == NULL)
+    return "// Invalid Metal shader";
+  if(!target.empty() && target != "MSL source")
+    return "// Unsupported Metal shader representation";
+  auto source = m_ShaderSources.find(refl->resourceId);
+  if(source == m_ShaderSources.end())
+  {
+    GetShader(pipeline, refl->resourceId, ShaderEntryPoint(refl->entryPoint, refl->stage));
+    source = m_ShaderSources.find(refl->resourceId);
+  }
+  return source == m_ShaderSources.end()
+             ? rdcstr("// No MSL source or AIR disassembly was exposed by this trace")
+             : source->second;
 }
 
 bool AppleTraceReplayDriver::InitialiseTextureRenderer()
@@ -942,11 +1552,16 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
   m_StableResources.clear();
   m_BufferNodes.clear();
   m_TextureNodes.clear();
+  m_ShaderNodes.clear();
+  m_ShaderReflections.clear();
+  m_ShaderSources.clear();
   m_EventDescriptors.clear();
   m_EventVertexInputs.clear();
   m_EventDepthStencil.clear();
   m_EventPipelines.clear();
   m_EventRasterizers.clear();
+  m_EventColorBlends.clear();
+  m_EventAttachments.clear();
   m_ResourceUses.clear();
   m_DebugMessages.clear();
   m_TexturePreviewReportedErrors.clear();
@@ -1021,6 +1636,10 @@ RDResult AppleTraceReplayDriver::ReadLogInitialisation(RDCFile *rdc, bool storeS
         FillTextureDimensions(node, texture);
         m_TextureNodes[id] = nodeIndex;
         m_Textures.push_back(texture);
+      }
+      else if(node.kind == MetalTrace::NodeKind::Shader)
+      {
+        m_ShaderNodes[id] = nodeIndex;
       }
     }
 
@@ -1530,6 +2149,8 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
   }
   else if(ParseUInt64(InfoProperty(drawInfo, "vertexCount"), parsed) && parsed <= UINT32_MAX)
   {
+    // ActionDescription uses numIndices for the element count of both indexed and non-indexed
+    // draws; ActionFlags::Indexed disambiguates the meaning.
     action.numIndices = (uint32_t)parsed;
   }
 
@@ -1555,6 +2176,10 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
 
   uint64_t indexByteOffset = 0;
   ParseUInt64(InfoProperty(drawInfo, "indexBufferOffset"), indexByteOffset);
+  vertexInput.indexBuffer.byteOffset = indexByteOffset;
+  vertexInput.indexBuffer.lastSetCall = InfoProperty(drawInfo, "indexBufferSourceCall");
+  if(vertexInput.indexBuffer.lastSetCall.empty())
+    vertexInput.indexBuffer.lastSetCall = InfoProperty(drawInfo, "drawAPICall");
   if(vertexInput.indexBuffer.byteStride > 0 &&
      indexByteOffset / vertexInput.indexBuffer.byteStride <= UINT32_MAX)
     action.indexOffset = (uint32_t)(indexByteOffset / vertexInput.indexBuffer.byteStride);
@@ -1562,7 +2187,32 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
   rdcstr pipelineObject;
   MetalPipe::DepthStencil depthStencil;
   MetalPipe::Rasterizer rasterizer;
+  MetalPipe::ColorBlendState colorBlend;
+  EventAttachments attachments;
   EventPipeline eventPipeline;
+  const bool reconstructed =
+      m_Manifest.header.sourceKind == MetalTrace::SourceKind::NativeMetal;
+  auto ResolveObject = [this](const rdcstr &text) {
+    int32_t at = text.find('@');
+    if(at < 0)
+      return ResourceId();
+    size_t end = (size_t)at + 1;
+    while(end < text.size() &&
+          ((text[end] >= 'a' && text[end] <= 'z') ||
+           (text[end] >= 'A' && text[end] <= 'Z') ||
+           (text[end] >= '0' && text[end] <= '9') || text[end] == '_'))
+      end++;
+    const rdcstr objectName = text.substr((size_t)at + 1, end - (size_t)at - 1);
+    for(const MetalTrace::Node &resourceNode : m_Index.nodes)
+    {
+      if(resourceNode.objectName != objectName || resourceNode.kind != MetalTrace::NodeKind::Texture)
+        continue;
+      auto resource = m_StableResources.find(resourceNode.stableId);
+      if(resource != m_StableResources.end())
+        return resource->second;
+    }
+    return ResourceId();
+  };
   const rdcstr prefix = node.path + "/";
   for(const MetalTrace::Node &binding : m_Index.nodes)
   {
@@ -1598,13 +2248,41 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
       }
       continue;
     }
+    unsigned int colorSlot = 0;
+    if(sscanf(relative.c_str(), "color%u", &colorSlot) == 1 && !relative.contains("/"))
+    {
+      if(attachments.colors.size() <= colorSlot)
+        attachments.colors.resize(colorSlot + 1);
+      MetalPipe::Attachment &attachment = attachments.colors[colorSlot];
+      auto resource = m_StableResources.find(binding.stableId);
+      if(resource != m_StableResources.end())
+        attachment.resourceId = resource->second;
+      const MetalTrace::NodeInfo *attachmentInfo = FindNodeInfo(m_Index, binding.path);
+      PopulateAttachmentOperations(attachmentInfo, attachment, reconstructed);
+      attachment.resolveResourceId = ResolveObject(InfoProperty(attachmentInfo, "resolveTexture"));
+      continue;
+    }
+    if((relative == "depth" || relative == "stencil") && !relative.contains("/"))
+    {
+      MetalPipe::Attachment &attachment =
+          relative == "depth" ? attachments.depth : attachments.stencil;
+      auto resource = m_StableResources.find(binding.stableId);
+      if(resource != m_StableResources.end())
+        attachment.resourceId = resource->second;
+      const MetalTrace::NodeInfo *attachmentInfo = FindNodeInfo(m_Index, binding.path);
+      PopulateAttachmentOperations(attachmentInfo, attachment, reconstructed);
+      attachment.resolveResourceId = ResolveObject(InfoProperty(attachmentInfo, "resolveTexture"));
+      continue;
+    }
     if(relative == "indexBuffer")
     {
       auto resource = m_StableResources.find(binding.stableId);
       if(resource != m_StableResources.end())
       {
         vertexInput.indexBuffer.resourceId = resource->second;
-        vertexInput.indexBuffer.byteSize = GetBuffer(resource->second).length;
+        const uint64_t bufferLength = GetBuffer(resource->second).length;
+        vertexInput.indexBuffer.byteSize =
+            indexByteOffset < bufferLength ? bufferLength - indexByteOffset : 0;
       }
       continue;
     }
@@ -1621,11 +2299,20 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
     buffer.slot = slot;
     buffer.resourceId = resource->second;
     uint64_t vertexByteOffset = 0;
-    ParseUInt64(InfoProperty(drawInfo, StringFormat::Fmt("vertexBufferOffset[%u]", slot)),
-                vertexByteOffset);
+    buffer.byteOffsetKnown = ParseUInt64(
+        InfoProperty(drawInfo, StringFormat::Fmt("vertexBufferOffset[%u]", slot)),
+        vertexByteOffset);
     buffer.byteOffset = vertexByteOffset;
+    buffer.lastSetCall =
+        InfoProperty(drawInfo, StringFormat::Fmt("vertexBufferSourceCall[%u]", slot));
     const uint64_t bufferLength = GetBuffer(resource->second).length;
-    buffer.byteSize = vertexByteOffset < bufferLength ? bufferLength - vertexByteOffset : 0;
+    uint64_t reportedSize = 0;
+    ParseUInt64(InfoProperty(drawInfo, StringFormat::Fmt("vertexBufferSize[%u]", slot)),
+                reportedSize);
+    const uint64_t available = vertexByteOffset < bufferLength ? bufferLength - vertexByteOffset : 0;
+    buffer.byteSize = reportedSize > vertexByteOffset
+                          ? RDCMIN(available, reportedSize - vertexByteOffset)
+                          : available;
   }
 
   if(!pipelineObject.empty())
@@ -1637,6 +2324,7 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
         continue;
       const MetalTrace::NodeInfo *pipelineInfo = FindNodeInfo(m_Index, pipeline.path);
       ParseVertexLayout(InfoProperty(pipelineInfo, "vertexLayout"), vertexInput);
+      ParseColorBlendAttachments(InfoProperty(pipelineInfo, "colorAttachments"), colorBlend);
 
       auto SetShader = [this](const rdcstr &stableText, ResourceId &resourceId, rdcstr &entryPoint) {
         uint64_t stableId = 0;
@@ -1711,6 +2399,11 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
   if(ParseDouble(InfoProperty(drawInfo, "depthBiasClamp"), rasterValue))
     rasterizer.depthBiasClamp = (float)rasterValue;
 
+  float blendFactor[4] = {};
+  if(ParseFloatVector(InfoProperty(drawInfo, "blendFactor"), blendFactor, 4))
+    for(size_t i = 0; i < 4; i++)
+      colorBlend.blendFactor[i] = blendFactor[i];
+
   for(const MetalPipe::VertexBufferLayout &layout : vertexInput.layouts)
   {
     if(vertexInput.vertexBuffers.size() <= layout.slot)
@@ -1724,6 +2417,8 @@ void AppleTraceReplayDriver::PopulateDrawState(const MetalTrace::Node &node,
   m_EventDepthStencil[eventId] = depthStencil;
   m_EventPipelines[eventId] = eventPipeline;
   m_EventRasterizers[eventId] = rasterizer;
+  m_EventColorBlends[eventId] = colorBlend;
+  m_EventAttachments[eventId] = attachments;
 }
 
 void AppleTraceReplayDriver::SavePipelineState(uint32_t eventId)
@@ -1755,10 +2450,32 @@ void AppleTraceReplayDriver::SavePipelineState(uint32_t eventId)
     m_MetalPipelineState->fragmentShader.entryPoint = pipeline->second.fragmentEntryPoint;
     m_MetalPipelineState->computeShader.resourceId = pipeline->second.computeShader;
     m_MetalPipelineState->computeShader.entryPoint = pipeline->second.computeEntryPoint;
+    if(pipeline->second.vertexShader != ResourceId())
+      m_MetalPipelineState->vertexShader.reflection = GetShader(
+          pipeline->second.renderPipeline, pipeline->second.vertexShader,
+          ShaderEntryPoint(pipeline->second.vertexEntryPoint, ShaderStage::Vertex));
+    if(pipeline->second.fragmentShader != ResourceId())
+      m_MetalPipelineState->fragmentShader.reflection = GetShader(
+          pipeline->second.renderPipeline, pipeline->second.fragmentShader,
+          ShaderEntryPoint(pipeline->second.fragmentEntryPoint, ShaderStage::Fragment));
+    if(pipeline->second.computeShader != ResourceId())
+      m_MetalPipelineState->computeShader.reflection = GetShader(
+          pipeline->second.computePipeline, pipeline->second.computeShader,
+          ShaderEntryPoint(pipeline->second.computeEntryPoint, ShaderStage::Compute));
   }
   auto rasterizer = m_EventRasterizers.find(eventId);
   if(rasterizer != m_EventRasterizers.end())
     m_MetalPipelineState->rasterizer = rasterizer->second;
+  auto colorBlend = m_EventColorBlends.find(eventId);
+  if(colorBlend != m_EventColorBlends.end())
+    m_MetalPipelineState->colorBlend = colorBlend->second;
+  auto attachments = m_EventAttachments.find(eventId);
+  if(attachments != m_EventAttachments.end())
+  {
+    m_MetalPipelineState->colorAttachments = attachments->second.colors;
+    m_MetalPipelineState->depthAttachment = attachments->second.depth;
+    m_MetalPipelineState->stencilAttachment = attachments->second.stencil;
+  }
 
   ActionDescription *action = FindActionByEvent(m_FrameRecord.actionList, eventId);
   if(action != NULL)
@@ -1767,7 +2484,8 @@ void AppleTraceReplayDriver::SavePipelineState(uint32_t eventId)
     for(size_t i = 0; i < action->outputs.size(); i++)
       if(action->outputs[i] != ResourceId())
         attachmentCount = i + 1;
-    m_MetalPipelineState->colorAttachments.resize(attachmentCount);
+    if(m_MetalPipelineState->colorAttachments.size() < attachmentCount)
+      m_MetalPipelineState->colorAttachments.resize(attachmentCount);
     for(size_t i = 0; i < attachmentCount; i++)
       m_MetalPipelineState->colorAttachments[i].resourceId = action->outputs[i];
     m_MetalPipelineState->depthAttachment.resourceId = action->depthOut;

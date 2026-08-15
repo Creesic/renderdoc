@@ -166,6 +166,171 @@ struct PipelineArgumentBufferLayouts
   std::map<uint64_t, ArgumentBufferLayout> fragment;
 };
 
+bool IsNativeRenderDraw(MetalChunk type)
+{
+  switch(type)
+  {
+    case MetalChunk::MTLRenderCommandEncoder_drawPrimitives:
+    case MetalChunk::MTLRenderCommandEncoder_drawPrimitives_instanced:
+    case MetalChunk::MTLRenderCommandEncoder_drawPrimitives_instanced_base:
+    case MetalChunk::MTLRenderCommandEncoder_drawIndexedPrimitives:
+    case MetalChunk::MTLRenderCommandEncoder_drawIndexedPrimitives_instanced:
+    case MetalChunk::MTLRenderCommandEncoder_drawIndexedPrimitives_instanced_base: return true;
+    default: return false;
+  }
+}
+
+uint64_t FindTargetRenderEncoder(const SDFile &file, uint32_t drawLimit)
+{
+  if(drawLimit == 0 || drawLimit == UINT32_MAX)
+    return 0;
+
+  uint32_t drawCount = 0;
+  for(const SDChunk *chunk : file.chunks)
+  {
+    if(!IsNativeRenderDraw((MetalChunk)chunk->metadata.chunkID))
+      continue;
+
+    drawCount++;
+    if(drawCount == drawLimit)
+      return UInt(Child(chunk, "RenderCommandEncoder"));
+  }
+
+  return 0;
+}
+
+struct PreservedColorAttachment
+{
+  MTL::Texture *original = NULL;
+  MTL::Texture *scratch = NULL;
+  NS::UInteger slice = 0;
+  NS::UInteger level = 0;
+  MTL::Origin origin = MTL::Origin(0, 0, 0);
+  MTL::Size size = MTL::Size(0, 0, 0);
+};
+
+NS::UInteger MipDimension(NS::UInteger dimension, NS::UInteger level)
+{
+  while(level > 0 && dimension > 1)
+  {
+    dimension >>= 1;
+    level--;
+  }
+  return RDCMAX((NS::UInteger)1, dimension);
+}
+
+bool CanPreserveColorAttachment(MTL::RenderPassColorAttachmentDescriptor *attachment)
+{
+  MTL::Texture *texture = attachment ? attachment->texture() : NULL;
+  return texture != NULL && attachment->loadAction() == MTL::LoadActionLoad &&
+         attachment->storeAction() == MTL::StoreActionStore && texture->sampleCount() == 1 &&
+         texture->storageMode() != MTL::StorageModeMemoryless;
+}
+
+RDResult BeginColorAttachmentPreservation(MTL::Device *device, MTL::CommandBuffer *commandBuffer,
+                                          MTL::RenderPassColorAttachmentDescriptor *attachment,
+                                          PreservedColorAttachment &preserved)
+{
+  MTL::Texture *original = attachment ? attachment->texture() : NULL;
+  if(device == NULL || commandBuffer == NULL || original == NULL)
+    RETURN_ERROR_RESULT(ResultCode::APIDataCorrupted,
+                        "Cannot preserve a missing Metal color attachment");
+
+  RDMTL::TextureDescriptor replayDescriptor(original);
+  replayDescriptor.resourceOptions =
+      (MTL::ResourceOptions)(MTL::ResourceStorageModePrivate |
+                             MTL::ResourceHazardTrackingModeTracked);
+  replayDescriptor.cpuCacheMode = MTL::CPUCacheModeDefaultCache;
+  replayDescriptor.storageMode = MTL::StorageModePrivate;
+  replayDescriptor.hazardTrackingMode = MTL::HazardTrackingModeTracked;
+  replayDescriptor.usage =
+      (MTL::TextureUsage)(original->usage() | MTL::TextureUsageRenderTarget);
+  MTL::TextureDescriptor *descriptor = replayDescriptor.operator MTL::TextureDescriptor *();
+  MTL::Texture *scratch = device->newTexture(descriptor);
+  descriptor->release();
+  if(scratch == NULL)
+    RETURN_ERROR_RESULT(ResultCode::APIHardwareUnsupported,
+                        "Could not allocate a preserved Metal color attachment");
+
+  const NS::UInteger level = attachment->level();
+  const NS::UInteger slice = attachment->slice();
+  const NS::UInteger depthPlane = attachment->depthPlane();
+  const bool is3D = original->textureType() == MTL::TextureType3D;
+  const MTL::Origin origin(0, 0, is3D ? depthPlane : 0);
+  const MTL::Size size(MipDimension(original->width(), level),
+                       MipDimension(original->height(), level), 1);
+
+  MTL::BlitCommandEncoder *blit = commandBuffer->blitCommandEncoder();
+  if(blit == NULL)
+  {
+    scratch->release();
+    RETURN_ERROR_RESULT(ResultCode::APIHardwareUnsupported,
+                        "Could not encode Metal color-attachment preservation");
+  }
+  blit->copyFromTexture(original, is3D ? 0 : slice, level, origin, size, scratch,
+                        is3D ? 0 : slice, level, origin);
+  blit->endEncoding();
+
+  preserved = {original, scratch, slice, level, origin, size};
+  attachment->setTexture(scratch);
+  return ResultCode::Succeeded;
+}
+
+RDResult FinishColorAttachmentPreservation(
+    MTL::CommandBuffer *commandBuffer, const rdcarray<PreservedColorAttachment> &preserved)
+{
+  if(preserved.empty())
+    return ResultCode::Succeeded;
+
+  MTL::BlitCommandEncoder *blit = commandBuffer ? commandBuffer->blitCommandEncoder() : NULL;
+  if(blit == NULL)
+    RETURN_ERROR_RESULT(ResultCode::APIHardwareUnsupported,
+                        "Could not restore preserved Metal color attachments");
+
+  for(const PreservedColorAttachment &attachment : preserved)
+  {
+    const bool is3D = attachment.original->textureType() == MTL::TextureType3D;
+    blit->copyFromTexture(attachment.scratch, is3D ? 0 : attachment.slice, attachment.level,
+                          attachment.origin, attachment.size, attachment.original,
+                          is3D ? 0 : attachment.slice, attachment.level, attachment.origin);
+  }
+  blit->endEncoding();
+  return ResultCode::Succeeded;
+}
+
+RDMTL::StencilDescriptor CapturedStencilDescriptor(const SDObject *descriptor)
+{
+  RDMTL::StencilDescriptor captured;
+  captured.stencilCompareFunction =
+      (MTL::CompareFunction)UInt(Child(descriptor, "stencilCompareFunction"));
+  captured.stencilFailureOperation =
+      (MTL::StencilOperation)UInt(Child(descriptor, "stencilFailureOperation"));
+  captured.depthFailureOperation =
+      (MTL::StencilOperation)UInt(Child(descriptor, "depthFailureOperation"));
+  captured.depthStencilPassOperation =
+      (MTL::StencilOperation)UInt(Child(descriptor, "depthStencilPassOperation"));
+  captured.readMask = (uint32_t)UInt(Child(descriptor, "readMask"));
+  captured.writeMask = (uint32_t)UInt(Child(descriptor, "writeMask"));
+  return captured;
+}
+
+RDMTL::DepthStencilDescriptor CapturedDepthStencilDescriptor(const SDObject *descriptor)
+{
+  RDMTL::DepthStencilDescriptor captured;
+  captured.label = String(Child(descriptor, "label"));
+  captured.depthCompareFunction =
+      (MTL::CompareFunction)UInt(Child(descriptor, "depthCompareFunction"));
+  captured.depthWriteEnabled = UInt(Child(descriptor, "depthWriteEnabled")) != 0;
+  captured.hasFrontFaceStencil = UInt(Child(descriptor, "hasFrontFaceStencil")) != 0;
+  if(captured.hasFrontFaceStencil)
+    captured.frontFaceStencil =
+        CapturedStencilDescriptor(Child(descriptor, "frontFaceStencil"));
+  captured.hasBackFaceStencil = UInt(Child(descriptor, "hasBackFaceStencil")) != 0;
+  if(captured.hasBackFaceStencil)
+    captured.backFaceStencil = CapturedStencilDescriptor(Child(descriptor, "backFaceStencil"));
+  return captured;
+}
+
 }    // namespace
 
 struct NativeMetalReplayCache
@@ -331,6 +496,7 @@ struct Executor
       : file(structured),
         result(execution),
         maxDrawCount(drawLimit),
+        targetRenderEncoder(FindTargetRenderEncoder(structured, drawLimit)),
         filterReadbacks(requestedTextures != NULL),
         cache(replayCache)
   {
@@ -1000,6 +1166,41 @@ struct Executor
                                    (NS::UInteger)UInt(Child(chunk, "index")));
         return ResultCode::Succeeded;
       }
+      case MetalChunk::MTLRenderCommandEncoder_setVertexBufferOffset:
+      {
+        MTL::RenderCommandEncoder *encoder = Encoder(chunk);
+        if(encoder)
+          encoder->setVertexBufferOffset((NS::UInteger)UInt(Child(chunk, "offset")),
+                                         (NS::UInteger)UInt(Child(chunk, "index")));
+        return ResultCode::Succeeded;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setVertexBuffers:
+      {
+        MTL::RenderCommandEncoder *encoder = Encoder(chunk);
+        const SDObject *bufferObjects = Child(chunk, "buffers");
+        const SDObject *offsetObjects = Child(chunk, "offsets");
+        const size_t count = bufferObjects && offsetObjects
+                                 ? RDCMIN(bufferObjects->NumChildren(), offsetObjects->NumChildren())
+                                 : 0;
+        rdcarray<MTL::Buffer *> boundBuffers;
+        rdcarray<NS::UInteger> boundOffsets;
+        boundBuffers.resize(count);
+        boundOffsets.resize(count);
+        const uint64_t encoderId = UInt(Child(chunk, "RenderCommandEncoder"));
+        const uint64_t firstIndex = UInt(Child(chunk, "firstIndex"));
+        for(size_t i = 0; i < count; i++)
+        {
+          const uint64_t bufferId = UInt(bufferObjects->GetChild(i));
+          boundBuffers[i] = buffers[bufferId];
+          boundOffsets[i] = (NS::UInteger)UInt(offsetObjects->GetChild(i));
+          RecordEncoderBufferUse(encoderId, bufferId);
+          RememberArgumentBufferLayout(encoderId, bufferId, firstIndex + i, true);
+        }
+        if(encoder && count > 0)
+          encoder->setVertexBuffers(boundBuffers.data(), boundOffsets.data(),
+                                    NS::Range::Make((NS::UInteger)firstIndex, count));
+        return ResultCode::Succeeded;
+      }
       case MetalChunk::MTLRenderCommandEncoder_setVertexBytes:
       {
         MTL::RenderCommandEncoder *encoder = Encoder(chunk);
@@ -1082,6 +1283,39 @@ struct Executor
         MTL::RenderCommandEncoder *encoder = Encoder(chunk);
         if(encoder)
           encoder->setTriangleFillMode((MTL::TriangleFillMode)UInt(Child(chunk, "fillMode")));
+        return ResultCode::Succeeded;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setBlendColor:
+      {
+        MTL::RenderCommandEncoder *encoder = Encoder(chunk);
+        if(encoder)
+          encoder->setBlendColor((float)Float(Child(chunk, "red")),
+                                 (float)Float(Child(chunk, "green")),
+                                 (float)Float(Child(chunk, "blue")),
+                                 (float)Float(Child(chunk, "alpha")));
+        return ResultCode::Succeeded;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setColorStoreAction:
+      {
+        MTL::RenderCommandEncoder *encoder = Encoder(chunk);
+        if(encoder)
+          encoder->setColorStoreAction((MTL::StoreAction)UInt(Child(chunk, "storeAction")),
+                                       (NS::UInteger)UInt(Child(chunk,
+                                                                "colorAttachmentIndex")));
+        return ResultCode::Succeeded;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setDepthStoreAction:
+      {
+        MTL::RenderCommandEncoder *encoder = Encoder(chunk);
+        if(encoder)
+          encoder->setDepthStoreAction((MTL::StoreAction)UInt(Child(chunk, "storeAction")));
+        return ResultCode::Succeeded;
+      }
+      case MetalChunk::MTLRenderCommandEncoder_setStencilStoreAction:
+      {
+        MTL::RenderCommandEncoder *encoder = Encoder(chunk);
+        if(encoder)
+          encoder->setStencilStoreAction((MTL::StoreAction)UInt(Child(chunk, "storeAction")));
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLRenderCommandEncoder_setStencilReferenceValue:
@@ -1187,9 +1421,19 @@ struct Executor
       }
       case MetalChunk::MTLRenderCommandEncoder_endEncoding:
       {
+        const uint64_t encoderId = UInt(Child(chunk, "RenderCommandEncoder"));
         MTL::RenderCommandEncoder *encoder = Encoder(chunk);
         if(encoder)
           encoder->endEncoding();
+        auto preservation = preservedColorAttachments.find(encoderId);
+        if(preservation != preservedColorAttachments.end())
+        {
+          MTL::CommandBuffer *commandBuffer = commandBuffers[encoderCommandBuffers[encoderId]];
+          RDResult restored =
+              FinishColorAttachmentPreservation(commandBuffer, preservation->second);
+          if(restored != ResultCode::Succeeded)
+            return restored;
+        }
         return ResultCode::Succeeded;
       }
       case MetalChunk::MTLRenderCommandEncoder_updateFence:
@@ -1824,14 +2068,9 @@ struct Executor
       }
     }
 
-    const SDObject *descriptor = Child(chunk, "descriptor");
-    MTL::DepthStencilDescriptor *mtl = MTL::DepthStencilDescriptor::alloc()->init();
-    rdcstr label = String(Child(descriptor, "label"));
-    if(!label.empty())
-      mtl->setLabel(NS::String::string(label.c_str(), NS::UTF8StringEncoding));
-    mtl->setDepthCompareFunction(
-        (MTL::CompareFunction)UInt(Child(descriptor, "depthCompareFunction")));
-    mtl->setDepthWriteEnabled(UInt(Child(descriptor, "depthWriteEnabled")) != 0);
+    const RDMTL::DepthStencilDescriptor captured =
+        CapturedDepthStencilDescriptor(Child(chunk, "descriptor"));
+    MTL::DepthStencilDescriptor *mtl = captured.operator MTL::DepthStencilDescriptor *();
     MTL::DepthStencilState *state = device->newDepthStencilState(mtl);
     mtl->release();
     if(state == NULL)
@@ -1928,6 +2167,30 @@ struct Executor
         const uint64_t textureId = UInt(Child(source, "texture"));
         if(textureId != 0)
           encoderColorAttachments[encoderId].push_back(textureId);
+
+        if(encoderId == targetRenderEncoder && destination->loadAction() == MTL::LoadActionLoad &&
+           destination->storeAction() == MTL::StoreActionStore)
+        {
+          if(!CanPreserveColorAttachment(destination))
+          {
+            MTL::Texture *texture = destination->texture();
+            RDCWARN("Cannot explicitly preserve truncated replay color attachment %zu "
+                    "(samples %llu, storage mode %llu)",
+                    i, texture ? (uint64_t)texture->sampleCount() : 0,
+                    texture ? (uint64_t)texture->storageMode() : 0);
+          }
+          else
+          {
+            PreservedColorAttachment preserved;
+            RDResult preserve = BeginColorAttachmentPreservation(device, commandBuffer, destination,
+                                                                  preserved);
+            if(preserve != ResultCode::Succeeded)
+              return preserve;
+            preservedColorAttachments[encoderId].push_back(preserved);
+            TrackOwned(preserved.scratch, retained);
+            AddResidencyAllocation(preserved.scratch);
+          }
+        }
       }
     }
     const SDObject *depth = Child(descriptor, "depthAttachment");
@@ -2431,6 +2694,7 @@ struct Executor
   const SDFile &file;
   NativeMetalExecutionResult &result;
   uint32_t maxDrawCount = UINT32_MAX;
+  uint64_t targetRenderEncoder = 0;
   bool filterReadbacks = false;
   NativeMetalReplayCache *cache = NULL;
   bool drawLimitReached = false;
@@ -2487,6 +2751,7 @@ struct Executor
   std::set<uint64_t> argumentBufferIds;
   std::map<uint64_t, ArgumentBufferLayout> argumentBufferLayouts;
   std::map<uint64_t, rdcarray<uint64_t>> encoderColorAttachments;
+  std::map<uint64_t, rdcarray<PreservedColorAttachment>> preservedColorAttachments;
   std::set<uint64_t> readbackTextureIds;
   std::set<uint64_t> requestedReadbackTextureIds;
 };
@@ -2561,6 +2826,225 @@ TEST_CASE("Metal argument-buffer resource namespaces use reflection", "[metal][r
   CHECK(rebased[0] == textures[capturedIdentity]);
   CHECK(rebased[1] == samplers[capturedIdentity]);
   CHECK(rebased[2] == capturedIdentity);
+}
+
+TEST_CASE("Metal partial replay identifies the render encoder containing its final draw",
+          "[metal][replay]")
+{
+  SDFile file;
+  auto AddDraw = [&file](MetalChunk type, uint64_t encoder) {
+    SDChunk *chunk = new SDChunk("draw"_lit);
+    chunk->metadata.chunkID = (uint32_t)type;
+    chunk->AddAndOwnChild(makeSDObject("RenderCommandEncoder"_lit, encoder));
+    file.chunks.push_back(chunk);
+  };
+
+  AddDraw(MetalChunk::MTLRenderCommandEncoder_drawPrimitives, 41);
+  AddDraw(MetalChunk::MTLRenderCommandEncoder_drawIndexedPrimitives_instanced, 73);
+
+  CHECK(FindTargetRenderEncoder(file, 0) == 0);
+  CHECK(FindTargetRenderEncoder(file, 1) == 41);
+  CHECK(FindTargetRenderEncoder(file, 2) == 73);
+  CHECK(FindTargetRenderEncoder(file, 3) == 0);
+  CHECK(FindTargetRenderEncoder(file, UINT32_MAX) == 0);
+}
+
+TEST_CASE("Metal native replay rebuilds complete stencil descriptors", "[metal][replay]")
+{
+  auto MakeStencil = [](const rdcinflexiblestr &name, MTL::CompareFunction compare,
+                        MTL::StencilOperation stencilFail, MTL::StencilOperation depthFail,
+                        MTL::StencilOperation pass, uint32_t readMask, uint32_t writeMask) {
+    SDObject *stencil = new SDObject(name, "StencilDescriptor"_lit);
+    stencil->AddAndOwnChild(makeSDObject("stencilCompareFunction"_lit, (uint64_t)compare));
+    stencil->AddAndOwnChild(makeSDObject("stencilFailureOperation"_lit, (uint64_t)stencilFail));
+    stencil->AddAndOwnChild(makeSDObject("depthFailureOperation"_lit, (uint64_t)depthFail));
+    stencil->AddAndOwnChild(makeSDObject("depthStencilPassOperation"_lit, (uint64_t)pass));
+    stencil->AddAndOwnChild(makeSDObject("readMask"_lit, (uint64_t)readMask));
+    stencil->AddAndOwnChild(makeSDObject("writeMask"_lit, (uint64_t)writeMask));
+    return stencil;
+  };
+
+  SDObject descriptor("descriptor"_lit, "DepthStencilDescriptor"_lit);
+  descriptor.AddAndOwnChild(makeSDObject("label"_lit, rdcstr("captured stencil")));
+  descriptor.AddAndOwnChild(
+      makeSDObject("depthCompareFunction"_lit, (uint64_t)MTL::CompareFunctionLessEqual));
+  descriptor.AddAndOwnChild(makeSDObject("depthWriteEnabled"_lit, true));
+  descriptor.AddAndOwnChild(makeSDObject("hasFrontFaceStencil"_lit, true));
+  descriptor.AddAndOwnChild(MakeStencil(
+      "frontFaceStencil"_lit, MTL::CompareFunctionEqual, MTL::StencilOperationReplace,
+      MTL::StencilOperationIncrementClamp, MTL::StencilOperationInvert, 0x12345678, 0x87654321));
+  descriptor.AddAndOwnChild(makeSDObject("hasBackFaceStencil"_lit, true));
+  descriptor.AddAndOwnChild(MakeStencil(
+      "backFaceStencil"_lit, MTL::CompareFunctionNotEqual, MTL::StencilOperationZero,
+      MTL::StencilOperationDecrementWrap, MTL::StencilOperationIncrementWrap, 0x00ff00ff,
+      0xff00ff00));
+
+  const RDMTL::DepthStencilDescriptor captured = CapturedDepthStencilDescriptor(&descriptor);
+  REQUIRE(captured.hasFrontFaceStencil);
+  REQUIRE(captured.hasBackFaceStencil);
+  CHECK(captured.frontFaceStencil.stencilCompareFunction == MTL::CompareFunctionEqual);
+  CHECK(captured.frontFaceStencil.stencilFailureOperation == MTL::StencilOperationReplace);
+  CHECK(captured.frontFaceStencil.depthFailureOperation == MTL::StencilOperationIncrementClamp);
+  CHECK(captured.frontFaceStencil.depthStencilPassOperation == MTL::StencilOperationInvert);
+  CHECK(captured.frontFaceStencil.readMask == 0x12345678);
+  CHECK(captured.frontFaceStencil.writeMask == 0x87654321);
+  CHECK(captured.backFaceStencil.stencilCompareFunction == MTL::CompareFunctionNotEqual);
+  CHECK(captured.backFaceStencil.stencilFailureOperation == MTL::StencilOperationZero);
+  CHECK(captured.backFaceStencil.depthFailureOperation == MTL::StencilOperationDecrementWrap);
+  CHECK(captured.backFaceStencil.depthStencilPassOperation == MTL::StencilOperationIncrementWrap);
+  CHECK(captured.backFaceStencil.readMask == 0x00ff00ff);
+  CHECK(captured.backFaceStencil.writeMask == 0xff00ff00);
+
+  MTL::DepthStencilDescriptor *native = captured.operator MTL::DepthStencilDescriptor *();
+  REQUIRE(native->frontFaceStencil() != NULL);
+  REQUIRE(native->backFaceStencil() != NULL);
+  CHECK(native->frontFaceStencil()->readMask() == 0x12345678);
+  CHECK(native->frontFaceStencil()->writeMask() == 0x87654321);
+  CHECK(native->backFaceStencil()->readMask() == 0x00ff00ff);
+  CHECK(native->backFaceStencil()->writeMask() == 0xff00ff00);
+  native->release();
+}
+
+TEST_CASE("Metal truncated replay preserves pixels outside a partial color update",
+          "[metal][replay]")
+{
+  NS::AutoreleasePool *pool = NS::AutoreleasePool::alloc()->init();
+  MTL::Device *device = MTL::CreateSystemDefaultDevice();
+  REQUIRE(device != NULL);
+  MTL::CommandQueue *queue = device->newCommandQueue();
+  REQUIRE(queue != NULL);
+
+  constexpr NS::UInteger width = 16;
+  constexpr NS::UInteger height = 12;
+  constexpr NS::UInteger rowPitch = 256;
+  constexpr NS::UInteger patchX = 3;
+  constexpr NS::UInteger patchY = 4;
+  constexpr NS::UInteger patchWidth = 5;
+  constexpr NS::UInteger patchHeight = 3;
+  constexpr uint32_t patchPixel = 0xffa55ac3;
+
+  MTL::Buffer *initial =
+      device->newBuffer(rowPitch * height, MTL::ResourceStorageModeShared);
+  MTL::Buffer *readback =
+      device->newBuffer(rowPitch * height, MTL::ResourceStorageModeShared);
+  REQUIRE(initial != NULL);
+  REQUIRE(readback != NULL);
+
+  for(NS::UInteger y = 0; y < height; y++)
+  {
+    uint32_t *row = (uint32_t *)((byte *)initial->contents() + y * rowPitch);
+    for(NS::UInteger x = 0; x < width; x++)
+      row[x] = 0xff000000U | (uint32_t(y) << 12) | uint32_t(x);
+  }
+  MTL::TextureDescriptor *textureDescriptor = MTL::TextureDescriptor::alloc()->init();
+  textureDescriptor->setTextureType(MTL::TextureType2D);
+  textureDescriptor->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+  textureDescriptor->setWidth(width);
+  textureDescriptor->setHeight(height);
+  textureDescriptor->setStorageMode(MTL::StorageModePrivate);
+  textureDescriptor->setUsage(MTL::TextureUsageRenderTarget);
+  MTL::Texture *texture = device->newTexture(textureDescriptor);
+  textureDescriptor->release();
+  REQUIRE(texture != NULL);
+
+  MTL::CommandBuffer *command = queue->commandBuffer();
+  REQUIRE(command != NULL);
+  MTL::BlitCommandEncoder *upload = command->blitCommandEncoder();
+  REQUIRE(upload != NULL);
+  upload->copyFromBuffer(initial, 0, rowPitch, rowPitch * height, MTL::Size(width, height, 1),
+                         texture, 0, 0, MTL::Origin(0, 0, 0));
+  upload->endEncoding();
+
+  MTL::RenderPassDescriptor *pass = MTL::RenderPassDescriptor::alloc()->init();
+  MTL::RenderPassColorAttachmentDescriptor *color = pass->colorAttachments()->object(0);
+  color->setTexture(texture);
+  color->setLoadAction(MTL::LoadActionLoad);
+  color->setStoreAction(MTL::StoreActionStore);
+  REQUIRE(CanPreserveColorAttachment(color));
+
+  PreservedColorAttachment preserved;
+  REQUIRE(BeginColorAttachmentPreservation(device, command, color, preserved).code ==
+          ResultCode::Succeeded);
+  REQUIRE(color->texture() == preserved.scratch);
+
+  const char *shaderSource = R"metal(
+#include <metal_stdlib>
+using namespace metal;
+vertex float4 preserve_vs(uint vertexID [[vertex_id]])
+{
+  const float2 positions[3] = {float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0)};
+  return float4(positions[vertexID], 0.0, 1.0);
+}
+fragment float4 preserve_fs()
+{
+  return float4(165.0 / 255.0, 90.0 / 255.0, 195.0 / 255.0, 1.0);
+}
+)metal";
+  NS::Error *error = NULL;
+  MTL::Library *library = device->newLibrary(
+      NS::String::string(shaderSource, NS::UTF8StringEncoding), NULL, &error);
+  REQUIRE(library != NULL);
+  MTL::Function *vertex =
+      library->newFunction(NS::String::string("preserve_vs", NS::UTF8StringEncoding));
+  MTL::Function *fragment =
+      library->newFunction(NS::String::string("preserve_fs", NS::UTF8StringEncoding));
+  REQUIRE(vertex != NULL);
+  REQUIRE(fragment != NULL);
+  MTL::RenderPipelineDescriptor *pipelineDescriptor =
+      MTL::RenderPipelineDescriptor::alloc()->init();
+  pipelineDescriptor->setVertexFunction(vertex);
+  pipelineDescriptor->setFragmentFunction(fragment);
+  pipelineDescriptor->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+  MTL::RenderPipelineState *pipeline =
+      device->newRenderPipelineState(pipelineDescriptor, &error);
+  REQUIRE(pipeline != NULL);
+
+  MTL::RenderCommandEncoder *render = command->renderCommandEncoder(pass);
+  REQUIRE(render != NULL);
+  render->setRenderPipelineState(pipeline);
+  render->setScissorRect(MTL::ScissorRect{patchX, patchY, patchWidth, patchHeight});
+  render->drawPrimitives(MTL::PrimitiveTypeTriangle, 0, 3, 1, 0);
+  render->endEncoding();
+  REQUIRE(FinishColorAttachmentPreservation(command, {preserved}).code == ResultCode::Succeeded);
+
+  MTL::BlitCommandEncoder *download = command->blitCommandEncoder();
+  REQUIRE(download != NULL);
+  download->copyFromTexture(texture, 0, 0, MTL::Origin(0, 0, 0),
+                            MTL::Size(width, height, 1), readback, 0, rowPitch,
+                            rowPitch * height);
+  download->endEncoding();
+  command->commit();
+  command->waitUntilCompleted();
+  REQUIRE((uint64_t)command->status() != (uint64_t)MTL::CommandBufferStatusError);
+
+  for(NS::UInteger y = 0; y < height; y++)
+  {
+    const uint32_t *before = (const uint32_t *)((const byte *)initial->contents() + y * rowPitch);
+    const uint32_t *after = (const uint32_t *)((const byte *)readback->contents() + y * rowPitch);
+    for(NS::UInteger x = 0; x < width; x++)
+    {
+      const bool inside = x >= patchX && x < patchX + patchWidth && y >= patchY &&
+                          y < patchY + patchHeight;
+      CAPTURE(x, y);
+      if(inside)
+        CHECK(after[x] == patchPixel);
+      else
+        CHECK(after[x] == before[x]);
+    }
+  }
+
+  pass->release();
+  pipeline->release();
+  pipelineDescriptor->release();
+  fragment->release();
+  vertex->release();
+  library->release();
+  preserved.scratch->release();
+  texture->release();
+  readback->release();
+  initial->release();
+  queue->release();
+  pool->release();
 }
 
 #endif

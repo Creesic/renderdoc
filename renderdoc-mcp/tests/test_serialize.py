@@ -57,7 +57,7 @@ def test_compact_draw_row_omits_null_slots_defaults_and_unbounded_sizes(monkeypa
     monkeypatch.setattr(
         serialize,
         "serialize_graphics_targets",
-        lambda pipe, controller: {
+        lambda pipe, controller, metal=None: {
             "color_targets": [
                 {
                     "slot": 0,
@@ -198,6 +198,140 @@ def test_vertex_inputs_report_real_vertex_buffer_slot():
 
     slots = [a["vertex_buffer_slot"] for a in data["attributes"]]
     assert slots == [0, 1]
+
+
+def test_metal_vertex_inputs_include_last_binding_calls(monkeypatch):
+    from renderdoc_mcp import serialize
+
+    class _Binding:
+        def __init__(self, resource_id, offset, stride, size, call):
+            self.resourceId = resource_id
+            self.byteOffset = offset
+            self.byteStride = stride
+            self.byteSize = size
+            self.lastSetCall = call
+
+    index = _Binding("ResourceId::7", 12, 4, 128, "drawIndexedPrimitives indexBufferOffset:12")
+    vertex = _Binding("ResourceId::8", 176, 88, 848, "setVertexBuffer offset:176 atIndex:12")
+    vertex.byteOffsetKnown = True
+
+    class _PipeWithBindings:
+        def GetIBuffer(self):
+            return index
+
+        def GetVBuffers(self):
+            return [vertex]
+
+        def GetVertexInputs(self):
+            return []
+
+        def GetPrimitiveTopology(self):
+            return "TriangleList"
+
+    metal = type(
+        "MetalState",
+        (),
+        {"vertexInput": type("VertexInput", (), {"indexBuffer": index, "vertexBuffers": [vertex]})()},
+    )()
+    monkeypatch.setattr(serialize, "_metal_state", lambda controller: metal)
+    monkeypatch.setattr(serialize, "rid_str", lambda resource_id: str(resource_id))
+    monkeypatch.setattr(
+        serialize,
+        "enrich_resource_dict",
+        lambda controller, row, resource_id: row.update(resource_id=str(resource_id)),
+    )
+
+    data = serialize.serialize_vertex_inputs(_PipeWithBindings(), controller=object())
+    assert data["index_buffer"]["last_set_call"].startswith("drawIndexedPrimitives")
+    assert data["index_buffer"]["index_format"] == "UInt32"
+    assert data["vertex_buffers"][0]["last_set_call"].startswith("setVertexBuffer")
+    assert data["vertex_buffers"][0]["byte_offset_known"] is True
+
+
+def test_metal_targets_include_render_pass_operations(monkeypatch):
+    from types import SimpleNamespace
+    from renderdoc_mcp import serialize
+
+    monkeypatch.setattr(
+        serialize,
+        "enrich_resource_dict",
+        lambda controller, row, resource_id: row.update(resource_id=str(resource_id or "Null")),
+    )
+
+    class _PipeWithTarget:
+        def GetOutputTargets(self):
+            return [SimpleNamespace(resource="ResourceId::9", slice=0, mipslice=0)]
+
+        def GetDepthTarget(self):
+            return None
+
+        def GetStencilTarget(self):
+            return None
+
+    attachment = SimpleNamespace(
+        loadAction="Load",
+        storeAction="Store",
+        mipLevel=2,
+        slice=3,
+        depthPlane=1,
+        clearColor=[0.1, 0.2, 0.3, 0.4],
+        clearDepth=1.0,
+        clearStencil=7,
+        reconstructed=True,
+        resolveResourceId="ResourceId::10",
+    )
+    metal = SimpleNamespace(colorAttachments=[attachment])
+
+    target = serialize.serialize_graphics_targets(_PipeWithTarget(), object(), metal)[
+        "color_targets"
+    ][0]
+    assert target["load_action"] == "Load"
+    assert target["store_action"] == "Store"
+    assert target["mipslice"] == 2
+    assert target["slice"] == 3
+    assert target["depth_plane"] == 1
+    assert target["reconstructed"] is True
+    assert target["resolve_resource_id"] == "ResourceId::10"
+
+
+def test_metal_targets_accept_swig_float_vector(monkeypatch):
+    from types import SimpleNamespace
+    from renderdoc_mcp import serialize
+
+    class FloatVector:
+        x = 0.1
+        y = 0.2
+        z = 0.3
+        w = 0.4
+
+    monkeypatch.setattr(
+        serialize,
+        "enrich_resource_dict",
+        lambda controller, row, resource_id: row.update(resource_id=str(resource_id or "Null")),
+    )
+
+    pipe = SimpleNamespace(
+        GetOutputTargets=lambda: [SimpleNamespace(resource="ResourceId::9", slice=0, mipslice=0)],
+        GetDepthTarget=lambda: None,
+        GetStencilTarget=lambda: None,
+    )
+    attachment = SimpleNamespace(
+        loadAction="Clear",
+        storeAction="Store",
+        mipLevel=0,
+        slice=0,
+        depthPlane=0,
+        clearColor=FloatVector(),
+        clearDepth=1.0,
+        clearStencil=0,
+        reconstructed=False,
+        resolveResourceId=None,
+    )
+    metal = SimpleNamespace(colorAttachments=[attachment])
+
+    target = serialize.serialize_graphics_targets(pipe, object(), metal)["color_targets"][0]
+
+    assert target["clear_color"] == [0.1, 0.2, 0.3, 0.4]
 
 
 def test_d3d12_style_pipe_state_methods_are_serialized():

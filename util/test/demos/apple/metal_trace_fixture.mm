@@ -46,6 +46,25 @@ struct Vertex
   vector_float2 uv;
 };
 
+struct WideVertex
+{
+  Vertex vertex;
+  std::array<uint8_t, 72> padding;
+};
+
+struct NarrowVertex
+{
+  Vertex vertex;
+  std::array<uint8_t, 8> padding;
+};
+
+static_assert(sizeof(WideVertex) == 88, "wide fixture vertex must retain its programmable stride");
+static_assert(sizeof(NarrowVertex) == 24,
+              "narrow fixture vertex must retain its programmable stride");
+
+constexpr NSUInteger WideVertexOffset = 176;
+constexpr NSUInteger NarrowVertexOffset = 512;
+
 struct Uniforms
 {
   vector_float2 offset;
@@ -62,6 +81,12 @@ struct VertexIn
   packed_float2 uv;
 };
 
+struct StageVertexIn
+{
+  float2 position [[attribute(0)]];
+  float2 uv [[attribute(1)]];
+};
+
 struct VertexOut
 {
   float4 position [[position]];
@@ -75,13 +100,12 @@ struct Uniforms
   float2 padding;
 };
 
-vertex VertexOut fixtureVertex(uint vertexID [[vertex_id]],
-                               const device VertexIn *vertices [[buffer(0)]],
+vertex VertexOut fixtureVertex(StageVertexIn vertexIn [[stage_in]],
                                constant Uniforms &uniforms [[buffer(1)]])
 {
   VertexOut out;
-  out.position = float4(float2(vertices[vertexID].position) + uniforms.offset, 0.25, 1.0);
-  out.uv = vertices[vertexID].uv;
+  out.position = float4(vertexIn.position + uniforms.offset, 0.25, 1.0);
+  out.uv = vertexIn.uv;
   out.depth = 0.25;
   return out;
 }
@@ -105,12 +129,11 @@ kernel void fixtureCompute(texture2d<float, access::write> output [[texture(0)]]
                          : float4(1.0, 0.5, 0.125, 1.0), gid);
 }
 
-vertex VertexOut presentVertex(uint vertexID [[vertex_id]],
-                               const device VertexIn *vertices [[buffer(0)]])
+vertex VertexOut presentVertex(StageVertexIn vertexIn [[stage_in]])
 {
   VertexOut out;
-  out.position = float4(vertices[vertexID].position, 0.0, 1.0);
-  out.uv = vertices[vertexID].uv;
+  out.position = float4(vertexIn.position, 0.0, 1.0);
+  out.uv = vertexIn.uv;
   out.depth = 0.0;
   return out;
 }
@@ -142,14 +165,32 @@ bool TriggerRenderDocCapture()
 
 id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> library,
                                         NSString *label, NSString *vertexName, NSString *fragmentName,
-                                        MTLPixelFormat colorFormat, MTLPixelFormat depthFormat)
+                                        MTLPixelFormat colorFormat, MTLPixelFormat depthFormat,
+                                        NSUInteger vertexStride, BOOL blending)
 {
   MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
   descriptor.label = label;
   descriptor.vertexFunction = [library newFunctionWithName:vertexName];
   descriptor.fragmentFunction = [library newFunctionWithName:fragmentName];
   descriptor.colorAttachments[0].pixelFormat = colorFormat;
+  descriptor.colorAttachments[0].blendingEnabled = blending;
+  descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+  descriptor.colorAttachments[0].destinationRGBBlendFactor =
+      MTLBlendFactorOneMinusSourceAlpha;
+  descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+  descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+  descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorZero;
+  descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+  descriptor.colorAttachments[0].writeMask = MTLColorWriteMaskAll;
   descriptor.depthAttachmentPixelFormat = depthFormat;
+  descriptor.vertexDescriptor.attributes[0].format = MTLVertexFormatFloat2;
+  descriptor.vertexDescriptor.attributes[0].offset = 0;
+  descriptor.vertexDescriptor.attributes[0].bufferIndex = 12;
+  descriptor.vertexDescriptor.attributes[1].format = MTLVertexFormatFloat2;
+  descriptor.vertexDescriptor.attributes[1].offset = sizeof(vector_float2);
+  descriptor.vertexDescriptor.attributes[1].bufferIndex = 12;
+  descriptor.vertexDescriptor.layouts[12].stride = vertexStride;
+  descriptor.vertexDescriptor.layouts[12].stepFunction = MTLVertexStepFunctionPerVertex;
 
   NSError *error = nil;
   id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:descriptor
@@ -231,10 +272,12 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
 
   _offscreenPipeline =
       MakePipeline(_device, library, @"Fixture Offscreen Pipeline", @"fixtureVertex",
-                   @"fixtureFragment", MTLPixelFormatRGBA8Unorm, MTLPixelFormatDepth32Float);
+                   @"fixtureFragment", MTLPixelFormatRGBA8Unorm, MTLPixelFormatDepth32Float,
+                   sizeof(WideVertex), YES);
   _presentPipeline =
       MakePipeline(_device, library, @"Fixture Present Pipeline", @"presentVertex",
-                   @"presentFragment", MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid);
+                   @"presentFragment", MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid,
+                   sizeof(NarrowVertex), NO);
   if(_offscreenPipeline == nil || _presentPipeline == nil)
     return nil;
 
@@ -272,10 +315,25 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
   }};
   const std::array<uint16_t, 6> indices = {{3, 4, 5, 3, 5, 6}};
 
-  _vertexBuffer = [_device newBufferWithBytes:vertices.data()
-                                       length:sizeof(vertices)
+  std::array<uint8_t, 1024> sharedVertexBytes = {};
+  for(size_t i = 0; i < 3; i++)
+  {
+    WideVertex wide = {};
+    wide.vertex = vertices[i];
+    std::memcpy(sharedVertexBytes.data() + WideVertexOffset + i * sizeof(WideVertex), &wide,
+                sizeof(wide));
+  }
+  for(size_t i = 0; i < vertices.size(); i++)
+  {
+    NarrowVertex narrow = {};
+    narrow.vertex = vertices[i];
+    std::memcpy(sharedVertexBytes.data() + NarrowVertexOffset + i * sizeof(NarrowVertex), &narrow,
+                sizeof(narrow));
+  }
+  _vertexBuffer = [_device newBufferWithBytes:sharedVertexBytes.data()
+                                       length:sharedVertexBytes.size()
                                       options:MTLResourceStorageModeShared];
-  _vertexBuffer.label = @"Fixture Vertex Buffer";
+  _vertexBuffer.label = @"Fixture Shared 88-byte and 24-byte Vertex Buffer";
   _indexBuffer = [_device newBufferWithBytes:indices.data()
                                       length:sizeof(indices)
                                      options:MTLResourceStorageModeShared];
@@ -565,11 +623,13 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
     [offscreen setDepthClipMode:MTLDepthClipModeClip];
     [offscreen setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
     [offscreen setTriangleFillMode:MTLTriangleFillModeFill];
+    [offscreen setBlendColorRed:0.1f green:0.2f blue:0.3f alpha:0.4f];
     [offscreen setStencilReferenceValue:0];
     [offscreen setVertexBytes:fixtureVertexInline length:sizeof(fixtureVertexInline) atIndex:7];
     [offscreen setRenderPipelineState:_offscreenPipeline];
     [offscreen setDepthStencilState:_depthState];
-    [offscreen setVertexBuffer:_vertexBuffer offset:0 atIndex:0];
+    [offscreen setVertexBuffer:_vertexBuffer offset:0 atIndex:12];
+    [offscreen setVertexBufferOffset:WideVertexOffset atIndex:12];
     [offscreen setVertexBuffer:_dynamicBuffer offset:0 atIndex:1];
     [offscreen setFragmentTexture:_sampledTextureView atIndex:0];
     [offscreen setFragmentTexture:_privateBCTexture atIndex:1];
@@ -586,6 +646,8 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
     [offscreen setFragmentBytes:&inlineTint length:sizeof(inlineTint) atIndex:2];
     [offscreen pushDebugGroup:@"Fixture Direct Draw"];
     [offscreen drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [offscreen setColorStoreAction:MTLStoreActionStore atIndex:0];
+    [offscreen setDepthStoreAction:MTLStoreActionStore];
     [offscreen updateFence:_frameFence afterStages:MTLRenderStageVertex | MTLRenderStageFragment];
     [offscreen popDebugGroup];
     [offscreen popDebugGroup];
@@ -603,7 +665,11 @@ id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> lib
     [present pushDebugGroup:@"Sample Offscreen Texture And Present"];
     [present waitForFence:_frameFence beforeStages:MTLRenderStageVertex | MTLRenderStageFragment];
     [present setRenderPipelineState:_presentPipeline];
-    [present setVertexBuffer:_vertexBuffer offset:0 atIndex:0];
+    const id<MTLBuffer> presentVertexBuffers[] = {_vertexBuffer};
+    const NSUInteger presentVertexOffsets[] = {NarrowVertexOffset};
+    [present setVertexBuffers:presentVertexBuffers
+                      offsets:presentVertexOffsets
+                    withRange:NSMakeRange(12, 1)];
     [present setFragmentTexture:_offscreenTexture atIndex:0];
     [present setFragmentSamplerState:_sampler atIndex:0];
     [present pushDebugGroup:@"Fixture Indexed Draw"];
